@@ -5,7 +5,7 @@
 
 use std::fmt::Write as _;
 
-use crate::store::{TargetState, TargetTimeline, TimelineSegment};
+use crate::store::{DownEpisode, TargetState, TargetTimeline, TimelineSegment};
 use crate::time::format_rfc3339;
 
 const WIDTH: f64 = 1000.0;
@@ -24,13 +24,20 @@ pub(crate) const STYLE: &str = r#"
   h1 { font-size: 20px; margin: 0 0 4px; }
   .hint { margin: 0 0 16px; opacity: 0.7; }
   .window { margin: 0 0 8px; font-variant-numeric: tabular-nums; }
-  #chart { user-select: none; touch-action: none; cursor: grab; }
-  #chart svg { width: 100%; height: auto; display: block; }
-  #chart a:hover text { text-decoration: underline; }
+  svg { width: 100%; height: auto; display: block; }
+  a:hover text { text-decoration: underline; }
   .legend { display: flex; gap: 16px; margin-top: 12px; opacity: 0.8; }
   .legend span { display: inline-flex; align-items: center; gap: 6px; }
   .swatch { width: 14px; height: 10px; border-radius: 2px; display: inline-block; }
+  h2 { font-size: 15px; margin: 28px 0 8px; }
+  table { border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 3px 20px 3px 0; }
+  th { font-weight: 600; opacity: 0.7; border-bottom: 1px solid #e6e6e6; }
+  td.down { color: #c62828; }
 "#;
+
+/// How often the browser reloads a page by itself.
+pub(crate) const REFRESH_SECONDS: u32 = 30;
 
 const TICK_STEPS_MS: [i64; 10] = [
     60_000,
@@ -64,11 +71,11 @@ impl Window {
     }
 }
 
-/// The full page, including the interactive chart.
-pub fn page(timelines: &[TargetTimeline], window: Window) -> String {
+/// The full page: the chart, the legend, the last disconnections, and the script that
+/// follows a lane link.
+pub fn page(timelines: &[TargetTimeline], downs: &[DownEpisode], window: Window) -> String {
     let body = chart(timelines, window);
-    let from = window.from_ms;
-    let to = window.to_ms;
+    let downs = downs_table(downs, window.to_ms);
 
     format!(
         r#"<!doctype html>
@@ -76,115 +83,76 @@ pub fn page(timelines: &[TargetTimeline], window: Window) -> String {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="{REFRESH_SECONDS}">
 <title>network-monitor</title>
 <style>{STYLE}</style>
 </head>
 <body>
 <main>
 <h1>network-monitor</h1>
-<p class="hint">Wheel to zoom, drag to pan, double-click to reset to 24 h. Times are UTC.</p>
+<p class="hint">Times are UTC. The page reloads every {REFRESH_SECONDS} s; select a lane for
+its last 30 days.</p>
 <div id="chart">{body}</div>
 <div class="legend">
   <span><i class="swatch" style="background:#2e7d32"></i>up</span>
   <span><i class="swatch" style="background:#c62828"></i>down</span>
   <span><i class="swatch" style="background:#bdbdbd"></i>unknown</span>
 </div>
+{downs}
 </main>
 <script>
-const chart = document.getElementById('chart');
-const LABEL = {LABEL_WIDTH};
-const TRACK = {WIDTH} - {LABEL_WIDTH} - {STATS_WIDTH};
-const MIN_SPAN = 5 * 60 * 1000;
-const MAX_SPAN = 30 * 86400 * 1000;
-let from = {from};
-let to = {to};
-
-function clampWindow(start, end) {{
-  const now = Date.now();
-  end = Math.min(end, now);
-  if (end - start < MIN_SPAN) start = end - MIN_SPAN;
-  if (end - start > MAX_SPAN) start = end - MAX_SPAN;
-  if (start < 0) start = 0;
-  return [Math.round(start), Math.round(end)];
-}}
-
-async function load(start, end) {{
-  [start, end] = clampWindow(start, end);
-  const response = await fetch('/?from=' + start + '&to=' + end + '&partial=1', {{ cache: 'no-store' }});
-  if (!response.ok) return;
-  chart.innerHTML = await response.text();
-  from = start;
-  to = end;
-  history.replaceState(null, '', '/?from=' + start + '&to=' + end);
-}}
-
-chart.addEventListener('wheel', event => {{
-  event.preventDefault();
-  const box = chart.getBoundingClientRect();
-  const x = ((event.clientX - box.left) / box.width) * {WIDTH};
-  const fraction = Math.min(Math.max((x - LABEL) / TRACK, 0), 1);
-  const anchor = from + (to - from) * fraction;
-  const factor = event.deltaY > 0 ? 1.25 : 0.8;
-  load(anchor - (anchor - from) * factor, anchor + (to - anchor) * factor);
-}}, {{ passive: false }});
-
-let dragFrom = null;
-let dragging = false;
-let suppressClick = false;
-chart.addEventListener('click', event => {{
-  if (suppressClick) {{
-    suppressClick = false;
-    return;
-  }}
-  // Navigate from script: some engines ignore an <a href> that wraps SVG shapes.
+// Navigate from script: some engines ignore an <a href> that wraps SVG shapes.
+document.getElementById('chart').addEventListener('click', event => {{
   const link = event.target instanceof Element ? event.target.closest('a') : null;
   if (link === null) return;
   event.preventDefault();
   window.location.assign(link.getAttribute('href'));
 }}, true);
-chart.addEventListener('pointerdown', event => {{
-  dragFrom = event.clientX;
-  dragging = false;
-}});
-chart.addEventListener('pointermove', event => {{
-  // Capture only once the pointer really moved, so a plain click still opens the
-  // lane's detail page: capture would retarget the click to the chart.
-  if (dragFrom === null || dragging) return;
-  if (Math.abs(event.clientX - dragFrom) < 4) return;
-  dragging = true;
-  try {{ chart.setPointerCapture(event.pointerId); }} catch (error) {{ /* not capturable */ }}
-}});
-chart.addEventListener('pointerup', event => {{
-  if (dragFrom === null) return;
-  const moved = event.clientX - dragFrom;
-  dragFrom = null;
-  if (!dragging) return;
-  dragging = false;
-  suppressClick = true;
-  const box = chart.getBoundingClientRect();
-  const shift = -(moved / box.width) * (to - from);
-  load(from + shift, to + shift);
-}});
-chart.addEventListener('pointercancel', () => {{
-  dragFrom = null;
-  dragging = false;
-}});
-chart.addEventListener('dblclick', () => load(Date.now() - 86400000, Date.now()));
 </script>
 </body>
 </html>
 "#,
         body = body,
-        from = from,
-        to = to,
-        LABEL_WIDTH = LABEL_WIDTH,
-        WIDTH = WIDTH,
-        STATS_WIDTH = STATS_WIDTH,
+        downs = downs,
     )
 }
 
-/// The chart fragment: the window label plus the SVG. Returned alone for zooming.
-pub fn chart(timelines: &[TargetTimeline], window: Window) -> String {
+/// The last disconnections, newest first, with how long each one lasted.
+fn downs_table(downs: &[DownEpisode], now_ms: i64) -> String {
+    let mut output = String::from(
+        "<h2>Last 10 disconnections</h2>\n<table>\n\
+         <thead><tr><th>target</th><th>started (UTC)</th><th>lasted</th></tr></thead>\n\
+         <tbody>\n",
+    );
+
+    if downs.is_empty() {
+        output.push_str("<tr><td colspan=\"3\">No disconnection recorded yet.</td></tr>\n");
+    }
+
+    for episode in downs {
+        let started = format_rfc3339(episode.started_at_ms);
+        let (lasted, ongoing) = match episode.ended_at_ms {
+            Some(end) => (format_span(end - episode.started_at_ms), false),
+            None => (format_span(now_ms - episode.started_at_ms), true),
+        };
+        let _ = writeln!(
+            output,
+            "<tr><td>{}</td><td>{} {}</td><td{}>{}{}</td></tr>",
+            escape(&episode.target),
+            &started[5..10],
+            &started[11..19],
+            if ongoing { " class=\"down\"" } else { "" },
+            lasted,
+            if ongoing { " and counting" } else { "" }
+        );
+    }
+
+    output.push_str("</tbody>\n</table>");
+    output
+}
+
+/// The window label plus the SVG.
+fn chart(timelines: &[TargetTimeline], window: Window) -> String {
     let mut output = String::new();
     let _ = write!(
         output,
@@ -461,17 +429,66 @@ mod tests {
     }
 
     #[test]
-    fn the_page_contains_the_zoom_handlers() {
+    fn the_last_disconnections_are_listed_with_their_duration() {
+        let downs = [
+            DownEpisode {
+                target: "1.1.1.1".to_string(),
+                started_at_ms: 7_000_000,
+                ended_at_ms: None,
+            },
+            DownEpisode {
+                target: "8.8.8.8".to_string(),
+                started_at_ms: 3_600_000,
+                ended_at_ms: Some(4_320_000),
+            },
+        ];
         let window = Window {
             from_ms: 0,
             to_ms: 7_200_000,
         };
-        let rendered = page(&[timeline()], window);
+        let rendered = page(&[timeline()], &downs, window);
+        assert!(rendered.contains("Last 10 disconnections"));
+        assert!(rendered.contains("12m"), "720 s down");
+        assert!(
+            rendered.contains("and counting"),
+            "still down at the window end"
+        );
+        assert!(rendered.contains("8.8.8.8"));
+    }
+
+    #[test]
+    fn a_quiet_history_says_so() {
+        let window = Window {
+            from_ms: 0,
+            to_ms: 7_200_000,
+        };
+        let rendered = page(&[timeline()], &[], window);
+        assert!(rendered.contains("No disconnection recorded yet."));
+    }
+
+    #[test]
+    fn the_page_reloads_itself_and_keeps_only_the_lane_script() {
+        let window = Window {
+            from_ms: 0,
+            to_ms: 7_200_000,
+        };
+        let rendered = page(&[timeline()], &[], window);
         assert!(rendered.starts_with("<!doctype html>"));
-        assert!(rendered.contains("wheel"));
-        assert!(rendered.contains("pointerup"));
-        assert!(rendered.contains("dblclick"));
-        assert!(rendered.contains("partial=1"));
+        assert!(rendered.contains("<meta http-equiv=\"refresh\" content=\"30\">"));
+        assert!(!rendered.contains("wheel"), "no zoom");
+        assert!(!rendered.contains("pointerdown"), "no pan");
+        assert!(!rendered.contains("fetch("));
+    }
+
+    #[test]
+    fn a_lane_can_be_opened() {
+        let window = Window {
+            from_ms: 0,
+            to_ms: 7_200_000,
+        };
+        let rendered = page(&[timeline()], &[], window);
+        assert!(rendered.contains("closest('a')"));
+        assert!(rendered.contains("href=\"/target?target=1.1.1.1\""));
     }
 
     #[test]

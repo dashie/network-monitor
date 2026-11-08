@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 use crate::store::{DailyDrops, TargetStateRow};
 use crate::time::format_rfc3339;
 
-use super::page::{escape, STYLE};
+use super::page::{escape, REFRESH_SECONDS, STYLE};
 
 const WIDTH: f64 = 1000.0;
 const HEIGHT: f64 = 300.0;
@@ -48,21 +48,23 @@ pub fn target_page(target: &TargetStateRow, days: &[DailyDrops]) -> String {
 
 fn layout(title: &str, body: &str) -> String {
     format!(
-        "<!doctype html>\n\
-         <html lang=\"en\">\n\
-         <head>\n\
-         <meta charset=\"utf-8\">\n\
-         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         <title>{}</title>\n\
-         <style>{STYLE}</style>\n\
-         </head>\n\
-         <body>\n\
-         <main>\n\
-         {body}\n\
-         </main>\n\
-         </body>\n\
-         </html>\n",
-        escape(title),
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="{REFRESH_SECONDS}">
+<title>{title}</title>
+<style>{STYLE}</style>
+</head>
+<body>
+<main>
+{body}
+</main>
+</body>
+</html>
+"#,
+        title = escape(title),
     )
 }
 

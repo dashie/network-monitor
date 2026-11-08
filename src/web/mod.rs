@@ -28,6 +28,8 @@ const DAY_MS: i64 = 86_400_000;
 const MIN_SPAN_MS: i64 = 5 * 60_000;
 const MAX_SPAN_MS: i64 = 30 * DAY_MS;
 const MAX_CONNECTIONS: usize = 32;
+/// How many disconnections the timeline page lists below the chart.
+const RECENT_DOWNS: u32 = 10;
 
 #[derive(Debug, Error)]
 pub enum ServeError {
@@ -179,11 +181,15 @@ fn handle(mut stream: TcpStream, database: &Path) {
                 }
             };
 
-            let body = if params.partial {
-                page::chart(&timelines, window)
-            } else {
-                page::page(&timelines, window)
+            let downs = match store.recent_downs(RECENT_DOWNS) {
+                Ok(downs) => downs,
+                Err(error) => {
+                    query_failed(&mut stream, &error, include_body);
+                    return;
+                }
             };
+
+            let body = page::page(&timelines, &downs, window);
             respond(
                 &mut stream,
                 200,
@@ -324,7 +330,6 @@ fn respond(
 struct Params {
     from: Option<i64>,
     to: Option<i64>,
-    partial: bool,
     target: Option<String>,
 }
 
@@ -338,7 +343,6 @@ fn parse_query(query: &str) -> Params {
         match key {
             "from" => params.from = value.parse().ok(),
             "to" => params.to = value.parse().ok(),
-            "partial" => params.partial = value == "1" || value == "true",
             "target" => params.target = Some(decode(value)),
             _ => {}
         }
@@ -439,13 +443,24 @@ mod tests {
 
     #[test]
     fn the_query_is_parsed_leniently() {
-        let params = parse_query("from=10&to=20&partial=1&junk&x=y");
+        let params = parse_query("from=10&to=20&junk&x=y");
         assert_eq!(params.from, Some(10));
         assert_eq!(params.to, Some(20));
-        assert!(params.partial);
 
         let broken = parse_query("from=abc");
         assert_eq!(broken.from, None);
-        assert!(!broken.partial);
+    }
+
+    #[test]
+    fn a_target_is_decoded_from_the_query() {
+        assert_eq!(
+            parse_query("target=1.1.1.1").target.as_deref(),
+            Some("1.1.1.1")
+        );
+        assert_eq!(
+            parse_query("target=my%2Dnas").target.as_deref(),
+            Some("my-nas")
+        );
+        assert_eq!(parse_query("target=a+b").target.as_deref(), Some("a b"));
     }
 }

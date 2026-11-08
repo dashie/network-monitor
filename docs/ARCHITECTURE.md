@@ -69,7 +69,7 @@ Trust boundaries: the database file is written only by the `monitor` process and
 - **Thread per target, shared store.** Each target runs its own interval loop; transitions are serialized through one SQLite writer connection, guarded by a mutex.
 - **WAL for concurrent reads.** `journal_mode = WAL` with `synchronous = NORMAL` and a 5 s `busy_timeout` lets the query process read while the monitor writes.
 - **Supervised reload.** The supervisor owns the set of workers and compares the configuration file content once per second. A valid change restarts the workers with the new target list, interval, and timeout, keeps the database it already opened, and logs one `INFO` line.
-- **Read-only page generated server-side.** `web` answers `/` with HTML and SVG built in Rust from the same timeline query the CLI uses, and `/target` with one bar per day for a single target. One small HTTP/1.1 loop, no framework, no client-side chart library: the browser only asks for another window. The same code serves while the monitor runs (`monitor --listen`) and without probing (`serve`), so a page and the recording share one process when both are wanted.
+- **Read-only page generated server-side.** `web` answers `/` with HTML and SVG built in Rust from the same timeline query the CLI uses, and `/target` with one bar per day for a single target. One small HTTP/1.1 loop, no framework, no client-side chart library and no client-side chart state: the browser reloads the page every 30 s and asks for nothing else. The same code serves while the monitor runs (`monitor --listen`) and without probing (`serve`), so a page and the recording share one process when both are wanted.
 
 <!-- skill:block:arch-principles section="## 4. Solution strategy" -->
 ### Architecture principles
@@ -117,8 +117,8 @@ C4Container
 | `probe::interface` | Resolve an interface name to the platform handle and bind the socket to it | `bind_socket(fd, interface)` per platform |
 | `monitor` | Supervise one interval loop per target, decide whether a transition occurred, reload the configuration file, dispatch transitions to the store | `run(config, prober, store, shutdown, reload)` |
 | `reload` | Compare the configuration file with the last accepted content and report a change | `Watcher`, `Change`, `POLL_INTERVAL` |
-| `web` | Serve the read-only timeline, the zoom fragment, the per-target detail page, and a health check | `bind`, `serve`, `page`, `target_page` |
-| `store` | Own the schema, migrations, the event write transaction, retention, and the read queries | `Store`, `Event`, `TargetState`, `StoreError` |
+| `web` | Serve the read-only timeline, the per-target detail page, and a health check | `bind`, `serve`, `page`, `target_page` |
+| `store` | Own the schema, migrations, the event write transaction, retention, and the read queries | `Store`, `Event`, `TargetState`, `DownEpisode`, `StoreError` |
 | `query` | Read current state and event history, apply filters, render a table or JSON | `QueryFilter`, `Renderer` |
 
 ### Component contracts
@@ -162,7 +162,7 @@ C4Container
 ### `web`
 
 - **Input:** the database path and an optional `from`/`to`/`target` query string; a bound listener in tests.
-- **Output:** the timeline page, an SVG fragment for a zoom, the detail page of one target, a plain-text health check, or a plain-text error.
+- **Output:** the timeline page with the last 10 disconnections, the detail page of one target, a plain-text health check, or a plain-text error.
 - **Guarantees:** every request opens the database read-only; only `GET` and `HEAD` are answered; dynamic text is HTML-escaped; the window is clamped to the last 30 days and never past now; nothing is written, and the socket exists only while the process that bound it runs.
 
 ### Data model

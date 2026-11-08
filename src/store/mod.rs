@@ -117,6 +117,16 @@ pub struct DailyDrops {
     pub drops: u32,
 }
 
+/// One disconnection: the moment a target went down and, if it came back, the moment
+/// it did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownEpisode {
+    pub target: String,
+    pub started_at_ms: i64,
+    /// `None` while the target is still down.
+    pub ended_at_ms: Option<i64>,
+}
+
 const DAY_MS: i64 = 86_400_000;
 
 /// Turn a starting state and the transitions of a window into segments that cover
@@ -497,6 +507,30 @@ impl Store {
         Ok(days)
     }
 
+    /// The most recent disconnections of every target, newest first.
+    pub fn recent_downs(&self, limit: u32) -> Result<Vec<DownEpisode>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT e.target, e.occurred_at_ms,
+                    (SELECT MIN(n.occurred_at_ms) FROM events n
+                      WHERE n.target = e.target AND n.occurred_at_ms > e.occurred_at_ms)
+             FROM events e
+             WHERE e.state = 'down'
+             ORDER BY e.occurred_at_ms DESC, e.id DESC
+             LIMIT ?1",
+        )?;
+
+        let rows = statement
+            .query_map(params![limit], |row| {
+                Ok(DownEpisode {
+                    target: row.get(0)?,
+                    started_at_ms: row.get(1)?,
+                    ended_at_ms: row.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// State of every target over the window, as segments that cover it exactly.
     pub fn timeline(&self, from_ms: i64, to_ms: i64) -> Result<Vec<TargetTimeline>, StoreError> {
         if to_ms <= from_ms {
@@ -813,6 +847,38 @@ mod tests {
         assert_eq!(days[0].drops, 2);
         assert_eq!(days[1].drops, 1);
         assert_eq!(days[2].drops, 0);
+    }
+
+    #[test]
+    fn recent_downs_are_newest_first_and_keep_the_open_one() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        store
+            .record_transition(&event(
+                "1.1.1.1",
+                TargetState::Unknown,
+                TargetState::Up,
+                1_000,
+            ))
+            .unwrap();
+        store
+            .record_transition(&event("1.1.1.1", TargetState::Up, TargetState::Down, 2_000))
+            .unwrap();
+        store
+            .record_transition(&event("1.1.1.1", TargetState::Down, TargetState::Up, 5_000))
+            .unwrap();
+        store
+            .record_transition(&event("1.1.1.1", TargetState::Up, TargetState::Down, 9_000))
+            .unwrap();
+
+        let downs = store.recent_downs(10).unwrap();
+        assert_eq!(downs.len(), 2);
+        assert_eq!(downs[0].started_at_ms, 9_000);
+        assert_eq!(downs[0].ended_at_ms, None, "the target is still down");
+        assert_eq!(downs[1].started_at_ms, 2_000);
+        assert_eq!(downs[1].ended_at_ms, Some(5_000));
+
+        assert_eq!(store.recent_downs(1).unwrap().len(), 1);
     }
 
     #[test]

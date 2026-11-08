@@ -73,7 +73,7 @@ network-monitor/
 │   ├── reload.rs             configuration reload, invalid file, database change
 │   ├── store.rs              schema, concurrent read, retention, labels
 │   ├── cli.rs                exit codes and query output
-│   ├── web.rs                page, zoom fragment, errors, no writes
+│   ├── web.rs                page, disconnection table, detail page, no writes
 │   └── icmp_privileged.rs    real raw-socket probe, ignored unless root
 ├── docs/                 product, architecture, decisions, glossary, developer guide
 ├── .github/              commit and pull request instruction contracts

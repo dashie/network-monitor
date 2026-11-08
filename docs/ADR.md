@@ -21,6 +21,7 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0007 | Reload the configuration file while monitoring runs | accepted | 2026-11-08 | Poll the file every second and apply a valid change without a restart |
 | ADR-0008 | Serve a read-only web page from the binary | accepted | 2026-11-09 | Minimal HTTP and server-side SVG; no framework and no client library |
 | ADR-0009 | Serve the page from the monitoring process | accepted | 2026-11-09 | `monitor --listen` runs the same `web` component; one process records and shows |
+| ADR-0010 | Render the timeline without client-side interaction | accepted | 2026-11-09 | Fixed window, 30 s meta refresh, no zoom; last 10 disconnections listed |
 
 ## Records
 
@@ -265,3 +266,33 @@ Selecting a lane opens `/target?target=…`, which resolves an address or a labe
 - A configuration key for the address: rejected, a page is not configuration of the monitored targets, and it would invite a controller to move the listener by accident.
 - A JSON API with a client-side chart: rejected for the reasons in ADR-0008, and it would add a second contract to keep stable.
 - A separate `stats` subcommand for the numbers: rejected, the numbers belong next to the bands they describe.
+
+## ADR-0010 — Render the timeline without client-side interaction
+
+**Status:** accepted · **Date:** 2026-11-09
+**Amends:** ADR-0008. The page, the hand-written HTTP loop, and the server-side SVG stay; the wheel zoom, the drag pan, the double-click reset, and the fragment endpoint are removed.
+
+### Context
+
+The interactive chart was built and then rejected by the operator: the zoom did not behave reliably in practice and looked wrong on a status board. It also made the per-lane numbers depend on a stray wheel event, so the same page showed different totals depending on how it had been touched.
+
+### Decision
+
+The timeline is generated once, server-side, for a fixed window: the last 24 hours by default, or the explicit `from`/`to` of the URL. The browser reloads the page every 30 s with `<meta http-equiv="refresh">`; there is no `fetch`, no wheel handler, no pointer handling, and no fragment endpoint. A small script turns a click on a lane into a navigation to its detail page, because some engines ignore an `<a href>` that wraps SVG shapes.
+
+Below the chart the page lists the last 10 disconnections of any target — start, duration, and "and counting" for the one still open — read with `Store::recent_downs`.
+
+### Consequences
+
+- One request and one response per open page every 30 s; nothing to synchronise, nothing to break.
+- The statistics always describe the window that is drawn, with no hidden client state.
+- `/?from=…&to=…` stays available for a bookmarkable window even though no control produces it.
+- A narrower window needs a URL edit; `query events` covers the forensic case.
+- The page states the refresh interval instead of hiding it.
+
+### Alternatives considered
+
+- Keep the zoom and repair it: rejected, the feature is not wanted on a status board.
+- A JavaScript timer or a `fetch` loop instead of the meta refresh: rejected, the browser already provides the behaviour and the script would be more code to get wrong.
+- Server-sent events or WebSocket updates: rejected, a second protocol and a long-lived connection for a page read by one person.
+- A refresh interval derived from `interval_ms`: rejected, the page is read by a human, and 30 s is already below the attention span of a monitoring glance.

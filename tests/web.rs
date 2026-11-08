@@ -147,39 +147,34 @@ fn serves_the_page_with_a_band_per_state() {
     assert!(response.contains("#2e7d32"), "green for up");
     assert!(response.contains("#c62828"), "red for down");
     assert!(
-        response.contains("partial=1"),
-        "the page carries the zoom script"
+        response.contains("<meta http-equiv=\"refresh\" content=\"30\">"),
+        "the page reloads itself every 30 s"
+    );
+    assert!(!response.contains("wheel"), "the timeline has no zoom");
+    assert!(
+        response.contains("Last 10 disconnections"),
+        "the page lists the latest disconnections"
+    );
+    assert!(
+        response.contains("and counting"),
+        "the seeded target was down at the end of the window"
     );
 }
 
 #[test]
-fn serves_only_the_chart_when_asked_for_the_fragment() {
-    let (_directory, database) = seeded_database();
-    let server = start(&database);
-
-    let now = now_ms();
-    let (status, response) =
-        server.get(&format!("/?from={}&to={}&partial=1", now - 7_200_000, now));
-
-    assert_eq!(status, 200);
-    assert!(response.contains("<svg"));
-    assert!(!response.contains("<!doctype html>"));
-    assert!(response.contains("<p class=\"window\">"));
-}
-
-#[test]
-fn a_zoomed_window_still_shows_the_target() {
+fn a_window_can_be_requested_in_the_url() {
     let (_directory, database) = seeded_database();
     let server = start(&database);
 
     let now = now_ms();
     let (status, response) = server.get(&format!(
-        "/?from={}&to={}&partial=1",
+        "/?from={}&to={}",
         now - 3_000_000,
         now - 2_400_000
     ));
 
     assert_eq!(status, 200);
+    assert!(response.contains("<p class=\"window\">"));
     assert!(response.contains("1.1.1.1"));
 }
 
