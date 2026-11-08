@@ -148,12 +148,19 @@ pub enum ConfigError {
     NoTargets,
 }
 
+/// A configuration file that was read, together with its path.
+#[derive(Debug, Clone)]
+pub struct Loaded {
+    pub path: PathBuf,
+    pub config: FileConfig,
+}
+
 /// Load the configuration file.
 ///
 /// An explicit path must exist. Without an explicit path, `network-monitor.toml` is
 /// read when present and skipped otherwise, so a fully command-line invocation works
 /// without a file.
-pub fn load(explicit: Option<&Path>) -> Result<Option<FileConfig>, ConfigError> {
+pub fn load(explicit: Option<&Path>) -> Result<Option<Loaded>, ConfigError> {
     let path = match explicit {
         Some(path) => path.to_path_buf(),
         None => {
@@ -169,11 +176,16 @@ pub fn load(explicit: Option<&Path>) -> Result<Option<FileConfig>, ConfigError> 
         path: path.clone(),
         source,
     })?;
-    let parsed = toml::from_str::<FileConfig>(&text).map_err(|source| ConfigError::Parse {
-        path,
+    let config = parse(&text, &path)?;
+    Ok(Some(Loaded { path, config }))
+}
+
+/// Parse the content of a configuration file that was already read.
+pub fn parse(text: &str, path: &Path) -> Result<FileConfig, ConfigError> {
+    toml::from_str::<FileConfig>(text).map_err(|source| ConfigError::Parse {
+        path: path.to_path_buf(),
         source: Box::new(source),
-    })?;
-    Ok(Some(parsed))
+    })
 }
 
 impl Config {

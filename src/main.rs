@@ -50,8 +50,12 @@ fn run() -> Result<ExitCode, AppError> {
     }
 
     let overrides = cli.overrides().map_err(AppError::Invalid)?;
-    let file = config::load(cli.config.as_deref())?;
-    let settings = Config::resolve(file, overrides)?;
+    let loaded = config::load(cli.config.as_deref())?;
+    let reload = loaded.as_ref().map(|loaded| monitor::Reload {
+        path: loaded.path.clone(),
+        overrides: overrides.clone(),
+    });
+    let settings = Config::resolve(loaded.map(|loaded| loaded.config), overrides)?;
 
     if cli.show_config {
         print!("{}", settings.to_toml());
@@ -62,7 +66,7 @@ fn run() -> Result<ExitCode, AppError> {
         Some(Command::Monitor) => {
             settings.require_targets()?;
             validate_interfaces(&settings)?;
-            run_monitor(&settings)?;
+            run_monitor(&settings, reload)?;
         }
         Some(Command::Query { what }) => {
             query::run(&settings, &what)?;
@@ -87,12 +91,12 @@ fn validate_interfaces(settings: &Config) -> Result<(), AppError> {
     Ok(())
 }
 
-fn run_monitor(settings: &Config) -> Result<(), AppError> {
+fn run_monitor(settings: &Config, reload: Option<monitor::Reload>) -> Result<(), AppError> {
     let prober: Arc<dyn Probe> = Arc::new(IcmpProbe::new(settings.timeout));
     let store = Arc::new(Mutex::new(Store::open_rw(&settings.database)?));
     let stop = shutdown::Shutdown::new();
 
     shutdown::install();
-    monitor::run(settings, prober, store, &stop)?;
+    monitor::run(settings, prober, store, &stop, reload)?;
     Ok(())
 }

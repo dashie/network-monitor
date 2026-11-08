@@ -68,6 +68,7 @@ Trust boundaries: the database file is written only by the `monitor` process and
 - **Platform code isolated in one module.** Only `probe/interface` knows about `SO_BINDTODEVICE`, `IP_BOUND_IF`, and `IP_UNICAST_IF`; the rest of the code is platform-independent.
 - **Thread per target, shared store.** Each target runs its own interval loop; transitions are serialized through one SQLite writer connection, guarded by a mutex.
 - **WAL for concurrent reads.** `journal_mode = WAL` with `synchronous = NORMAL` and a 5 s `busy_timeout` lets the query process read while the monitor writes.
+- **Supervised reload.** The supervisor owns the set of workers and compares the configuration file content once per second. A valid change restarts the workers with the new target list, interval, and timeout, keeps the database it already opened, and logs one `INFO` line.
 
 <!-- skill:block:arch-principles section="## 4. Solution strategy" -->
 ### Architecture principles
@@ -113,7 +114,8 @@ C4Container
 | `config` | Load the TOML file, validate it, merge defaults, file, and overrides into one effective configuration | `Config`, `TargetSpec`, `ConfigError` |
 | `probe` | Execute one ICMP echo request for a target through an interface and classify the outcome | `Probe` trait, `Verdict`, `ProbeError` |
 | `probe::interface` | Resolve an interface name to the platform handle and bind the socket to it | `bind_socket(fd, interface)` per platform |
-| `monitor` | Run one interval loop per target, decide whether a transition occurred, dispatch it to the store | `run(config, prober, store)` |
+| `monitor` | Supervise one interval loop per target, decide whether a transition occurred, reload the configuration file, dispatch transitions to the store | `run(config, prober, store, shutdown, reload)` |
+| `reload` | Compare the configuration file with the last accepted content and report a change | `Watcher`, `Change`, `POLL_INTERVAL` |
 | `store` | Own the schema, migrations, the event write transaction, retention, and the read queries | `Store`, `Event`, `TargetState`, `StoreError` |
 | `query` | Read current state and event history, apply filters, render a table or JSON | `QueryFilter`, `Renderer` |
 
@@ -145,9 +147,15 @@ C4Container
 
 ### `monitor`
 
-- **Input:** the effective configuration, a `Probe` implementation, a `Store`.
+- **Input:** the effective configuration, a `Probe` implementation, a `Store`, a `Shutdown` handle, and optionally the path to re-read.
 - **Output:** database writes, log lines, and a process exit status.
-- **Guarantees:** at most one in-flight probe per target; a transition is written at most once per cycle; shutdown on `SIGINT` or `SIGTERM` happens between two cycles, never inside a transaction.
+- **Guarantees:** at most one in-flight probe per target; a transition is written at most once per cycle; shutdown on `SIGINT` or `SIGTERM` happens between two cycles, never inside a transaction; a reload is applied only when the new file parses and resolves to at least one target, and the database path in use never changes at runtime.
+
+### `reload`
+
+- **Input:** the path of the configuration file, polled once per second.
+- **Output:** `Change::Content(bytes)` when the file differs from the last accepted content, `Change::ReadError` once when it cannot be read.
+- **Guarantees:** the initial content is never reported as a change; identical content is not a change; a missing or unreadable file is reported once, not on every poll.
 
 ### Data model
 
@@ -250,6 +258,8 @@ The only privileged operation is opening the raw socket; the container keeps onl
 
 Three layers merged in a fixed order: built-in defaults, TOML file, command line. The result is validated once and printed by `--show-config`. Keys are stable; a removed key is a breaking change recorded in [ADR.md](./ADR.md). The annotated example lives in [README.md](../README.md#quick-start).
 
+While monitoring runs, the file is polled once per second and a valid change is applied to the interval, timeout, target list, and retention, keeping the command line overrides on top (INV-2). An unreadable, unparseable, or target-less file is rejected with a warning and the running configuration stays active (INV-9). A changed `database` is reported and takes effect only at the next start.
+
 ### Data ownership
 
 The `store` component owns the schema, the migration order, and every statement. No other component issues SQL. The `query` component uses read-only access and cannot repair, migrate, or compact a database.
@@ -278,6 +288,7 @@ See [ADR.md](./ADR.md). Decisions are recorded there and are not duplicated here
 - **Windows interface resolution.** `IP_UNICAST_IF` needs an interface index, while an operator naturally knows an adapter name. Mitigation: this version requires the numeric index and reports a configuration error otherwise; name resolution through `GetAdaptersAddresses` is the follow-up.
 - **IPv4 only.** IPv6 needs a separate socket family and link-local scope handling. Mitigation: tracked as an open question; the probe contract already returns a verdict per target, so a second probe type fits without touching the monitor.
 - **Disk sleep on NAS.** WAL checkpoints can wake sleeping disks. Mitigation: tune `wal_autocheckpoint`, run retention rarely, and keep the database on an SSD volume where possible.
+- **Partial writes while an editor saves.** A poll can read a half-written file. Mitigation: the content is parsed before use, an invalid read is rejected with a warning, and the next poll picks up the completed file.
 - **Thread per target.** At several hundred targets the thread count and the scheduling jitter grow. Mitigation: measured at 100 targets in the quality requirements; revisit beyond that.
 
 ### Technical debt
@@ -303,3 +314,4 @@ enforced or verified.
 - `INV-6`: Timestamps are stored as UTC epoch milliseconds and converted only for presentation. Enforced by the column types, verified by a store test under a non-UTC `TZ`.
 - `INV-7`: The event and the current state of a target are committed in the same transaction. Enforced by the store write function, verified by a test that interrupts the writer after `BEGIN`.
 - `INV-8`: The release binary has no dependency beyond the platform C runtime, and SQLite is compiled in. Enforced by the static build, verified by the `ldd` check in CI.
+- `INV-9`: A configuration file that cannot be read, does not parse, or resolves to no targets never changes the running configuration and never stops monitoring. Enforced by the supervisor, verified by `tests/reload.rs`.

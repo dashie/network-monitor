@@ -47,7 +47,6 @@ Probes are bound to the configured interface with the semantics of `ping -I`, th
 - Metrics export (Prometheus, OpenTelemetry) and dashboards.
 - Probe types other than ICMP echo: no TCP, UDP, HTTP, DNS, or traceroute probes.
 - IPv6 targets: the first milestone probes IPv4 only; ICMPv6 is tracked as a follow-up.
-- Hot reload of the configuration: a change requires restarting the monitor.
 - High availability, clustering, and replication of the database.
 - Windows service and macOS launchd integration as a packaged installer: the binary is shipped, the supervisor is the operator's choice.
 
@@ -71,6 +70,8 @@ belong in [ARCHITECTURE.md](./ARCHITECTURE.md).
 - `FR-13`: Invalid configuration — an unknown option, a non-positive interval or timeout, an unparseable or IPv6 address, a target listed twice, a configured interface that does not exist, or a `monitor` run without targets — aborts startup with a message naming the offending key and a non-zero exit code.
 - `FR-14`: The tool runs as a single executable with no runtime dependency, and as a container image that needs only the `NET_RAW` capability.
 - `FR-15`: Every probe cycle and every transition is observable on stderr according to `--log-level` (`error`, `warn`, `info`, `debug`), in a stable line-based format.
+
+- `FR-16`: While monitoring runs, the tool re-reads the configuration file within one second of a change and applies the new interval, timeout, target list, and retention without a restart, writing one `INFO` line that states the configuration was updated. A file that cannot be read, does not parse, or leaves no targets is rejected with a warning and the previous configuration stays in effect. A changed `database` path is reported and used only from the next start.
 
 ## Business rules
 
@@ -100,6 +101,7 @@ Rules that always hold, independent of implementation.
 | Durability | A crash loses at most the event being written; the schema stays consistent |
 | Portability | One binary per platform, no runtime dependency, no installer, no shell script in the execution path |
 | Footprint | Release binary under 15 MB, container image under 30 MB |
+| Reload latency | A change written to the configuration file is detected and applied within 2 s, without losing the last known state |
 
 ## Success metrics
 
@@ -122,7 +124,7 @@ Rules that always hold, independent of implementation.
 - Probes are privileged: the process needs `root`, `CAP_NET_RAW`, or Administrator on Windows.
 - On Windows the interface is given as a numeric interface index; resolving an adapter name is not implemented in this version.
 - The QNAP deployment path is Docker through Container Station; a native QPKG is not planned.
-- The configuration is read once at startup; changing it requires a restart.
+- The configuration file is re-read once per second while monitoring runs; a change is applied without a restart, and a changed database path still needs one.
 - Alerting is out of scope: the database is the integration point for other tools.
 - The tool name and the executable name are both `network-monitor`.
 
@@ -131,7 +133,6 @@ Rules that always hold, independent of implementation.
 - **IPv6 support** — which interface scoping rules apply to link-local addresses, and is ICMPv6 a separate probe type or the same one? Owner: maintainer.
 - **Flap damping** — should a configurable confirmation count (`down` after N consecutive failures) be added, or is one probe per cycle the contract? Owner: maintainer.
 - **Alerting hooks** — is a post-transition command hook acceptable as an escape hatch, or does it violate the no-dependency rule? Owner: maintainer.
-- **Configuration hot reload** — is a `SIGHUP` reload worth the state-machine complexity? Owner: maintainer.
 - **Multiple addresses per target** — should a label group several addresses, or is one label one address? Owner: maintainer.
 
 ## Related documents

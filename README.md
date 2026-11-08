@@ -50,7 +50,7 @@ ip = "192.168.1.1"          # no interface: the default-route interface is used
 
 ## Status
 
-**Alpha.** The feature set in [docs/PRODUCT.md](docs/PRODUCT.md) is implemented and covered by the test suite: layered configuration, ICMP probing with per-interface binding, event-only SQLite persistence, querying while monitoring runs, and retention. The container image builds and probes with only `NET_RAW` added.
+**Alpha.** The feature set in [docs/PRODUCT.md](docs/PRODUCT.md) is implemented and covered by the test suite: layered configuration with live reload, ICMP probing with per-interface binding, event-only SQLite persistence, querying while monitoring runs, and retention. The container image builds and probes with only `NET_RAW` added.
 
 Not done yet: the Windows raw-socket path is written but not exercised on a Windows host, IPv6 targets are deferred, and no binary is published as a release.
 

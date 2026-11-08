@@ -16,6 +16,7 @@ appears in a requirement, in a component name, or in a public interface.
 | **Probe cycle** | The evaluation of one target that produces one verdict. |
 | **Query** | The short-lived subcommand that reads the event database and renders it as a table or JSON. |
 | **Reachable (`up`)** | The state of a target whose probe received a matching echo reply within the timeout. |
+| **Reload** | Re-reading the configuration file while monitoring runs and applying a valid change to the interval, timeout, target list, and retention without a restart. |
 | **Retention** | The policy that deletes events older than `retention_days`; a value of `0` disables deletion. |
 | **State transition** | A change of a target's verdict between two consecutive probe cycles. |
 | **Target** | One IP address under supervision, with an optional interface and an optional label. |

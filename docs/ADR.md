@@ -18,6 +18,7 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0004 | Persist transitions only, in embedded SQLite with WAL | accepted | 2026-11-08 | Two tables, event-only writes, concurrent reads |
 | ADR-0005 | Mirror every configuration option as a command-line flag | accepted | 2026-11-08 | Precedence `cli > file > default`, effective configuration printed on demand |
 | ADR-0006 | Ship one binary with `monitor` and `query` subcommands | accepted | 2026-11-08 | Single artifact; query opens the database read-only |
+| ADR-0007 | Reload the configuration file while monitoring runs | accepted | 2026-11-08 | Poll the file every second and apply a valid change without a restart |
 
 ## Records
 
@@ -163,3 +164,34 @@ One executable with the subcommands `monitor` and `query` (plus `--show-config`)
 
 - A separate query binary: rejected, it doubles the artifacts and the release matrix.
 - An HTTP query API: rejected, it opens a listening port and an authentication surface that the product does not need.
+
+## ADR-0007 — Reload the configuration file while monitoring runs
+
+**Status:** accepted · **Date:** 2026-11-08
+**Supersedes:** the restriction to restart after a configuration change, stated in ADR-0001.
+
+### Context
+
+Operators change the target list and the probe interval on a running host, typically over SSH or by editing a mounted file. Restarting the monitor to pick the change up is an outage in the history: until the restart, transitions are not recorded.
+
+The configuration file is small, local, and edited by a human or a deployment tool.
+
+### Decision
+
+Poll the content of the configuration file once per second and compare it with the content that is currently active. When it differs, parse and resolve it through the same precedence chain as at startup (`command line > file > default`), then apply the interval, timeout, target list, and retention without restarting the process, and log one `INFO` line stating that the configuration was updated.
+
+A file that cannot be read, does not parse, or resolves to no targets is rejected with a warning and the running configuration stays in effect. A changed database path is reported and applied only at the next start, because the open connection owns the schema and the write lock.
+
+### Consequences
+
+- A change is applied within about one second, at the granularity of the poll.
+- Applying a change restarts the per-target workers. The current state is reloaded from the database, so no duplicate or spurious transition is written.
+- Retention follows the same rule but is evaluated on its hourly pass, so a new window can take up to an hour to apply.
+- The database path, the schema, and the command line overrides are never changed by a reload.
+- A half-written file is safe: it is rejected, and the next poll reads the completed content.
+
+### Alternatives considered
+
+- An OS file watcher (`inotify`, `kqueue`, Windows change notifications): rejected, it adds a dependency and platform-specific edge cases for a file read that costs microseconds once per second.
+- A `SIGHUP` reload: rejected as the primary mechanism, because it requires the operator to remember a signal and does not work when the file is edited by a controller; it also cannot be exercised in a container without `docker kill -s HUP`.
+- A restart: rejected, it interrupts the recording of transitions for the time of the restart.

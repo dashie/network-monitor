@@ -44,7 +44,7 @@ fn the_monitor_records_only_transitions() {
     ]));
     let store = Arc::new(Mutex::new(Store::open_rw(&database).unwrap()));
 
-    let handle = thread::spawn(move || monitor::run(&config, prober, store, &running));
+    let handle = thread::spawn(move || monitor::run(&config, prober, store, &running, None));
 
     wait_for_events(&expected, 3, Duration::from_secs(5));
     stop.request();
@@ -76,7 +76,7 @@ fn a_restart_continues_from_the_stored_state() {
     let first = test_config(&database);
     let prober: Arc<dyn Probe> = Arc::new(FakeProbe::always(up()));
     let store = Arc::new(Mutex::new(Store::open_rw(&database).unwrap()));
-    let handle = thread::spawn(move || monitor::run(&first, prober, store, &running));
+    let handle = thread::spawn(move || monitor::run(&first, prober, store, &running, None));
     wait_for_events(&expected, 1, Duration::from_secs(5));
     stop.request();
     handle.join().unwrap().unwrap();
@@ -86,7 +86,7 @@ fn a_restart_continues_from_the_stored_state() {
     let second = test_config(&database);
     let prober: Arc<dyn Probe> = Arc::new(FakeProbe::always(Verdict::Down));
     let store = Arc::new(Mutex::new(Store::open_rw(&database).unwrap()));
-    let handle = thread::spawn(move || monitor::run(&second, prober, store, &running));
+    let handle = thread::spawn(move || monitor::run(&second, prober, store, &running, None));
     wait_for_events(&expected, 2, Duration::from_secs(5));
     stop.request();
     handle.join().unwrap().unwrap();

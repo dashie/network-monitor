@@ -10,6 +10,7 @@ pub mod logging;
 pub mod monitor;
 pub mod probe;
 pub mod query;
+pub mod reload;
 pub mod shutdown;
 pub mod store;
 pub mod time;

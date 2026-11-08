@@ -45,6 +45,7 @@ network-monitor/
 │   ├── cli.rs            command-line surface, one flag per configuration key
 │   ├── config.rs         defaults, TOML loading, precedence, validation
 │   ├── logging.rs        line-based diagnostics on stderr
+│   ├── reload.rs         configuration file watcher
 │   ├── shutdown.rs       stop handle and signal handler
 │   ├── time.rs           epoch milliseconds and RFC 3339 rendering
 │   ├── monitor/
@@ -64,6 +65,7 @@ network-monitor/
 ├── tests/
 │   ├── config_precedence.rs  every key, file and flag, in both directions
 │   ├── monitor_e2e.rs        end-to-end loop, transitions only, restart continuity
+│   ├── reload.rs             configuration reload, invalid file, database change
 │   ├── store.rs              schema, concurrent read, retention, labels
 │   ├── cli.rs                exit codes and query output
 │   └── icmp_privileged.rs    real raw-socket probe, ignored unless root
@@ -94,6 +96,7 @@ cargo run -- --show-config --config ./network-monitor.toml
 ```bash
 cargo test
 cargo test --test monitor_e2e
+cargo test --test reload
 cargo test --test store
 ```
 
@@ -124,8 +127,9 @@ cargo clippy --all-targets -- -D warnings
 1. Add the field to `Config` with its default expressed in `Default`.
 2. Add the matching `clap` argument in `cli.rs`; there is no option without a flag (INV-2).
 3. Apply the merge in `config.rs`, which is the only place that knows the precedence order.
-4. Document the key in `network-monitor.toml`, in the README example, and in [PRODUCT.md](./PRODUCT.md) when it changes behaviour.
-5. Test three cases: value from the file only, value from the flag only, flag overriding the file.
+4. Decide whether the value applies to a running monitor: if it does, apply it in `Supervisor::apply` and cover it in `tests/reload.rs`; if it needs a restart, warn there instead.
+5. Document the key in `network-monitor.toml`, in the README example, and in [PRODUCT.md](./PRODUCT.md) when it changes behaviour.
+6. Test three cases: value from the file only, value from the flag only, flag overriding the file.
 
 ### Adding a probe type
 

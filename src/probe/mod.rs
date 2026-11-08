@@ -43,6 +43,10 @@ impl ProbeError {
 /// One ICMP echo request, executed through an optional interface.
 pub trait Probe: Send + Sync {
     fn probe(&self, target: Ipv4Addr, interface: Option<&str>) -> Result<Verdict, ProbeError>;
+
+    /// Change the timeout used by subsequent probes. The default does nothing, so a
+    /// fake stays a fake.
+    fn set_timeout(&self, _timeout: Duration) {}
 }
 
 pub use icmp::IcmpProbe;

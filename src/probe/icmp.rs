@@ -6,7 +6,7 @@
 //! localised `ping` output (ADR-0003).
 
 use std::net::Ipv4Addr;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::time::Duration;
 
 use super::{Probe, ProbeError, Verdict};
@@ -18,23 +18,32 @@ fn identifier() -> u16 {
 
 /// Raw ICMP echo prober.
 pub struct IcmpProbe {
-    timeout: Duration,
+    timeout_micros: AtomicU64,
     sequence: AtomicU16,
 }
 
 impl IcmpProbe {
     pub fn new(timeout: Duration) -> Self {
         IcmpProbe {
-            timeout,
+            timeout_micros: AtomicU64::new(timeout.as_micros() as u64),
             sequence: AtomicU16::new(1),
         }
+    }
+
+    fn timeout(&self) -> Duration {
+        Duration::from_micros(self.timeout_micros.load(Ordering::Relaxed))
     }
 }
 
 impl Probe for IcmpProbe {
     fn probe(&self, target: Ipv4Addr, interface: Option<&str>) -> Result<Verdict, ProbeError> {
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
-        exchange(target, interface, self.timeout, identifier(), sequence)
+        exchange(target, interface, self.timeout(), identifier(), sequence)
+    }
+
+    fn set_timeout(&self, timeout: Duration) {
+        self.timeout_micros
+            .store(timeout.as_micros() as u64, Ordering::Relaxed);
     }
 }
 
