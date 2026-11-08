@@ -15,6 +15,7 @@ use network_monitor::probe::{IcmpProbe, Probe};
 use network_monitor::query::{self, QueryError};
 use network_monitor::shutdown;
 use network_monitor::store::{Store, StoreError};
+use network_monitor::web::{self, ServeError};
 
 fn main() -> ExitCode {
     match run() {
@@ -36,6 +37,8 @@ enum AppError {
     Query(#[from] QueryError),
     #[error("{0}")]
     Monitor(#[from] RunError),
+    #[error("{0}")]
+    Serve(#[from] ServeError),
     #[error("{0}")]
     Invalid(String),
 }
@@ -63,10 +66,15 @@ fn run() -> Result<ExitCode, AppError> {
     }
 
     match cli.command {
-        Some(Command::Monitor) => {
+        Some(Command::Monitor { listen }) => {
             settings.require_targets()?;
             validate_interfaces(&settings)?;
-            run_monitor(&settings, reload)?;
+            run_monitor(&settings, reload, listen)?;
+        }
+        Some(Command::Serve { listen }) => {
+            let stop = shutdown::Shutdown::new();
+            shutdown::install();
+            web::run(&settings.database, &listen, &stop)?;
         }
         Some(Command::Query { what }) => {
             query::run(&settings, &what)?;
@@ -91,12 +99,40 @@ fn validate_interfaces(settings: &Config) -> Result<(), AppError> {
     Ok(())
 }
 
-fn run_monitor(settings: &Config, reload: Option<monitor::Reload>) -> Result<(), AppError> {
+fn run_monitor(
+    settings: &Config,
+    reload: Option<monitor::Reload>,
+    listen: Option<String>,
+) -> Result<(), AppError> {
     let prober: Arc<dyn Probe> = Arc::new(IcmpProbe::new(settings.timeout));
     let store = Arc::new(Mutex::new(Store::open_rw(&settings.database)?));
     let stop = shutdown::Shutdown::new();
 
     shutdown::install();
-    monitor::run(settings, prober, store, &stop, reload)?;
+
+    // Bind before the first probe: an unusable address must fail at once, not after
+    // the monitor has been running for a while.
+    let web_thread = match listen {
+        Some(address) => {
+            let listener = web::bind(&address)?;
+            let database = settings.database.clone();
+            let web_stop = stop.clone();
+            Some(std::thread::spawn(move || {
+                if let Err(error) = web::serve(listener, &database, &web_stop) {
+                    logging::error(None, &format!("web interface failed: {error}"));
+                }
+            }))
+        }
+        None => None,
+    };
+
+    let outcome = monitor::run(settings, prober, store, &stop, reload);
+
+    if let Some(thread) = web_thread {
+        stop.request();
+        let _ = thread.join();
+    }
+
+    outcome?;
     Ok(())
 }

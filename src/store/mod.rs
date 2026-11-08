@@ -86,6 +86,79 @@ pub struct EventFilter {
     pub limit: Option<u32>,
 }
 
+/// One interval of constant state on a timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimelineSegment {
+    pub state: TargetState,
+    pub from_ms: i64,
+    pub to_ms: i64,
+}
+
+/// One target's state over a window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetTimeline {
+    pub target: String,
+    pub label: Option<String>,
+    pub segments: Vec<TimelineSegment>,
+}
+
+/// A state change inside a window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransitionPoint {
+    pub occurred_at_ms: i64,
+    pub state: TargetState,
+}
+
+/// One day of the disconnection histogram.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DailyDrops {
+    /// Start of the UTC day, in epoch milliseconds.
+    pub day_start_ms: i64,
+    pub drops: u32,
+}
+
+const DAY_MS: i64 = 86_400_000;
+
+/// Turn a starting state and the transitions of a window into segments that cover
+/// the window exactly. Pure, so the rendering and the SQL share the same rule.
+pub fn timeline_segments(
+    state_before: TargetState,
+    transitions: &[TransitionPoint],
+    from_ms: i64,
+    to_ms: i64,
+) -> Vec<TimelineSegment> {
+    if to_ms <= from_ms {
+        return Vec::new();
+    }
+
+    let mut segments = Vec::new();
+    let mut cursor = from_ms;
+    let mut state = state_before;
+
+    for point in transitions {
+        let at = point.occurred_at_ms.clamp(from_ms, to_ms);
+        if at > cursor {
+            segments.push(TimelineSegment {
+                state,
+                from_ms: cursor,
+                to_ms: at,
+            });
+            cursor = at;
+        }
+        state = point.state;
+    }
+
+    if cursor < to_ms {
+        segments.push(TimelineSegment {
+            state,
+            from_ms: cursor,
+            to_ms,
+        });
+    }
+
+    segments
+}
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("cannot open the event database {path}: {source}")]
@@ -361,6 +434,145 @@ impl Store {
             .optional()?;
         Ok(target)
     }
+
+    /// One entry per target, chosen by address or label.
+    pub fn find_target(&self, needle: &str) -> Result<Option<TargetStateRow>, StoreError> {
+        let row = self
+            .connection
+            .query_row(
+                "SELECT target, interface, label, current_state,
+                        first_seen_at_ms, last_change_at_ms, last_rtt_us
+                 FROM targets
+                 WHERE target = ?1 OR label = ?1
+                 LIMIT 1",
+                params![needle],
+                |row| {
+                    let state: String = row.get(3)?;
+                    Ok(TargetStateRow {
+                        target: row.get(0)?,
+                        interface: row.get(1)?,
+                        label: row.get(2)?,
+                        state: TargetState::parse(&state).unwrap_or(TargetState::Unknown),
+                        first_seen_at_ms: row.get(4)?,
+                        last_change_at_ms: row.get(5)?,
+                        last_rtt_us: row.get(6)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Number of transitions to `down` per UTC day, one entry per day in the window.
+    pub fn daily_drops(
+        &self,
+        target: &str,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<DailyDrops>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT occurred_at_ms FROM events
+             WHERE target = ?1 AND state = 'down'
+               AND occurred_at_ms >= ?2 AND occurred_at_ms < ?3",
+        )?;
+
+        let mut buckets: HashMap<i64, u32> = HashMap::new();
+        for row in
+            statement.query_map(params![target, from_ms, to_ms], |row| row.get::<_, i64>(0))?
+        {
+            let occurred_at_ms = row?;
+            let day = occurred_at_ms.div_euclid(DAY_MS) * DAY_MS;
+            *buckets.entry(day).or_insert(0) += 1;
+        }
+
+        let mut days = Vec::new();
+        let mut day = from_ms.div_euclid(DAY_MS) * DAY_MS;
+        while day < to_ms {
+            days.push(DailyDrops {
+                day_start_ms: day,
+                drops: buckets.get(&day).copied().unwrap_or(0),
+            });
+            day += DAY_MS;
+        }
+        Ok(days)
+    }
+
+    /// State of every target over the window, as segments that cover it exactly.
+    pub fn timeline(&self, from_ms: i64, to_ms: i64) -> Result<Vec<TargetTimeline>, StoreError> {
+        if to_ms <= from_ms {
+            return Ok(Vec::new());
+        }
+
+        let mut targets_statement = self
+            .connection
+            .prepare("SELECT target, label FROM targets ORDER BY target")?;
+        let targets = targets_statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut before_statement = self.connection.prepare(
+            "SELECT target, state FROM (
+                 SELECT target, state,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY target ORDER BY occurred_at_ms DESC, id DESC
+                        ) AS position
+                 FROM events
+                 WHERE occurred_at_ms < ?1
+             )
+             WHERE position = 1",
+        )?;
+        let mut states_before = HashMap::new();
+        for row in before_statement.query_map(params![from_ms], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })? {
+            let (target, state) = row?;
+            states_before.insert(
+                target,
+                TargetState::parse(&state).unwrap_or(TargetState::Unknown),
+            );
+        }
+
+        let mut events_statement = self.connection.prepare(
+            "SELECT target, state, occurred_at_ms FROM events
+             WHERE occurred_at_ms >= ?1 AND occurred_at_ms < ?2
+             ORDER BY target, occurred_at_ms, id",
+        )?;
+        let mut transitions: HashMap<String, Vec<TransitionPoint>> = HashMap::new();
+        for row in events_statement.query_map(params![from_ms, to_ms], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })? {
+            let (target, state, occurred_at_ms) = row?;
+            transitions
+                .entry(target)
+                .or_default()
+                .push(TransitionPoint {
+                    occurred_at_ms,
+                    state: TargetState::parse(&state).unwrap_or(TargetState::Unknown),
+                });
+        }
+
+        Ok(targets
+            .into_iter()
+            .map(|(target, label)| {
+                let state_before = states_before
+                    .get(&target)
+                    .copied()
+                    .unwrap_or(TargetState::Unknown);
+                let points = transitions.get(&target).map(Vec::as_slice).unwrap_or(&[]);
+                TargetTimeline {
+                    segments: timeline_segments(state_before, points, from_ms, to_ms),
+                    target,
+                    label,
+                }
+            })
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -463,6 +675,166 @@ mod tests {
             .unwrap();
         assert_eq!(limited.len(), 1);
         assert_eq!(limited[0].occurred_at_ms, 3_000);
+    }
+
+    #[test]
+    fn builds_segments_that_cover_the_window() {
+        use TargetState::{Down, Unknown, Up};
+
+        let segments = timeline_segments(
+            Unknown,
+            &[
+                TransitionPoint {
+                    occurred_at_ms: 120,
+                    state: Up,
+                },
+                TransitionPoint {
+                    occurred_at_ms: 180,
+                    state: Down,
+                },
+            ],
+            100,
+            200,
+        );
+
+        assert_eq!(
+            segments,
+            vec![
+                TimelineSegment {
+                    state: Unknown,
+                    from_ms: 100,
+                    to_ms: 120,
+                },
+                TimelineSegment {
+                    state: Up,
+                    from_ms: 120,
+                    to_ms: 180,
+                },
+                TimelineSegment {
+                    state: Down,
+                    from_ms: 180,
+                    to_ms: 200,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_window_without_transitions_is_one_segment() {
+        let segments = timeline_segments(TargetState::Up, &[], 0, 100);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].state, TargetState::Up);
+        assert_eq!((segments[0].from_ms, segments[0].to_ms), (0, 100));
+    }
+
+    #[test]
+    fn the_timeline_starts_from_the_state_before_the_window() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        store
+            .record_transition(&event(
+                "1.1.1.1",
+                TargetState::Unknown,
+                TargetState::Up,
+                1_000,
+            ))
+            .unwrap();
+        store
+            .record_transition(&event("1.1.1.1", TargetState::Up, TargetState::Down, 5_000))
+            .unwrap();
+
+        let timelines = store.timeline(4_000, 6_000).unwrap();
+        assert_eq!(timelines.len(), 1);
+        let segments = &timelines[0].segments;
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].state, TargetState::Up);
+        assert_eq!((segments[0].from_ms, segments[0].to_ms), (4_000, 5_000));
+        assert_eq!(segments[1].state, TargetState::Down);
+        assert_eq!((segments[1].from_ms, segments[1].to_ms), (5_000, 6_000));
+    }
+
+    #[test]
+    fn the_timeline_is_unknown_before_the_first_event() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        store
+            .record_transition(&event(
+                "1.1.1.1",
+                TargetState::Unknown,
+                TargetState::Up,
+                1_000,
+            ))
+            .unwrap();
+
+        let timelines = store.timeline(500, 2_000).unwrap();
+        let segments = &timelines[0].segments;
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].state, TargetState::Unknown);
+        assert_eq!(segments[1].state, TargetState::Up);
+    }
+
+    #[test]
+    fn daily_drops_has_one_entry_per_day() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        store
+            .record_transition(&event(
+                "1.1.1.1",
+                TargetState::Unknown,
+                TargetState::Down,
+                1_000,
+            ))
+            .unwrap();
+        store
+            .record_transition(&event("1.1.1.1", TargetState::Down, TargetState::Up, 2_000))
+            .unwrap();
+        store
+            .record_transition(&event("1.1.1.1", TargetState::Up, TargetState::Down, 3_000))
+            .unwrap();
+        store
+            .record_transition(&event(
+                "1.1.1.1",
+                TargetState::Down,
+                TargetState::Up,
+                DAY_MS + 1_000,
+            ))
+            .unwrap();
+        store
+            .record_transition(&event(
+                "1.1.1.1",
+                TargetState::Up,
+                TargetState::Down,
+                DAY_MS + 2_000,
+            ))
+            .unwrap();
+
+        let days = store.daily_drops("1.1.1.1", 0, 3 * DAY_MS).unwrap();
+        assert_eq!(days.len(), 3);
+        assert_eq!(days[0].drops, 2);
+        assert_eq!(days[1].drops, 1);
+        assert_eq!(days[2].drops, 0);
+    }
+
+    #[test]
+    fn a_target_can_be_found_by_address_or_label() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        let mut first = event("1.1.1.1", TargetState::Unknown, TargetState::Up, 1_000);
+        first.label = Some("cloudflare-dns".to_string());
+        store.record_transition(&first).unwrap();
+
+        assert_eq!(
+            store.find_target("1.1.1.1").unwrap().map(|row| row.target),
+            Some("1.1.1.1".to_string())
+        );
+        assert_eq!(
+            store
+                .find_target("cloudflare-dns")
+                .unwrap()
+                .map(|row| row.target),
+            Some("1.1.1.1".to_string())
+        );
+        assert!(store.find_target("8.8.8.8").unwrap().is_none());
     }
 
     #[test]

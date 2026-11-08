@@ -4,6 +4,9 @@
 #   docker compose up -d
 #   docker compose logs -f
 #
+# The page is served by the monitor process itself, so one container records and
+# shows: see `--listen` in the command below.
+#
 # Container Station: Applications > Create > Create Application, then paste this
 # file. Adjust the image name and the host paths to the NAS layout.
 
@@ -17,6 +20,8 @@ services:
     # Host networking is what makes `interface = "eth1"` in the configuration mean
     # the physical interface of the NAS. With the default bridge the container gets
     # its own eth0 on a virtual network and the NAS interfaces are not visible.
+    # It also means the page listens on the NAS address directly, with no port to
+    # publish: open http://<nas>:8642/ .
     network_mode: host
 
     # Opening a raw ICMP socket is the only privileged operation.
@@ -41,3 +46,5 @@ services:
       - /etc/network-monitor/config.toml
       - --database
       - /var/lib/network-monitor/events.db
+      - --listen
+      - 0.0.0.0:8642

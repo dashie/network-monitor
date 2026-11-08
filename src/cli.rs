@@ -62,7 +62,18 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Probe the configured targets and record state transitions
-    Monitor,
+    Monitor {
+        /// Also serve the web page on this address and port
+        #[arg(long, value_name = "ADDRESS:PORT")]
+        listen: Option<String>,
+    },
+
+    /// Serve the read-only web page over the event database, without probing
+    Serve {
+        /// Address and port to listen on
+        #[arg(long, default_value = "127.0.0.1:8642", value_name = "ADDRESS:PORT")]
+        listen: String,
+    },
 
     /// Read the recorded state and history
     Query {
@@ -145,7 +156,21 @@ mod tests {
     #[test]
     fn parses_the_monitor_subcommand() {
         let cli = parse(&["monitor"]);
-        assert!(matches!(cli.command, Some(Command::Monitor)));
+        match cli.command {
+            Some(Command::Monitor { listen }) => assert!(listen.is_none()),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_monitor_can_serve_the_web_page() {
+        let cli = parse(&["monitor", "--listen", "0.0.0.0:8642"]);
+        match cli.command {
+            Some(Command::Monitor { listen }) => {
+                assert_eq!(listen.as_deref(), Some("0.0.0.0:8642"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]

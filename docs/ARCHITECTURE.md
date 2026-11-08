@@ -69,6 +69,7 @@ Trust boundaries: the database file is written only by the `monitor` process and
 - **Thread per target, shared store.** Each target runs its own interval loop; transitions are serialized through one SQLite writer connection, guarded by a mutex.
 - **WAL for concurrent reads.** `journal_mode = WAL` with `synchronous = NORMAL` and a 5 s `busy_timeout` lets the query process read while the monitor writes.
 - **Supervised reload.** The supervisor owns the set of workers and compares the configuration file content once per second. A valid change restarts the workers with the new target list, interval, and timeout, keeps the database it already opened, and logs one `INFO` line.
+- **Read-only page generated server-side.** `web` answers `/` with HTML and SVG built in Rust from the same timeline query the CLI uses, and `/target` with one bar per day for a single target. One small HTTP/1.1 loop, no framework, no client-side chart library: the browser only asks for another window. The same code serves while the monitor runs (`monitor --listen`) and without probing (`serve`), so a page and the recording share one process when both are wanted.
 
 <!-- skill:block:arch-principles section="## 4. Solution strategy" -->
 ### Architecture principles
@@ -116,6 +117,7 @@ C4Container
 | `probe::interface` | Resolve an interface name to the platform handle and bind the socket to it | `bind_socket(fd, interface)` per platform |
 | `monitor` | Supervise one interval loop per target, decide whether a transition occurred, reload the configuration file, dispatch transitions to the store | `run(config, prober, store, shutdown, reload)` |
 | `reload` | Compare the configuration file with the last accepted content and report a change | `Watcher`, `Change`, `POLL_INTERVAL` |
+| `web` | Serve the read-only timeline, the zoom fragment, the per-target detail page, and a health check | `bind`, `serve`, `page`, `target_page` |
 | `store` | Own the schema, migrations, the event write transaction, retention, and the read queries | `Store`, `Event`, `TargetState`, `StoreError` |
 | `query` | Read current state and event history, apply filters, render a table or JSON | `QueryFilter`, `Renderer` |
 
@@ -156,6 +158,12 @@ C4Container
 - **Input:** the path of the configuration file, polled once per second.
 - **Output:** `Change::Content(bytes)` when the file differs from the last accepted content, `Change::ReadError` once when it cannot be read.
 - **Guarantees:** the initial content is never reported as a change; identical content is not a change; a missing or unreadable file is reported once, not on every poll.
+
+### `web`
+
+- **Input:** the database path and an optional `from`/`to`/`target` query string; a bound listener in tests.
+- **Output:** the timeline page, an SVG fragment for a zoom, the detail page of one target, a plain-text health check, or a plain-text error.
+- **Guarantees:** every request opens the database read-only; only `GET` and `HEAD` are answered; dynamic text is HTML-escaped; the window is clamped to the last 30 days and never past now; nothing is written, and the socket exists only while the process that bound it runs.
 
 ### Data model
 
@@ -235,10 +243,11 @@ Takeaway: the write path is one transaction per transition, and the read path ne
 
 - **Local development.** `cargo run -- monitor --config ./network-monitor.toml`, database at `./network-monitor.db`, raw sockets through `sudo` on macOS and Linux or an elevated shell on Windows.
 - **Bare host.** The release binary copied anywhere on `PATH`, the configuration in `/etc/network-monitor/config.toml`, the database in `/var/lib/network-monitor/events.db`, supervised by systemd, launchd, or the Windows scheduler. The binary requires `CAP_NET_RAW` or `root`.
-- **Container.** A multi-stage image builds the static musl binary and copies it onto a minimal base, together with a default configuration that probes the container's loopback so a bare `docker run` starts. The process runs as the container user with `--cap-drop ALL --cap-add NET_RAW`, the configuration mounted read-only over the default when real targets are needed, and a volume for the database. No port is exposed. Host networking (`network_mode: host`) is required when a target is bound to a physical interface, because a bridge container only sees its own `eth0`.
+- **Container.** A multi-stage image builds the static musl binary and copies it onto a minimal base, together with a default configuration that probes the container's loopback so a bare `docker run` starts. The process runs as the container user with `--cap-drop ALL --cap-add NET_RAW`, the configuration mounted read-only over the default when real targets are needed, and a volume for the database. No port is published: the page, when the command adds `--listen`, binds the host address directly through host networking. Host networking (`network_mode: host`) is required when a target is bound to a physical interface, because a bridge container only sees its own `eth0`.
 - **QNAP Container Station.** A project from [docker-compose.yml](../docker-compose.yml) that pulls the image, mounts `/share/Container/network-monitor/config.toml` read-only and `/share/Container/network-monitor/data` as the database volume, with restart policy `unless-stopped` and host networking. The volume must be a local share, not a network share. Build and deployment — including a Docker context that points at the NAS so the image is built there — are in [DEVELOPER-GUIDE.md](./DEVELOPER-GUIDE.md#container-and-qnap-deployment).
 - **Configuration sources.** The TOML file, then the command line; the container passes the latter through the compose `command` field. There is no environment-variable layer.
 - **Upgrades.** Replace the binary or image and restart. The schema is migrated on open; a rollback to an older binary against a newer schema is refused, so the database must be backed up before a downgrade.
+- **Web page.** The same process that probes can serve the page: `monitor --config … --database … --listen 0.0.0.0:8642`. With host networking the listener needs no published port and shares the volume it is already writing. `serve --listen … --database …` remains the option for a viewer that must not have `NET_RAW`; it reads the same volume and can run on another host.
 
 ## 8. Cross-cutting concepts
 
@@ -252,7 +261,9 @@ Line-based output on stderr, never stdout: stdout carries only query results, so
 
 ### Security
 
-The only privileged operation is opening the raw socket; the container keeps only `NET_RAW` and drops everything else. The database is created with mode `0600`. The configuration may contain addresses and interface names but no secret, and the tool opens no port, so there is no authentication surface. Probes are generated by this process, so no input from the network is parsed as a command.
+The only privileged operation is opening the raw socket; the container keeps only `NET_RAW` and drops everything else. The database is created with mode `0600`. The configuration may contain addresses and interface names but no secret. Probes are generated by this process, so no input from the network is parsed as a command.
+
+`web` is the only component that listens, and only when `--listen` is given. It answers `GET` and `HEAD` on three paths, escapes every dynamic value, sets `nosniff` and `no-store`, and never writes. It has **no authentication**: the default bind of `serve` is `127.0.0.1`, the monitor binds nothing unless asked, and exposing the page on a LAN is a deliberate operator decision that must be paired with a firewall rule.
 
 ### Configuration
 
@@ -289,6 +300,7 @@ See [ADR.md](./ADR.md). Decisions are recorded there and are not duplicated here
 - **IPv4 only.** IPv6 needs a separate socket family and link-local scope handling. Mitigation: tracked as an open question; the probe contract already returns a verdict per target, so a second probe type fits without touching the monitor.
 - **Disk sleep on NAS.** WAL checkpoints can wake sleeping disks. Mitigation: tune `wal_autocheckpoint`, run retention rarely, and keep the database on an SSD volume where possible.
 - **Partial writes while an editor saves.** A poll can read a half-written file. Mitigation: the content is parsed before use, an invalid read is rejected with a warning, and the next poll picks up the completed file.
+- **No authentication on the web page.** Anyone who can reach the port reads the state history of every target. Mitigation: the default bind is `127.0.0.1`; LAN exposure is explicit and must be firewalled. A token is an open question.
 - **Thread per target.** At several hundred targets the thread count and the scheduling jitter grow. Mitigation: measured at 100 targets in the quality requirements; revisit beyond that.
 
 ### Technical debt
@@ -315,3 +327,5 @@ enforced or verified.
 - `INV-7`: The event and the current state of a target are committed in the same transaction. Enforced by the store write function, verified by a test that interrupts the writer after `BEGIN`.
 - `INV-8`: The release binary has no dependency beyond the platform C runtime, and SQLite is compiled in. Enforced by the static build, verified by the `ldd` check in CI.
 - `INV-9`: A configuration file that cannot be read, does not parse, or resolves to no targets never changes the running configuration and never stops monitoring. Enforced by the supervisor, verified by `tests/reload.rs`.
+- `INV-10`: The web page never writes: every request opens the database read-only and issues only `SELECT` statements. Enforced by the `store` read-only open, verified by `tests/web.rs`.
+- `INV-11`: A process opens at most one listener, and only when `--listen` is given; `monitor --listen` binds it before the first probe and stops it with the monitor. Enforced by the single call to `web::bind`, verified by the CLI and web tests.

@@ -14,3 +14,4 @@ pub mod reload;
 pub mod shutdown;
 pub mod store;
 pub mod time;
+pub mod web;

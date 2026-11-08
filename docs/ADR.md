@@ -19,6 +19,8 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0005 | Mirror every configuration option as a command-line flag | accepted | 2026-11-08 | Precedence `cli > file > default`, effective configuration printed on demand |
 | ADR-0006 | Ship one binary with `monitor` and `query` subcommands | accepted | 2026-11-08 | Single artifact; query opens the database read-only |
 | ADR-0007 | Reload the configuration file while monitoring runs | accepted | 2026-11-08 | Poll the file every second and apply a valid change without a restart |
+| ADR-0008 | Serve a read-only web page from the binary | accepted | 2026-11-09 | Minimal HTTP and server-side SVG; no framework and no client library |
+| ADR-0009 | Serve the page from the monitoring process | accepted | 2026-11-09 | `monitor --listen` runs the same `web` component; one process records and shows |
 
 ## Records
 
@@ -195,3 +197,71 @@ A file that cannot be read, does not parse, or resolves to no targets is rejecte
 - An OS file watcher (`inotify`, `kqueue`, Windows change notifications): rejected, it adds a dependency and platform-specific edge cases for a file read that costs microseconds once per second.
 - A `SIGHUP` reload: rejected as the primary mechanism, because it requires the operator to remember a signal and does not work when the file is edited by a controller; it also cannot be exercised in a container without `docker kill -s HUP`.
 - A restart: rejected, it interrupts the recording of transitions for the time of the restart.
+
+## ADR-0008 — Serve a read-only web page from the binary
+
+**Status:** accepted · **Date:** 2026-11-09
+**Supersedes:** BR-8 and the "no web interface, no listening socket" exclusion stated with ADR-0001.
+
+### Context
+
+The history lives in a SQLite file, and reading it from a NAS means either SSH plus `query` or copying the file. A picture of the last day per target — when it went red and how long it stayed red — answers the usual question faster than a table.
+
+The product rule said the tool opens no port, so that rule has to be changed deliberately, not silently.
+
+### Decision
+
+Add a `serve` subcommand to the same binary. It binds the address given by `--listen` (default `127.0.0.1:8642`) and answers three things with a hand-written HTTP/1.1 loop: the page, the same page with only the chart fragment for a zoom, and a health check.
+
+The chart is SVG generated in Rust from `store::timeline`, which turns the events into segments that cover the window exactly. The browser only asks for another window; there is no client-side chart library and no JSON API.
+
+Every request opens the database read-only, so the page sees new transitions without restarting and can never write. The page has no authentication: the default bind is localhost, and LAN exposure is an explicit choice.
+
+### Consequences
+
+- The monitor still opens no port; only `serve` does, and only while it runs.
+- A page view is a read-only transaction: it cannot corrupt, migrate, or lock the history beyond the WAL read.
+- The chart has no tooltips beyond the native `<title>`, no series other than the state bands, and no live refresh: a reload shows the new state.
+- Adding a second process to the container is enough; it needs the same volume, no `NET_RAW`.
+- No authentication means the port must be firewalled when it leaves localhost.
+
+### Alternatives considered
+
+- A static HTML report from `query report`: rejected by the operator, because on a NAS it has to be regenerated and downloaded before it can be looked at.
+- A separate sidecar or nginx: rejected, it adds a second artifact to build, ship, and keep in step with the schema.
+- A client-side chart library (uPlot, ECharts, Chart.js): rejected, the chart is four to eight rectangles per target and a time axis; a library adds weight and a supply chain for features not used.
+- A JSON API: rejected, nothing consumes it yet; the page is generated where the data is.
+
+## ADR-0009 — Serve the page from the monitoring process
+
+**Status:** accepted · **Date:** 2026-11-09
+**Amends:** ADR-0008. The page, the hand-written HTTP loop, and the server-side SVG stay as decided there; only the process that serves them changes.
+
+### Context
+
+ADR-0008 put the page in `serve`, a second process over the same database. On a NAS that means two containers, two restart policies, and two mounts to keep in step, only to look at the history of a process that is already running. The operator asked for one command that records and shows, and for numbers that answer "how bad was today" without reading a table: disconnections and total down time per target, plus a per-day view of the last month.
+
+### Decision
+
+`monitor` accepts `--listen ADDRESS:PORT` and runs the `web` component in its own thread, sharing the `Shutdown` handle. The listener is bound before the first probe, so an unusable address fails at start instead of minutes later, and the web thread is joined when the monitor stops.
+
+The address is a command-line option and not a configuration key: the page is a way of looking at a running process, not a property of the monitored targets, so it stays out of the file a controller rewrites.
+
+The timeline page adds two columns per lane — the number of disconnections and the total down time of the window being shown — computed from the same segments that draw the bands. The columns follow the displayed window, so zooming changes them; a down segment that started before the window opened counts as down time but not as a disconnection.
+
+Selecting a lane opens `/target?target=…`, which resolves an address or a label to one target and renders one bar per day for the last 30 days from the `down` transitions, bucketed by UTC day with zero-filled days.
+
+### Consequences
+
+- One process, one container, one restart policy for the common case; `serve` stays as a viewer that needs no `NET_RAW`.
+- The web thread opens its own read-only connection, so the writer is never blocked beyond the WAL read and the page can never write.
+- The page shows a running monitor: a stopped monitor leaves the page unreachable, which is the intended signal.
+- With host networking there is no port to publish; without it, the operator publishes the port of the monitor.
+- The numbers depend on the displayed window, so the statistics of a zoomed chart are not those of the last 24 hours.
+
+### Alternatives considered
+
+- Two compose services, as in ADR-0008: rejected, it duplicates the lifecycle of the same artifact for a read-only view.
+- A configuration key for the address: rejected, a page is not configuration of the monitored targets, and it would invite a controller to move the listener by accident.
+- A JSON API with a client-side chart: rejected for the reasons in ADR-0008, and it would add a second contract to keep stable.
+- A separate `stats` subcommand for the numbers: rejected, the numbers belong next to the bands they describe.

@@ -136,3 +136,33 @@ fn the_query_help_documents_the_subcommands() {
         .stdout(predicate::str::contains("state"))
         .stdout(predicate::str::contains("events"));
 }
+
+#[test]
+fn an_invalid_listen_address_fails_before_probing() {
+    let directory = tempfile::tempdir().unwrap();
+
+    monitor(directory.path())
+        .args([
+            "monitor",
+            "--target",
+            "127.0.0.1",
+            "--database",
+            "events.db",
+            "--listen",
+            "not-an-address",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid listen address"));
+}
+
+#[test]
+fn serve_refuses_an_invalid_listen_address() {
+    let directory = tempfile::tempdir().unwrap();
+
+    monitor(directory.path())
+        .args(["serve", "--listen", "nope", "--database", "events.db"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid listen address"));
+}

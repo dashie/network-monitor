@@ -42,7 +42,7 @@ Probes are bound to the configured interface with the semantics of `ping -I`, th
 
 ### Out of scope
 
-- Any web interface, HTTP API, or listening socket: the tool opens no network port.
+- Any programmatic API: the web page returns HTML for a browser; scripts use the database or the `query` command.
 - Alerting and notification (mail, webhook, Telegram, MQTT): the database is the integration point.
 - Metrics export (Prometheus, OpenTelemetry) and dashboards.
 - Probe types other than ICMP echo: no TCP, UDP, HTTP, DNS, or traceroute probes.
@@ -73,6 +73,8 @@ belong in [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 - `FR-16`: While monitoring runs, the tool re-reads the configuration file within one second of a change and applies the new interval, timeout, target list, and retention without a restart, writing one `INFO` line that states the configuration was updated. A file that cannot be read, does not parse, or leaves no targets is rejected with a warning and the previous configuration stays in effect. A changed `database` path is reported and used only from the next start.
 
+- `FR-17`: The read-only web page over the event database is available in two ways from the same binary: `serve --listen …` publishes it without probing, and `monitor --listen …` publishes it from the monitoring process, so one command both records and shows the history. The page shows one lane per target for the last 24 hours with green, red, and grey bands for `up`, `down`, and `unknown`; the wheel zooms around the pointer, dragging pans, and a double click returns to the last 24 hours. Each lane states the disconnections and the total down time of the window it is showing. Selecting a lane opens a page for that target with one bar per day for the last 30 days. Every request opens the database read-only and answers `503` with the reason when it is missing. The page has no authentication. The server stops with the process that runs it, on `SIGINT` or `SIGTERM`.
+
 ## Business rules
 
 Rules that always hold, independent of implementation.
@@ -84,7 +86,7 @@ Rules that always hold, independent of implementation.
 - `BR-5`: A configured interface that does not exist at startup is a fatal configuration error, never a silent fallback to the default interface. Rationale: a silent fallback would measure a different path than the one configured.
 - `BR-6`: Timestamps are stored as UTC epoch milliseconds in integer columns; time zone and locale affect presentation only. Rationale: queries and retention stay exact and portable.
 - `BR-7`: The current state of a target and its last event are written in the same SQLite transaction, so a reader never observes a state that contradicts the latest event.
-- `BR-8`: The database is the only integration point: the tool starts no server, opens no listening port, and emits no network traffic other than its ICMP probes.
+- `BR-8`: The database is the integration point for other tools. The tool opens at most one listening socket, the read-only web page, and only when `--listen` is given: `serve` never probes, `monitor` probes and serves at the same time. Without `--listen` nothing listens and the only network traffic is the ICMP probe. Rationale: a page must never be able to alter the history, and a monitor that was not asked to serve must not expose a surface.
 - `BR-9`: A database written by a newer schema version than the running binary is reported as an error and left untouched, never migrated downwards.
 
 ## Non-functional requirements
@@ -102,6 +104,7 @@ Rules that always hold, independent of implementation.
 | Portability | One binary per platform, no runtime dependency, no installer, no shell script in the execution path |
 | Footprint | Release binary under 15 MB, container image under 30 MB |
 | Reload latency | A change written to the configuration file is detected and applied within 2 s, without losing the last known state |
+| Web page | 50 targets over a 24 h window | Rendered in under 300 ms on the NAS; a request never writes to the database |
 
 ## Success metrics
 
@@ -127,6 +130,7 @@ Rules that always hold, independent of implementation.
 - The configuration file is re-read once per second while monitoring runs; a change is applied without a restart, and a changed database path still needs one.
 - Alerting is out of scope: the database is the integration point for other tools.
 - The tool name and the executable name are both `network-monitor`.
+- The web page binds `127.0.0.1` by default; exposing it on the LAN (`--listen 0.0.0.0:8642`) is an explicit operator choice and carries no authentication.
 
 ### Open questions
 
@@ -134,6 +138,7 @@ Rules that always hold, independent of implementation.
 - **Flap damping** — should a configurable confirmation count (`down` after N consecutive failures) be added, or is one probe per cycle the contract? Owner: maintainer.
 - **Alerting hooks** — is a post-transition command hook acceptable as an escape hatch, or does it violate the no-dependency rule? Owner: maintainer.
 - **Multiple addresses per target** — should a label group several addresses, or is one label one address? Owner: maintainer.
+- **Web authentication** — is a shared token or HTTP basic authentication worth the complexity for LAN exposure? Owner: maintainer.
 
 ## Related documents
 

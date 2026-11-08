@@ -61,15 +61,19 @@ network-monitor/
 │   ├── store/
 │   │   ├── mod.rs        connection, write transaction, retention, read queries
 │   │   └── schema.rs     DDL, schema version, migrations
-│   └── query/
-│       ├── mod.rs        filters and read path
-│       └── render.rs     table and JSON rendering
+│   ├── query/
+│   │   ├── mod.rs        filters and read path
+│   │   └── render.rs     table and JSON rendering
+│   └── web/
+│       ├── mod.rs        HTTP loop, routes, window parsing
+│       └── page.rs       HTML and SVG generation
 ├── tests/
 │   ├── config_precedence.rs  every key, file and flag, in both directions
 │   ├── monitor_e2e.rs        end-to-end loop, transitions only, restart continuity
 │   ├── reload.rs             configuration reload, invalid file, database change
 │   ├── store.rs              schema, concurrent read, retention, labels
 │   ├── cli.rs                exit codes and query output
+│   ├── web.rs                page, zoom fragment, errors, no writes
 │   └── icmp_privileged.rs    real raw-socket probe, ignored unless root
 ├── docs/                 product, architecture, decisions, glossary, developer guide
 ├── .github/              commit and pull request instruction contracts
@@ -88,6 +92,8 @@ cargo build --release --target x86_64-unknown-linux-musl
 ```bash
 cargo run -- --help
 cargo run -- monitor --config ./network-monitor.toml
+cargo run -- monitor --config ./network-monitor.toml --listen 127.0.0.1:8642
+cargo run -- serve --database ./network-monitor.db --listen 127.0.0.1:8642
 cargo run -- query state --config ./network-monitor.toml
 cargo run -- query events 1.1.1.1 --since 24h --config ./network-monitor.toml
 cargo run -- --show-config --config ./network-monitor.toml
@@ -249,6 +255,40 @@ Use `nicolaka/netshoot` instead of `alpine` when you need `ping`, `tcpdump`, or 
 The host interfaces of the NAS are visible from its own shell over SSH, not from the
 container when a bridge network is in use.
 
+### Web page in the container
+
+Host networking is already in use for the interface binding, so the monitor itself
+serves the page on the NAS address and no port is published:
+
+```bash
+docker -c qubo run -d --name network-monitor \
+  --restart unless-stopped \
+  --network host \
+  --cap-drop ALL --cap-add NET_RAW \
+  -v /share/Container/network-monitor/config.toml:/etc/network-monitor/config.toml:ro \
+  -v network-monitor-data:/var/lib/network-monitor \
+  network-monitor:dev \
+  monitor --config /etc/network-monitor/config.toml \
+  --database /var/lib/network-monitor/events.db --listen 0.0.0.0:8642
+```
+
+The page is then at `http://<nas>:8642/`; select a lane to open that target's 30-day
+page. Keep the port on the LAN — there is no authentication — or bind `127.0.0.1:8642`
+and reach it through an SSH tunnel.
+
+`serve` remains available as a viewer that needs neither `NET_RAW` nor host
+networking, for example on a laptop reading a copy of the database or against the same
+volume:
+
+```bash
+docker -c qubo run -d --name network-monitor-web \
+  --restart unless-stopped \
+  -p 8642:8642 \
+  -v network-monitor-data:/var/lib/network-monitor \
+  network-monitor:dev \
+  serve --listen 0.0.0.0:8642 --database /var/lib/network-monitor/events.db
+```
+
 ### Choosing the physical interface on a multi-NIC NAS
 
 Interface names inside a container are not the names of the NAS interfaces. A default
@@ -273,6 +313,7 @@ cargo test
 cargo test --test monitor_e2e
 cargo test --test reload
 cargo test --test store
+cargo test --test web
 ```
 
 <!-- skill:block:devguide-test-rules section="## Test" -->

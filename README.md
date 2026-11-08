@@ -23,8 +23,15 @@ cargo build --release
 # Run the monitor; raw ICMP sockets need elevated privileges on every platform
 sudo ./target/release/network-monitor monitor --config ./network-monitor.toml
 
+# Same command, with the page on port 8642: one process records and shows
+sudo ./target/release/network-monitor monitor --config ./network-monitor.toml \
+  --listen 0.0.0.0:8642
+
 # Read the recorded transitions from a second shell while the monitor runs
 ./target/release/network-monitor query events --config ./network-monitor.toml
+
+# Serve the page alone, without probing or NET_RAW
+./target/release/network-monitor serve --database ./network-monitor.db --listen 127.0.0.1:8642
 
 # Run the test suite (no privileges needed: the ICMP prober is replaced by a fake)
 cargo test
@@ -50,7 +57,7 @@ ip = "192.168.1.1"          # no interface: the default-route interface is used
 
 ## Status
 
-**Alpha.** The feature set in [docs/PRODUCT.md](docs/PRODUCT.md) is implemented and covered by the test suite: layered configuration with live reload, ICMP probing with per-interface binding, event-only SQLite persistence, querying while monitoring runs, and retention. The container image builds and probes with only `NET_RAW` added.
+**Alpha.** The feature set in [docs/PRODUCT.md](docs/PRODUCT.md) is implemented and covered by the test suite: layered configuration with live reload, ICMP probing with per-interface binding, event-only SQLite persistence, querying while monitoring runs, retention, and a read-only web page with 24 h state bands and zoom. The container image builds and probes with only `NET_RAW` added.
 
 Not done yet: the Windows raw-socket path is written but not exercised on a Windows host, IPv6 targets are deferred, and no binary is published as a release.
 
