@@ -50,9 +50,9 @@ ip = "192.168.1.1"          # no interface: the default-route interface is used
 
 ## Status
 
-**Pre-alpha.** The repository carries the documentation baseline only: no implementation, container image, or released binary exists yet.
+**Alpha.** The feature set in [docs/PRODUCT.md](docs/PRODUCT.md) is implemented and covered by the test suite: layered configuration, ICMP probing with per-interface binding, event-only SQLite persistence, querying while monitoring runs, and retention. The container image builds and probes with only `NET_RAW` added.
 
-The product contract in [docs/PRODUCT.md](docs/PRODUCT.md), the invariants in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), and the build commands in [docs/DEVELOPER-GUIDE.md](docs/DEVELOPER-GUIDE.md) are stable enough to implement against. Expect the configuration format to stay compatible, but not to be frozen before the first release.
+Not done yet: the Windows raw-socket path is written but not exercised on a Windows host, IPv6 targets are deferred, and no binary is published as a release.
 
 ## Documentation
 

@@ -1,0 +1,35 @@
+[package]
+name = "network-monitor"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Event-based ICMP reachability monitor with per-interface probes and an embedded SQLite history"
+publish = false
+
+[[bin]]
+name = "network-monitor"
+path = "src/main.rs"
+
+[lib]
+name = "network_monitor"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+toml = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

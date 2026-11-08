@@ -28,6 +28,12 @@ desktop.ini
 secrets/
 
 # Logs and temporary files
+# The contents are ignored, not the directory itself, so a .gitkeep placeholder
+# inside tmp/ can still be committed (Git cannot re-include a file whose parent
+# directory is excluded).
 *.log
-tmp/
-.tmp/
+tmp/*
+.tmp/*
+
+# Placeholder files that keep otherwise empty directories in the repository
+!.gitkeep

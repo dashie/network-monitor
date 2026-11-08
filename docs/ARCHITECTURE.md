@@ -21,7 +21,7 @@ Top quality goals, in order:
 - **Language and toolchain.** Rust stable, edition 2021, MSRV declared in `Cargo.toml` (1.75 or newer).
 - **Static linkage.** `rusqlite` with the `bundled` feature compiles SQLite into the binary; Linux releases are built for `x86_64-unknown-linux-musl`. No system library may be required at run time.
 - **Privileges.** Raw ICMP sockets need `root`, `CAP_NET_RAW`, or Administrator on Windows. The container requests only `NET_RAW` and drops every other capability.
-- **Platform interface binding.** `SO_BINDTODEVICE` on Linux, `IP_BOUND_IF` on macOS, `IP_UNICAST_IF` on Windows (interface index resolved from the adapter name).
+- **Platform interface binding.** `SO_BINDTODEVICE` on Linux, `IP_BOUND_IF` on macOS, `IP_UNICAST_IF` on Windows (by numeric interface index).
 - **Filesystem.** The SQLite file must live on a local filesystem; WAL on SMB or NFS shares is not supported and is documented as such.
 - **Synchronous design.** No async runtime, no daemon framework, no plugin system. Threads are used per target, and that is the whole concurrency model.
 - **No listening socket.** The process opens no port; the only integration surface is the SQLite file and the query command.
@@ -176,13 +176,13 @@ CREATE INDEX IF NOT EXISTS events_target_time
     ON events (target, occurred_at_ms);
 
 CREATE TABLE IF NOT EXISTS targets (
-    target             TEXT PRIMARY KEY,
-    interface          TEXT,
-    label              TEXT,
-    current_state      TEXT    NOT NULL,   -- 'unknown' | 'up' | 'down'
-    last_probe_at_ms   INTEGER,
-    last_change_at_ms  INTEGER,
-    last_rtt_us        INTEGER
+    target            TEXT PRIMARY KEY,
+    interface         TEXT,
+    label             TEXT,
+    current_state     TEXT    NOT NULL,   -- 'unknown' | 'up' | 'down'
+    first_seen_at_ms  INTEGER NOT NULL,
+    last_change_at_ms INTEGER NOT NULL,
+    last_rtt_us       INTEGER
 );
 ```
 
@@ -227,7 +227,7 @@ Takeaway: the write path is one transaction per transition, and the read path ne
 
 - **Local development.** `cargo run -- monitor --config ./network-monitor.toml`, database at `./network-monitor.db`, raw sockets through `sudo` on macOS and Linux or an elevated shell on Windows.
 - **Bare host.** The release binary copied anywhere on `PATH`, the configuration in `/etc/network-monitor/config.toml`, the database in `/var/lib/network-monitor/events.db`, supervised by systemd, launchd, or the Windows scheduler. The binary requires `CAP_NET_RAW` or `root`.
-- **Container.** A multi-stage image builds the static musl binary and copies it onto a minimal base. It runs as a non-root user with `--cap-drop ALL --cap-add NET_RAW`, the configuration mounted read-only, and a volume for the database. No port is exposed.
+- **Container.** A multi-stage image builds the static musl binary and copies it onto a minimal base. The process runs as the container user with `--cap-drop ALL --cap-add NET_RAW`, the configuration mounted read-only, and a volume for the database. No port is exposed.
 - **QNAP Container Station.** A project that pulls the image, mounts `/share/Container/network-monitor/config.toml` read-only and `/share/Container/network-monitor/data` as the database volume, with restart policy `unless-stopped`. The volume must be a local share, not a network share.
 - **Configuration sources.** The TOML file, then the command line; the container passes the latter through the compose `command` field. There is no environment-variable layer.
 - **Upgrades.** Replace the binary or image and restart. The schema is migrated on open; a rollback to an older binary against a newer schema is refused, so the database must be backed up before a downgrade.
@@ -275,14 +275,16 @@ See [ADR.md](./ADR.md). Decisions are recorded there and are not duplicated here
 ### Risks
 
 - **Capability on QNAP firmware.** Some Container Station versions do not forward `NET_RAW` reliably. Mitigation: the acceptance test on the target device is part of the first milestone; privileged mode stays a documented fallback, not the default.
-- **Windows interface resolution.** `IP_UNICAST_IF` needs an interface index, while the configuration holds a name; adapter aliases differ by locale. Mitigation: accept a numeric index as well as a name, and fail loudly when resolution is ambiguous.
+- **Windows interface resolution.** `IP_UNICAST_IF` needs an interface index, while an operator naturally knows an adapter name. Mitigation: this version requires the numeric index and reports a configuration error otherwise; name resolution through `GetAdaptersAddresses` is the follow-up.
 - **IPv4 only.** IPv6 needs a separate socket family and link-local scope handling. Mitigation: tracked as an open question; the probe contract already returns a verdict per target, so a second probe type fits without touching the monitor.
 - **Disk sleep on NAS.** WAL checkpoints can wake sleeping disks. Mitigation: tune `wal_autocheckpoint`, run retention rarely, and keep the database on an SSD volume where possible.
 - **Thread per target.** At several hundred targets the thread count and the scheduling jitter grow. Mitigation: measured at 100 targets in the quality requirements; revisit beyond that.
 
 ### Technical debt
 
-- None recorded yet: the implementation does not exist. The first implementation change must record the debt it accepts.
+- The Windows raw-socket path (`ws2_32`, `IP_UNICAST_IF`) compiles for the target but has not been exercised on a Windows host: it is the first thing to verify, together with name-to-index resolution.
+- `query` renders JSON by hand instead of using a serializer. Acceptable for two shapes; revisit when a third appears.
+- The monitor is a single writer guarded by a mutex. Concurrent `query` processes are verified in tests, but several `monitor` processes against one database are not supported and not detected.
 
 ## 12. Glossary
 
@@ -293,7 +295,7 @@ See [GLOSSARY.md](./GLOSSARY.md).
 Properties that must hold after every change. Each invariant names how it is
 enforced or verified.
 
-- `INV-1`: A target never has two consecutive events with the same `state`. Enforced by the transition decision in `monitor`, verified by the state-machine tests in `tests/monitor_state.rs`.
+- `INV-1`: A target never has two consecutive events with the same `state`. Enforced by `monitor::state::transition`, verified by its unit tests and by the end-to-end test in `tests/monitor_e2e.rs`.
 - `INV-2`: Every configuration key has a command-line override, and the precedence is `command line > file > default`. Enforced by the `config` merge function, verified by a test that walks every key.
 - `INV-3`: The monitor, the store, and the query depend on the `Probe` contract only; no test requires raw sockets or privileges. Enforced by module visibility, verified by the suite running in an unprivileged container.
 - `INV-4`: The event database is readable while the monitor writes. Enforced by WAL mode and a single writer, verified by an integration test with a concurrent reader.

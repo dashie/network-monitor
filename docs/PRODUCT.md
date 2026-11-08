@@ -56,10 +56,10 @@ Probes are bound to the configured interface with the semantics of `ping -I`, th
 Each requirement is observable and independently verifiable. Implementation details
 belong in [ARCHITECTURE.md](./ARCHITECTURE.md).
 
-- `FR-1`: The tool reads a TOML configuration file, from `--config <path>` or from the default path `./network-monitor.toml`; a missing or malformed file is a startup error reported on stderr with a non-zero exit code.
+- `FR-1`: The tool reads a TOML configuration file. `--config <path>` must exist and parse; without the option, `./network-monitor.toml` is read when present and skipped otherwise, so a fully command-line invocation needs no file. A malformed file, or an explicit path that does not exist, is a startup error reported on stderr with a non-zero exit code.
 - `FR-2`: Every configuration option can be given on the command line and overrides the file; targets are supplied with the repeatable `--target <IP>[,interface=<name>][,label=<name>]` option, which replaces the target list of the file when present.
 - `FR-3`: The tool sends one ICMP echo request per target per configured interval and classifies the result as reachable (a matching echo reply arrived within `timeout_ms`) or unreachable (no matching reply within `timeout_ms`).
-- `FR-4`: When a target has an interface configured, the probe leaves through that interface with the semantics of `ping -I <interface> <address>`; when it has none, the default-route interface of the operating system is used.
+- `FR-4`: When a target has an interface configured, the probe leaves through that interface with the semantics of `ping -I <interface> <address>`; when it has none, the default-route interface of the operating system is used. The interface is given by name on Linux and macOS (`eth1`, `en0`) and by numeric interface index on Windows.
 - `FR-5`: A state transition is recorded only when the verdict of a probe cycle differs from the last recorded verdict of that target. Repeated verdicts produce no database write.
 - `FR-6`: The first probe cycle of a target always records a transition, from `unknown` to the observed `up` or `down`.
 - `FR-7`: The tool stores events in an embedded SQLite database, creating the file, the schema, and the migration metadata when they are absent.
@@ -68,7 +68,7 @@ belong in [ARCHITECTURE.md](./ARCHITECTURE.md).
 - `FR-10`: When `retention_days` is greater than zero, events older than that window are deleted periodically; `0` keeps every event.
 - `FR-11`: `SIGINT` and `SIGTERM` stop the monitor cleanly within one probe cycle, with no partially written event.
 - `FR-12`: `--show-config` prints the effective configuration, after defaults, file, and command line have been merged, and exits without probing.
-- `FR-13`: Invalid configuration — an unknown option, a non-positive interval or timeout, an unparseable address, or a configured interface that does not exist — aborts startup with a message naming the offending key and a non-zero exit code.
+- `FR-13`: Invalid configuration — an unknown option, a non-positive interval or timeout, an unparseable or IPv6 address, a target listed twice, a configured interface that does not exist, or a `monitor` run without targets — aborts startup with a message naming the offending key and a non-zero exit code.
 - `FR-14`: The tool runs as a single executable with no runtime dependency, and as a container image that needs only the `NET_RAW` capability.
 - `FR-15`: Every probe cycle and every transition is observable on stderr according to `--log-level` (`error`, `warn`, `info`, `debug`), in a stable line-based format.
 
@@ -120,6 +120,7 @@ Rules that always hold, independent of implementation.
 - The first milestone probes IPv4 addresses only. IPv6 is explicitly deferred.
 - Retention is disabled by default (`retention_days = 0`), so no event is deleted unless the operator asks for it.
 - Probes are privileged: the process needs `root`, `CAP_NET_RAW`, or Administrator on Windows.
+- On Windows the interface is given as a numeric interface index; resolving an adapter name is not implemented in this version.
 - The QNAP deployment path is Docker through Container Station; a native QPKG is not planned.
 - The configuration is read once at startup; changing it requires a restart.
 - Alerting is out of scope: the database is the integration point for other tools.

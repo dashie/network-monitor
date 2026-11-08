@@ -1,0 +1,28 @@
+# network-monitor configuration.
+#
+# Every key below can also be given on the command line, where it wins over this
+# file (FR-2). The effective configuration after the merge is printed by
+# `network-monitor --show-config`.
+
+# Probe interval in milliseconds.
+interval_ms = 5000
+
+# Maximum wait for the matching echo reply, in milliseconds.
+timeout_ms = 2000
+
+# SQLite event database. Keep it on a local filesystem: WAL is not supported on
+# network shares.
+database = "./tmp/network-monitor.db"
+
+# Delete events older than this many days. 0 keeps every event.
+retention_days = 0
+
+# Probe out of eth1, like `ping -I eth1 1.1.1.1`.
+[[targets]]
+ip = "1.1.1.1"
+# interface = "eth1"
+label = "cloudflare-dns"
+
+# No interface: the default-route interface is used.
+[[targets]]
+ip = "192.168.1.1"

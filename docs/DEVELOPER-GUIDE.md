@@ -3,7 +3,7 @@
 ## Tech stack
 
 - **Language:** Rust, stable toolchain, edition 2021, minimum supported version 1.75.
-- **Compile-time crates:** `clap` (derive) for the command line, `serde` and `toml` for the configuration, `rusqlite` with the `bundled` feature for SQLite, `socket2` for socket options, `libc` on Unix and `windows-sys` on Windows for interface binding, `thiserror` for typed errors.
+- **Compile-time crates:** `clap` (derive) for the command line, `serde` and `toml` for the configuration, `rusqlite` with the `bundled` feature for SQLite, `thiserror` for typed errors, `libc` on Unix for the raw socket, and a hand-written `ws2_32` binding on Windows.
 - **Test crates:** `assert_cmd`, `predicates`, `tempfile`.
 - **Storage:** SQLite 3 compiled into the binary, WAL journal mode.
 - **Release artifacts:** one static executable per platform — `x86_64-unknown-linux-musl`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`.
@@ -37,11 +37,16 @@ network-monitor/
 ├── Cargo.toml            crate metadata, dependencies, MSRV
 ├── Cargo.lock            pinned dependency graph, committed
 ├── Dockerfile            multi-stage static build for the container image
+├── .dockerignore         keeps the build context to the sources
 ├── network-monitor.toml  example configuration, kept in sync with the defaults
 ├── src/
 │   ├── main.rs           entry point, subcommand dispatch, exit codes
+│   ├── lib.rs            library surface used by the integration tests
 │   ├── cli.rs            command-line surface, one flag per configuration key
 │   ├── config.rs         defaults, TOML loading, precedence, validation
+│   ├── logging.rs        line-based diagnostics on stderr
+│   ├── shutdown.rs       stop handle and signal handler
+│   ├── time.rs           epoch milliseconds and RFC 3339 rendering
 │   ├── monitor/
 │   │   ├── mod.rs        interval loop per target, shutdown handling
 │   │   └── state.rs      transition decision from the previous state and the verdict
@@ -58,9 +63,10 @@ network-monitor/
 │       └── render.rs     table and JSON rendering
 ├── tests/
 │   ├── config_precedence.rs  every key, file and flag, in both directions
-│   ├── monitor_state.rs      transitions, no duplicates, local errors
-│   ├── store.rs              schema, concurrent read, retention
-│   └── cli.rs                exit codes and query output
+│   ├── monitor_e2e.rs        end-to-end loop, transitions only, restart continuity
+│   ├── store.rs              schema, concurrent read, retention, labels
+│   ├── cli.rs                exit codes and query output
+│   └── icmp_privileged.rs    real raw-socket probe, ignored unless root
 ├── docs/                 product, architecture, decisions, glossary, developer guide
 ├── .github/              commit and pull request instruction contracts
 └── .vscode/              editor settings that register those contracts
@@ -79,7 +85,7 @@ cargo build --release --target x86_64-unknown-linux-musl
 cargo run -- --help
 cargo run -- monitor --config ./network-monitor.toml
 cargo run -- query state --config ./network-monitor.toml
-cargo run -- query events --target 1.1.1.1 --since 24h --config ./network-monitor.toml
+cargo run -- query events 1.1.1.1 --since 24h --config ./network-monitor.toml
 cargo run -- --show-config --config ./network-monitor.toml
 ```
 
@@ -87,7 +93,7 @@ cargo run -- --show-config --config ./network-monitor.toml
 
 ```bash
 cargo test
-cargo test --test monitor_state
+cargo test --test monitor_e2e
 cargo test --test store
 ```
 
