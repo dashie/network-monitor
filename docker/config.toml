@@ -1,0 +1,20 @@
+# Default configuration shipped inside the container image at
+# /etc/network-monitor/config.toml.
+#
+# It exists so that a bare `docker run` starts and proves that the ICMP socket and the
+# database work, instead of failing on a missing file. It monitors the container's own
+# loopback address: nothing outside the container is probed, and the first probe
+# records one `unknown -> up` transition.
+#
+# Mount your own file over this path (or pass --config elsewhere) to monitor real
+# targets. Point `database` at a mounted volume if the events must survive the
+# container.
+
+interval_ms = 30000
+timeout_ms = 2000
+database = "/var/lib/network-monitor/events.db"
+retention_days = 0
+
+[[targets]]
+ip = "127.0.0.1"
+label = "loopback"

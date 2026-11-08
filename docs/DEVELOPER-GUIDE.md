@@ -37,6 +37,8 @@ network-monitor/
 ├── Cargo.toml            crate metadata, dependencies, MSRV
 ├── Cargo.lock            pinned dependency graph, committed
 ├── Dockerfile            multi-stage static build for the container image
+├── docker/config.toml    default configuration shipped in the image
+├── docker-compose.yml    NAS / Container Station project (host networking)
 ├── .dockerignore         keeps the build context to the sources
 ├── network-monitor.toml  example configuration, kept in sync with the defaults
 ├── src/
@@ -90,6 +92,142 @@ cargo run -- query state --config ./network-monitor.toml
 cargo run -- query events 1.1.1.1 --since 24h --config ./network-monitor.toml
 cargo run -- --show-config --config ./network-monitor.toml
 ```
+
+## Container and QNAP deployment
+
+Build the image and move it to the NAS from the development machine. Two paths,
+same artifact.
+
+The image contains the executable and one default configuration at
+`/etc/network-monitor/config.toml`. That default probes the container's own loopback
+address and writes to `/var/lib/network-monitor/events.db`, so a bare `docker run`
+starts and proves that the raw socket and the database work; nothing outside the
+container is probed. Mount your own file over that path, or pass `--config` elsewhere,
+to monitor real targets. Without a mounted volume the events live in the container
+layer and disappear with it.
+
+Create the configuration file before starting the compose project: when a bind-mount
+source does not exist, Compose creates a directory in its place and the monitor
+reports `Is a directory` instead of reading the file.
+
+### Building and running through a Docker context
+
+The simplest path when the NAS exposes its Docker daemon to a local context (`qubo` in
+the examples): the local build context is streamed to the NAS, the build runs there,
+and the image never travels as a file.
+
+```bash
+docker context ls                                   # qubo -> tcp://qubo:2376
+docker -c qubo build -t network-monitor:dev .
+docker -c qubo run -d --name network-monitor \
+  --cap-drop ALL --cap-add NET_RAW --network host \
+  -v network-monitor-data:/var/lib/network-monitor \
+  network-monitor:dev \
+  monitor --target 1.1.1.1,interface=eth1 --target 192.168.1.1 \
+  --database /var/lib/network-monitor/events.db
+```
+
+`-c <context>` can be prepended to every command that must reach the NAS, including
+`logs`, `stop`, `images` and the query container. The context is configured once:
+
+```bash
+docker context create qubo --docker "host=tcp://qubo:2376"
+docker context create qubo --docker "host=ssh://admin@qubo"   # alternative over SSH
+```
+
+`dev` is the development tag. Tag a release with its version before publishing:
+
+```bash
+docker -c qubo tag network-monitor:dev network-monitor:0.1.0
+```
+
+**Through a registry**, multi-architecture in one command, built on the laptop:
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t registry.example.com/network-monitor:0.1.0 --push .
+```
+
+**Without a registry and without a context**, export and load the image:
+
+```bash
+docker build -t network-monitor:dev .
+docker save network-monitor:dev | gzip > network-monitor-dev.tar.gz
+scp network-monitor-dev.tar.gz admin@nas:/share/Container/
+ssh admin@nas 'gzip -dc /share/Container/network-monitor-dev.tar.gz | docker load'
+```
+
+On the NAS, start the project from [docker-compose.yml](../docker-compose.yml),
+adjusting the image name and the host paths:
+
+```bash
+docker -c qubo compose up -d
+docker -c qubo compose logs -f
+```
+
+### Without compose
+
+```bash
+# Default configuration, database in the container layer: a proof of life.
+docker run --rm --cap-drop ALL --cap-add NET_RAW network-monitor:dev
+
+# Real deployment on the NAS: own configuration, named volume, restart policy.
+docker -c qubo run -d --name network-monitor \
+  --restart unless-stopped \
+  --cap-drop ALL --cap-add NET_RAW \
+  --network host \
+  -v /share/Container/network-monitor/config.toml:/etc/network-monitor/config.toml:ro \
+  -v network-monitor-data:/var/lib/network-monitor \
+  network-monitor:dev \
+  monitor --config /etc/network-monitor/config.toml
+
+# Read the history from a second container while the monitor runs. No capability
+# and no host networking are needed to query.
+docker -c qubo run --rm -v network-monitor-data:/var/lib/network-monitor \
+  network-monitor:dev query events --database /var/lib/network-monitor/events.db
+
+# Effective configuration, and the live log stream.
+docker -c qubo run --rm network-monitor:dev --show-config --config /etc/network-monitor/config.toml
+docker -c qubo logs -f network-monitor
+
+# Stop: SIGTERM, the monitor finishes the current cycle and exits.
+docker -c qubo stop network-monitor
+```
+
+Passing a command replaces the image `CMD`, so the default `--config` disappears with
+it: when `monitor` is given explicitly, `--config` must be given too. With no
+arguments at all, the image uses its own default file. Targets can also come entirely
+from the command line, with no mounted file — the command used to validate the QNAP
+deployment:
+
+```bash
+docker -c qubo run -d --name network-monitor \
+  --cap-drop ALL --cap-add NET_RAW --network host \
+  -v network-monitor-data:/var/lib/network-monitor \
+  network-monitor:dev \
+  monitor --target 1.1.1.1,interface=eth1 --target 192.168.1.1 \
+  --database /var/lib/network-monitor/events.db
+```
+
+The database file is created by the monitor: on a fresh volume, a query started before
+the first write reports that it does not exist yet.
+
+### Choosing the physical interface on a multi-NIC NAS
+
+Interface names inside a container are not the names of the NAS interfaces. A default
+bridge gives the container its own `eth0` on a virtual network, so an `interface`
+value that names a NAS NIC cannot be resolved; the monitor refuses to start and names
+the missing interface (BR-5).
+
+To probe from a physical NIC, run the container with host networking
+(`network_mode: host`, as in the compose file). The interfaces visible inside are
+then the NAS interfaces, and `interface = "eth1"` selects the second physical port
+exactly as on a bare host. List the names on the NAS with `ip -br link` or
+`ifconfig -l`.
+
+When network isolation is required instead, create one macvlan network per physical
+interface and one container per interface, leaving `interface` unset: each container's
+`eth0` is the parent NIC. Two NICs then mean two containers and two databases.
 
 ## Test
 

@@ -1,0 +1,43 @@
+# docker compose project for network-monitor, used on a NAS (QNAP Container
+# Station) and on any host with Docker.
+#
+#   docker compose up -d
+#   docker compose logs -f
+#
+# Container Station: Applications > Create > Create Application, then paste this
+# file. Adjust the image name and the host paths to the NAS layout.
+
+services:
+  network-monitor:
+    # Development tag; tag the same image with the release version when publishing.
+    image: network-monitor:dev
+    container_name: network-monitor
+    restart: unless-stopped
+
+    # Host networking is what makes `interface = "eth1"` in the configuration mean
+    # the physical interface of the NAS. With the default bridge the container gets
+    # its own eth0 on a virtual network and the NAS interfaces are not visible.
+    network_mode: host
+
+    # Opening a raw ICMP socket is the only privileged operation.
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_RAW
+
+    volumes:
+      # Configuration, read-only. It can point anywhere; the database path below
+      # wins anyway.
+      - ./network-monitor.toml:/etc/network-monitor/config.toml:ro
+      # Event database. Must be a local volume, not a network share: WAL does not
+      # work on SMB or NFS.
+      - ./data:/var/lib/network-monitor
+
+    # The command line wins over the file, so the database always lands on the
+    # mounted volume even when the configuration says something else.
+    command:
+      - monitor
+      - --config
+      - /etc/network-monitor/config.toml
+      - --database
+      - /var/lib/network-monitor/events.db
