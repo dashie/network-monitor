@@ -212,6 +212,43 @@ docker -c qubo run -d --name network-monitor \
 The database file is created by the monitor: on a fresh volume, a query started before
 the first write reports that it does not exist yet.
 
+### Inspecting a running container
+
+The runtime image is `scratch`: it is not the `rust:1-alpine` build stage, which is
+discarded. There is no shell, no `ip`, no `sqlite3` — only `/network-monitor`. An
+`exec` of `/bin/sh` or `/bin/bash` fails with `no such file or directory` (exit 126 or
+127). That is deliberate: the smallest possible surface and a 4.5 MB image.
+
+`exec` can still run the binary itself, without mounting a second container:
+
+```bash
+docker -c qubo exec network-monitor \
+  /network-monitor query state --database /var/lib/network-monitor/events.db
+```
+
+To take the database away:
+
+```bash
+# While it runs, copy the whole directory: recent writes live in the -wal file.
+docker -c qubo cp network-monitor:/var/lib/network-monitor ./data
+
+# After a clean stop the WAL is checkpointed, so the single file is complete.
+docker -c qubo stop network-monitor
+docker -c qubo cp network-monitor:/var/lib/network-monitor/events.db ./events.db
+sqlite3 ./events.db 'select target, state, occurred_at_ms from events;'
+```
+
+To inspect the network the container actually sees, join its namespace with a tool
+image; the interfaces are the same, including when host networking is in use:
+
+```bash
+docker -c qubo run --rm --network container:network-monitor alpine:3.20 ip -o link
+```
+
+Use `nicolaka/netshoot` instead of `alpine` when you need `ping`, `tcpdump`, or `ss`.
+The host interfaces of the NAS are visible from its own shell over SSH, not from the
+container when a bridge network is in use.
+
 ### Choosing the physical interface on a multi-NIC NAS
 
 Interface names inside a container are not the names of the NAS interfaces. A default
