@@ -64,6 +64,7 @@ network-monitor/
 │   ├── query/
 │   │   ├── mod.rs        filters and read path
 │   │   └── render.rs     table and JSON rendering
+│   ├── import.rs         restore a history from the exported CSV (path, URL, stdin)
 │   └── web/
 │       ├── mod.rs        HTTP loop, routes, window parsing
 │       └── page.rs       HTML and SVG generation
@@ -74,6 +75,7 @@ network-monitor/
 │   ├── store.rs              schema, concurrent read, retention, labels
 │   ├── cli.rs                exit codes and query output
 │   ├── web.rs                page, disconnection table, detail page, no writes
+│   ├── import.rs             export round trip, plain CSV, stdin, URL, duplicates
 │   └── icmp_privileged.rs    real raw-socket probe, ignored unless root
 ├── docs/                 product, architecture, decisions, glossary, developer guide
 ├── .github/              commit and pull request instruction contracts
@@ -94,6 +96,7 @@ cargo run -- --help
 cargo run -- monitor --config ./network-monitor.toml
 cargo run -- monitor --config ./network-monitor.toml --listen 127.0.0.1:8642
 cargo run -- serve --database ./network-monitor.db --listen 127.0.0.1:8642
+cargo run -- import ./history.csv.gz --database ./network-monitor.db
 cargo run -- query state --config ./network-monitor.toml
 cargo run -- query events 1.1.1.1 --since 24h --config ./network-monitor.toml
 cargo run -- --show-config --config ./network-monitor.toml
@@ -289,13 +292,79 @@ docker -c qubo run -d --name network-monitor-web \
   serve --listen 0.0.0.0:8642 --database /var/lib/network-monitor/events.db
 ```
 
-### Downloading the disconnection history
+### Restoring the history after a redeploy
+
+The download comes back as a history: point `import` at the file, at the running page,
+or pipe it, and the disconnections are written into the target database.
+
+```bash
+# from the archive the page offered
+network-monitor import ./disconnections-20261109.csv.gz --database /var/lib/network-monitor/events.db
+
+# straight from the page
+network-monitor import http://nas:8642/export/disconnections.csv.gz --database ./events.db
+
+# from a pipe, with the format detected
+gunzip -c disconnections.csv.gz | network-monitor import - --database ./events.db
+```
+
+The format is detected from the first two bytes, so a plain CSV works as it is. The rows need no order: the chain is rebuilt from the timestamps at the end of the import, and an event that repeats the state before it is dropped and counted. Running
+the same import twice is harmless: an event already in the database is skipped and
+counted, and the command reports `imported 2870 events for 2 target(s) … (0 rows
+skipped, gzip format)`. Labels and interfaces are not part of the CSV; the next probe of
+the monitor writes them back from the configuration.
+
+Only `http://` URLs are accepted: the binary carries no TLS stack. Download an `https`
+archive with `curl` and import the file.
+
+A merge adds to what is there; `--replace-window` replaces what the archive covers. The
+window is the earliest start and the latest end in the file, and everything of every
+target inside it is deleted before the archive is written; the history before and after
+stays.
+
+```bash
+# re-apply a corrected archive over the same days
+network-monitor import corrected.csv.gz --replace-window --database ./events.db
+```
+
+The archive is read twice in that mode, so stdin and an URL are copied once into
+`.import-<pid>.tmp` next to the database (the second pass must see the same bytes: an
+exported URL is regenerated on every request); the copy is removed when the command
+ends. An empty archive has no window, so the command refuses and deletes nothing.
+
+Run the import with the monitor **stopped**: stop the service, import, start it again.
+The monitor decides a transition from the state it loaded at startup, so a history
+written under a running monitor leaves it with a stale view, and an imported row newer
+than the live one can flip the current state on the page until the next probe. The page
+itself (`serve`, or `monitor --listen`) can stay up: readers never block the writer, and
+the next 30 s refresh shows the imported data.
+
+Two writers do work — WAL plus a 5 s `busy_timeout` — and a 600 000-event import next to
+a writer committing every 20 ms produced no lock error and a worst commit of 9 ms on a
+local disk. It is still not the intended mode: on slow storage a batch that takes longer
+than the timeout makes the monitor's write fail, and a store that cannot write stops the
+monitor rather than losing transitions.
+
+With `retention_days` set, imported events older than the cut-off are pruned on the next
+retention pass; import a history you want to keep with retention disabled, or accept the
+trim.
+
+### Downloading the history
 
 The page links it, and the same archive can be fetched from a script:
 
 ```bash
 curl -O http://127.0.0.1:8642/export/disconnections.csv.gz
 gunzip -c disconnections-*.csv.gz | head
+```
+
+One row per event, with the columns the import reads:
+
+```csv
+target,label,interface,state,occurred_at,rtt_us
+192.168.1.1,gateway,eth1,up,2026-11-09T03:42:01.236Z,12000
+192.168.1.1,gateway,eth1,down,2026-11-09T04:42:01.236Z,
+192.168.1.1,gateway,eth1,up,2026-11-09T05:12:01.236Z,15000
 ```
 
 The response is chunked and the CSV is deflated while it is sent, so the size of the

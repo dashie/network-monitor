@@ -118,8 +118,9 @@ C4Container
 | `monitor` | Supervise one interval loop per target, decide whether a transition occurred, reload the configuration file, dispatch transitions to the store | `run(config, prober, store, shutdown, reload)` |
 | `reload` | Compare the configuration file with the last accepted content and report a change | `Watcher`, `Change`, `POLL_INTERVAL` |
 | `web` | Serve the read-only timeline, the per-target detail page, and a health check | `bind`, `serve`, `page`, `target_page` |
-| `store` | Own the schema, migrations, the event write transaction, retention, and the read queries | `Store`, `Event`, `TargetState`, `DownEpisode`, `StoreError` |
+| `store` | Own the schema, migrations, the event write transaction, retention, and the read queries | `Store`, `Event`, `TargetState`, `DownEpisode`, `ExportedEvent`, `StoreError` |
 | `query` | Read current state and event history, apply filters, render a table or JSON | `QueryFilter`, `Renderer` |
+| `import` | Restore a history from the exported CSV, read from a path, an `http://` URL, or stdin | `run`, `parse_source`, `Report`, `ImportError` |
 
 ### Component contracts
 
@@ -162,8 +163,15 @@ C4Container
 ### `web`
 
 - **Input:** the database path and an optional `from`/`to`/`target` query string; a bound listener in tests.
-- **Output:** the timeline page with the last 10 disconnections, the detail page of one target, a streamed gzipped CSV of the whole disconnection history, a plain-text health check, or a plain-text error.
+- **Output:** the timeline page with the last 10 disconnections, the detail page of one target, a streamed gzipped CSV of every event, a plain-text health check, or a plain-text error. The CSV columns are `target,label,interface,state,occurred_at,rtt_us`: the same file the import reads back.
 - **Guarantees:** every request opens the database read-only; only `GET` and `HEAD` are answered; dynamic text is HTML-escaped; the window is clamped to the last 30 days and never past now; nothing is written, and the socket exists only while the process that bound it runs. The export is streamed as HTTP chunks and deflated on the fly, in pages of 1 000 events: the response holds no copy of the file and no long read transaction.
+
+### `import`
+
+- **Input:** the database path and a source string — a path, an `http://` URL, or `-`.
+- **Output:** a `Report` with the number of events written, the number of rows ignored, the number of targets, and the detected format.
+- **Guarantees:** the archive is the format the page exports, one row per event, gzipped or plain, detected from the first two bytes; the older disconnection-only header is refused with a message; events are batched into one transaction per 500 rows; an event already present is not written twice; the rows may arrive in any order, because after the writes one pass driven by the timestamps drops the events that repeat the state before them (BR-1) and points every event at the state it really replaced; the target projection, labels and interfaces included, is then rebuilt from the events.
+- **Replace mode:** with `--replace-window` the archive is read once to find the window it covers, every event inside that window is deleted, the archive is applied in a second pass over the same bytes — standard input and an URL are spooled to a temporary file next to the database, so both passes see the same content — and the target projection is rebuilt from the events that remain. The state before the window seeds the `previous_state` of the first imported event.
 
 ### Data model
 
@@ -246,7 +254,7 @@ Takeaway: the write path is one transaction per transition, and the read path ne
 - **Container.** A multi-stage image builds the static musl binary and copies it onto a minimal base, together with a default configuration that probes the container's loopback so a bare `docker run` starts. The process runs as the container user with `--cap-drop ALL --cap-add NET_RAW`, the configuration mounted read-only over the default when real targets are needed, and a volume for the database. No port is published: the page, when the command adds `--listen`, binds the host address directly through host networking. Host networking (`network_mode: host`) is required when a target is bound to a physical interface, because a bridge container only sees its own `eth0`.
 - **QNAP Container Station.** A project from [docker-compose.yml](../docker-compose.yml) that pulls the image, mounts `/share/Container/network-monitor/config.toml` read-only and `/share/Container/network-monitor/data` as the database volume, with restart policy `unless-stopped` and host networking. The volume must be a local share, not a network share. Build and deployment — including a Docker context that points at the NAS so the image is built there — are in [DEVELOPER-GUIDE.md](./DEVELOPER-GUIDE.md#container-and-qnap-deployment).
 - **Configuration sources.** The TOML file, then the command line; the container passes the latter through the compose `command` field. There is no environment-variable layer.
-- **Upgrades.** Replace the binary or image and restart. The schema is migrated on open; a rollback to an older binary against a newer schema is refused, so the database must be backed up before a downgrade.
+- **Upgrades.** Replace the binary or image and restart. The schema is migrated on open; a rollback to an older binary against a newer schema is refused, so the database must be backed up before a downgrade. `import` restores the disconnection history into a fresh database after a redeploy: it does not know the labels and the interfaces, which the next probe of the monitor writes back from the configuration.
 - **Web page.** The same process that probes can serve the page: `monitor --config … --database … --listen 0.0.0.0:8642`. With host networking the listener needs no published port and shares the volume it is already writing. `serve --listen … --database …` remains the option for a viewer that must not have `NET_RAW`; it reads the same volume and can run on another host.
 
 ## 8. Cross-cutting concepts

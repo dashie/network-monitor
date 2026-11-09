@@ -75,6 +75,18 @@ pub enum Command {
         listen: String,
     },
 
+    /// Import a history exported from the web page
+    Import {
+        /// File path, http:// URL, or - for standard input
+        #[arg(value_name = "PATH|URL|-", allow_hyphen_values = true)]
+        source: String,
+
+        /// Replace every event inside the window the archive covers; events before and
+        /// after it are kept
+        #[arg(long)]
+        replace_window: bool,
+    },
+
     /// Read the recorded state and history
     Query {
         #[command(subcommand)]

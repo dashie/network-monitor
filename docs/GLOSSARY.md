@@ -21,6 +21,7 @@ appears in a requirement, in a component name, or in a public interface.
 | **State transition** | A change of a target's verdict between two consecutive probe cycles. |
 | **Target** | One IP address under supervision, with an optional interface and an optional label. |
 | **Target specification** | The command-line form of a target: `IP[,interface=NAME][,label=NAME]`. |
+| **Archive** | The gzipped CSV of every event, written by the page and read by `import`; one format, two directions. |
 | **Down episode** | One `down` transition and, if it happened, the transition back to `up`; its duration is the distance between the two, or from the transition to now while the target is still down. |
 | **Timeline segment** | An interval of constant state for one target, from one transition to the next or to the edge of the window. |
 | **Timeout** | The maximum time a probe waits for a matching echo reply; its expiry yields `down`. |

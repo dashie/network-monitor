@@ -6,6 +6,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod import;
 pub mod logging;
 pub mod monitor;
 pub mod probe;

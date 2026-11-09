@@ -24,6 +24,9 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0010 | Render the timeline without client-side interaction | accepted | 2026-11-09 | Fixed window, 30 s meta refresh, no zoom; last 10 disconnections listed |
 | ADR-0011 | Stream the history export as a hand-written ZIP | superseded by ADR-0012 | 2026-11-09 | Chunked response, deflate on the fly, paged reads, `flate2` only |
 | ADR-0012 | Stream the export as a gzipped CSV instead of a ZIP | accepted | 2026-11-09 | gzip is a single stream: no container, no size known in advance |
+| ADR-0013 | Import the exported CSV back into the database | accepted | 2026-11-09 | One positional source, format sniffed, batched writes, idempotent |
+| ADR-0014 | Replace the window the archive covers on import | accepted | 2026-11-09 | `--replace-window`: delete the covered period, rebuild the projection |
+| ADR-0015 | Export every event so one file serves export and import | accepted | 2026-11-09 | One row per event with label and interface; round trip is lossless |
 
 ## Records
 
@@ -362,3 +365,116 @@ gzip is a single stream: a fixed 10-byte header, deflate data, and a trailer wit
 - `tar.gz`: rejected, a tar header carries the file size, so an unknown-length response would need an extra pass over the database with a frozen upper bound, or a buffer.
 - `Content-Encoding: gzip` on a plain CSV: rejected, a browser that saves the response keeps gzip bytes under a `.csv` name.
 - Offer both formats: rejected for now, two code paths for one file; one format is easy to add later if a Windows-only consumer appears.
+
+## ADR-0013 — Import the exported CSV back into the database
+
+**Status:** accepted · **Date:** 2026-11-09
+**Relates to:** ADR-0012 (the export format the import consumes).
+
+### Context
+
+A redeploy replaces the container and, with it, the database: the image is ephemeral, the volume may be recreated, and the history is gone. The page can hand out the history as a gzipped CSV, but nothing could put it back.
+
+### Decision
+
+Add an `import` subcommand that reads the same file the page exports and writes the events back:
+
+- **Source:** one positional argument. `-` is standard input, a string starting with `http://` or `https://` is a URL, anything else is a path.
+- **Format:** detected from the first two bytes (`1f 8b` is gzip), so a plain CSV and a gzipped one need no flag.
+- **Streaming:** the file is read line by line and events are written in transactions of 500 rows; the archive is never loaded whole, and the URL body is de-chunked while it is parsed.
+- **Semantics:** a row becomes a `down` at its start and, when closed, an `up` at its end. Nothing is invented: the export does not carry the `up` that preceded the first disconnection, so the restored history starts with `unknown → down`.
+- **Idempotence:** `Store::import_events` inserts an event only when the same target, state, and instant are not there yet, and the target projection takes the minimum `first_seen_at_ms` and the maximum `last_change_at_ms`, so importing the same file twice changes nothing and merging an older history never moves a target backwards in time.
+- **Invariants:** the importer tracks the state of each target while it reads and skips a `down` that would follow another `down`, so BR-1 holds even for a file that was edited by hand.
+
+The client is denied by construction: no TLS, so `https` is refused with a message telling the operator to download the file first.
+
+### Consequences
+
+- The round trip restores every disconnection and the current state; it does not restore labels and interfaces, which the next probe of the monitor writes from the configuration.
+- A broken line is skipped and counted, never guessed at; the command exits 0 and reports `imported N events … (M rows skipped)`.
+- The import writes only the database: no probe, no listener, no configuration needed beyond `--database`.
+- A CSV edited by hand is accepted as long as it keeps the columns; the duration and `ongoing` columns are informational and ignored.
+- The HTTP client is about a hundred lines and supports only `http://`, `Content-Length`, `Transfer-Encoding: chunked`, and no redirects.
+- The import is meant to run with the monitor stopped: the monitor decides transitions from the state it loaded at startup, so a concurrent import leaves it with a stale view of the history it now sits on top of.
+
+### Alternatives considered
+
+- `cp` the SQLite file: rejected for the redeploy case, where the file may be gone; it is still the right tool when it survives.
+- An HTTP `POST` upload endpoint on the page: rejected, it turns a read-only page into a write surface reachable from the network, and the CLI already covers the restore.
+- A JSON or SQL dump format: rejected, the CSV the page already exports is the one artefact the operator has.
+- Restoring by re-deriving events from `query events` JSON: rejected, more parsing code for the same data.
+- A full HTTP client crate: rejected, `https`, redirects, and connection pooling are not needed for one GET on a LAN.
+
+## ADR-0014 — Replace the window the archive covers
+
+**Status:** accepted · **Date:** 2026-11-09
+**Extends:** ADR-0013 (the import itself).
+
+### Context
+
+A merge only ever adds: importing a corrected archive over the days it covers leaves the old events in place, so the history ends up with both the wrong and the right version of the same outage. The operator needs to re-apply an archive to the same database and get exactly the archive inside it.
+
+### Decision
+
+`import --replace-window` deletes every event of every target inside the window the archive covers, then writes the archive:
+
+- **The window** is `[earliest start, latest end]` of the rows, both inclusive; an open row contributes its start. Everything inside it disappears, whatever the target, because an archive describes the whole period it spans, not only the rows it lists.
+- **Two passes.** The window is only known after the last row, so the archive is read once to find it and once to apply it. A path is re-opened; standard input and an URL are spooled once into `.import-<pid>.tmp` next to the database and removed afterwards — an exported URL is regenerated per request, so two downloads would not be the same file.
+- **The name says what it does.** `--replace` alone would suggest emptying the database; `--overwrite` hides that the rest of the period survives.
+- **The projection is rebuilt.** After the deletion the `targets` rows are recomputed from the events that remain (`MIN`/`MAX`, newest state and round-trip time) and a target left with no event is dropped, so the page never describes a history that is no longer there.
+- **The seam is truthful.** Imports write `down`/`up` pairs without deciding a previous state, and one pass at the end recomputes `previous_state` from the timestamps and drops the events that repeat the state before them. The transition at the seam therefore reads `up -> down`, and rows that arrive out of order — a concatenated or hand-sorted file — produce the same chain as an ordered one.
+- **An empty archive has no window**, so it is refused before anything is deleted.
+
+### Consequences
+
+- Re-applying a corrected archive is idempotent in the useful sense: the window ends up equal to the archive, the rest is untouched.
+- The normalisation pass is global: it also repairs a chain that arrived disordered from an earlier import, and it costs one ordered scan of the table per import.
+- The deletion is one statement inside the same process: no partial window is ever visible to a reader mid-import, because each batch commits separately and readers see either side of a commit.
+- Importing an archive whose targets are unknown to the database removes events of other targets inside the window: that is the point, and it is also the sharp edge of the option.
+- The spool copy costs the size of the archive in disk next to the database, and it is removed on exit.
+- `busy_timeout` still applies: a replace on a running monitor has the same caveats as a merge.
+
+### Alternatives considered
+
+- Delete per target, only for the targets in the archive: rejected, it leaves the other targets' events inside the same period mixed with a period that the archive rewrote.
+- Delete everything and import: rejected, it is `--replace` and contradicts the requirement to keep the rest of the period.
+- Stream with a single pass and delete lazily around each row: rejected, it would delete per row and leave events of other targets inside the window alive.
+- Require the archive to carry its own window (a comment header): rejected, the format is the one the page exports and must stay that.
+
+## ADR-0015 — One file for export and import: every event
+
+**Status:** accepted · **Date:** 2026-11-09
+**Supersedes:** the disconnection-only export of FR-18 and the row semantics of ADR-0013.
+
+### Context
+
+The export wrote one row per disconnection, with the return to `up` folded into an `ended_at` column. The import read that file and unfolded it. Two shapes for one thing: the file could not be read by a tool that wanted the events, an always-up target was never exported at all, the first `unknown -> up` of every target was lost on a restore, and every change to the table meant a change on both sides.
+
+### Decision
+
+The export writes **every event**, one row each, with the columns the import reads:
+
+```csv
+target,label,interface,state,occurred_at,rtt_us
+192.168.1.1,gateway,eth1,down,2026-11-09T04:42:01.236Z,
+192.168.1.1,gateway,eth1,up,2026-11-09T05:12:01.236Z,15000
+```
+
+- `label` and `interface` come from the target row (the events table stores neither the label nor a historical name), so a restore recreates the identity of the target, not just its history.
+- `rtt_us` is empty for `down`; `previous_state` is not exported, because it is a property of the chain and the import recomputes it from the timestamps.
+- The rows arrive in insertion order, which is chronological per target; the import does not depend on that order anyway.
+- The import replays the rows as they are, and refuses the old header with a message that asks for a fresh export instead of guessing.
+
+### Consequences
+
+- A round trip is **lossless**: 5 events in, 5 events out, same states, same instants, same label, interface, and round-trip times; the always-up target comes back too.
+- One format to document, one set of columns to keep stable, and a file that any tool can read: a spreadsheet, `pandas`, `sqlite3`.
+- The archive is roughly twice the size of the disconnection-only one for the same period, because the `up` rows are back in it.
+- `--replace-window` now takes its window from the earliest and latest **event** it carries, which is the same instant range as before.
+- A file from an earlier version is refused; there is no compatibility reader to maintain, and the message says what to do.
+
+### Alternatives considered
+
+- Keep both formats and sniff one from the other: rejected, two readers for one feature, and the ambiguity never ends.
+- Export events but keep reading the old shape on import: rejected, the same complexity with a longer life.
+- Export a database copy instead of a CSV: rejected in ADR-0013 and still rejected; the page has a portable file, and `cp` remains the answer when the volume survives.

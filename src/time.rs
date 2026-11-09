@@ -56,6 +56,82 @@ pub fn parse_since(value: &str, now_ms: i64) -> Result<i64, String> {
         .map_err(|_| "expected a duration such as 24h or an epoch-millisecond value".to_string())
 }
 
+/// Parse `YYYY-MM-DDTHH:MM:SS.mmmZ` into epoch milliseconds.
+///
+/// Only the format this binary writes is accepted: a UTC instant with millisecond
+/// precision. Returns `None` for anything else, including an impossible date.
+pub fn parse_rfc3339(text: &str) -> Option<i64> {
+    if !text.is_ascii() || text.len() < 20 || text.len() > 24 {
+        return None;
+    }
+    let bytes = text.as_bytes();
+    if bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
+        return None;
+    }
+
+    let year: i64 = text[0..4].parse().ok()?;
+    let month: u32 = text[5..7].parse().ok()?;
+    let day: u32 = text[8..10].parse().ok()?;
+    let hour: i64 = text[11..13].parse().ok()?;
+    let minute: i64 = text[14..16].parse().ok()?;
+    let second: i64 = text[17..19].parse().ok()?;
+
+    let millis: i64 = match &text[19..] {
+        "Z" => 0,
+        rest => {
+            let fraction = rest.strip_prefix('.')?.strip_suffix('Z')?;
+            if fraction.len() != 3 {
+                return None;
+            }
+            fraction.parse().ok()?
+        }
+    };
+
+    if !(1..=12).contains(&month)
+        || day == 0
+        || day > days_in_month(year, month)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+
+    let days = days_from_civil(year, month, day);
+    let seconds_of_day = hour * 3_600 + minute * 60 + second;
+    Some(days * 86_400_000 + seconds_of_day * 1_000 + millis)
+}
+
+fn days_in_month(year: i64, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 => 29,
+        _ => 28,
+    }
+}
+
+/// A civil date to a day count since 1970-01-01, after Howard Hinnant's
+/// `days_from_civil`.
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month_index = if month > 2 {
+        month as i64 - 3
+    } else {
+        month as i64 + 9
+    };
+    let day_of_year = (153 * month_index + 2) / 5 + day as i64 - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
 fn parse_amount(number: &str) -> Result<i64, String> {
     number
         .trim()
@@ -124,6 +200,49 @@ mod tests {
     #[test]
     fn parses_absolute_milliseconds() {
         assert_eq!(parse_since("1762560000000", 0).unwrap(), 1_762_560_000_000);
+    }
+
+    #[test]
+    fn parses_the_timestamps_of_the_export() {
+        assert_eq!(parse_rfc3339("1970-01-01T00:00:00.000Z"), Some(0));
+        assert_eq!(
+            parse_rfc3339("2026-11-08T00:00:00.000Z"),
+            Some(1_794_096_000_000)
+        );
+        assert_eq!(
+            parse_rfc3339("2026-11-08T00:00:00Z"),
+            Some(1_794_096_000_000)
+        );
+        assert_eq!(parse_rfc3339("1969-12-31T23:59:59.999Z"), Some(-1));
+    }
+
+    #[test]
+    fn a_parsed_timestamp_formats_back_to_the_same_text() {
+        for text in [
+            "1970-01-01T00:00:00.000Z",
+            "2026-11-08T12:34:56.789Z",
+            "2024-02-29T23:59:59.001Z",
+        ] {
+            assert_eq!(format_rfc3339(parse_rfc3339(text).unwrap()), text);
+        }
+    }
+
+    #[test]
+    fn impossible_or_malformed_timestamps_are_rejected() {
+        for text in [
+            "",
+            "2026-11-08",
+            "2026-13-01T00:00:00.000Z",
+            "2026-02-30T00:00:00.000Z",
+            "2023-02-29T00:00:00.000Z",
+            "2026-11-08T24:00:00.000Z",
+            "2026-11-08T00:60:00.000Z",
+            "2026-11-08T00:00:00+02:00",
+            "2026-11-08T00:00:00.1Z",
+            "oggi",
+        ] {
+            assert!(parse_rfc3339(text).is_none(), "accepted {text}");
+        }
     }
 
     #[test]

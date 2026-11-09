@@ -268,7 +268,7 @@ fn handle(mut stream: TcpStream, database: &Path) {
                 let mut chunked = Chunked {
                     stream: &mut stream,
                 };
-                export::write_csv_gz(&mut chunked, &store, exported_at)
+                export::write_csv_gz(&mut chunked, &store)
             };
             if let Err(error) = outcome {
                 logging::error(None, &format!("web: export failed: {error}"));

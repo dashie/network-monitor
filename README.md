@@ -33,6 +33,10 @@ sudo ./target/release/network-monitor monitor --config ./network-monitor.toml \
 # Serve the page alone, without probing or NET_RAW
 ./target/release/network-monitor serve --database ./network-monitor.db --listen 127.0.0.1:8642
 
+# Restore the history from the file that page downloaded
+./target/release/network-monitor import ./disconnections-20261109.csv.gz \
+  --database ./network-monitor.db
+
 # Run the test suite (no privileges needed: the ICMP prober is replaced by a fake)
 cargo test
 ```

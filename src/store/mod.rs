@@ -117,6 +117,19 @@ pub struct DailyDrops {
     pub drops: u32,
 }
 
+/// One event as the export writes it: the label comes from the target row, because the
+/// events table stores the identity of the target, not its current name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportedEvent {
+    pub id: i64,
+    pub target: String,
+    pub label: Option<String>,
+    pub interface: Option<String>,
+    pub state: TargetState,
+    pub occurred_at_ms: i64,
+    pub rtt_us: Option<i64>,
+}
+
 /// One disconnection: the moment a target went down and, if it came back, the moment
 /// it did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -377,6 +390,134 @@ impl Store {
         Ok(())
     }
 
+    /// Insert imported events that are not in the database yet, in one transaction,
+    /// and keep the target projection consistent with the newest event.
+    ///
+    /// An event already present — same target, state, and instant — is left alone, so
+    /// importing the same archive twice changes nothing. The projection never moves
+    /// backwards: `first_seen_at_ms` takes the minimum, `last_change_at_ms` the
+    /// maximum, and the current state follows the newest event.
+    pub fn import_events(&mut self, events: &[Event]) -> Result<u32, StoreError> {
+        let transaction = self.connection.transaction()?;
+        let mut inserted = 0;
+
+        {
+            let mut insert = transaction.prepare(
+                "INSERT INTO events
+                    (target, interface, previous_state, state, occurred_at_ms, rtt_us)
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6
+                  WHERE NOT EXISTS (
+                     SELECT 1 FROM events
+                      WHERE target = ?1 AND state = ?4 AND occurred_at_ms = ?5
+                  )",
+            )?;
+            let mut project = transaction.prepare(
+                "INSERT INTO targets
+                    (target, interface, label, current_state,
+                     first_seen_at_ms, last_change_at_ms, last_rtt_us)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)
+                 ON CONFLICT(target) DO UPDATE SET
+                    first_seen_at_ms  = MIN(targets.first_seen_at_ms, excluded.first_seen_at_ms),
+                    current_state     = CASE
+                        WHEN excluded.last_change_at_ms >= targets.last_change_at_ms
+                        THEN excluded.current_state ELSE targets.current_state END,
+                    last_change_at_ms = MAX(targets.last_change_at_ms, excluded.last_change_at_ms),
+                    interface         = COALESCE(targets.interface, excluded.interface),
+                    label             = COALESCE(targets.label, excluded.label),
+                    last_rtt_us       = COALESCE(excluded.last_rtt_us, targets.last_rtt_us)",
+            )?;
+
+            for event in events {
+                inserted += insert.execute(params![
+                    event.target,
+                    event.interface,
+                    event.previous_state.as_str(),
+                    event.state.as_str(),
+                    event.occurred_at_ms,
+                    event.rtt_us,
+                ])? as u32;
+                project.execute(params![
+                    event.target,
+                    event.interface,
+                    event.label,
+                    event.state.as_str(),
+                    event.occurred_at_ms,
+                    event.rtt_us,
+                ])?;
+            }
+        }
+
+        transaction.commit()?;
+        Ok(inserted)
+    }
+
+    /// Delete every event of every target inside `[from_ms, to_ms]`, inclusive.
+    pub fn delete_events_between(&self, from_ms: i64, to_ms: i64) -> Result<usize, StoreError> {
+        let deleted = self.connection.execute(
+            "DELETE FROM events WHERE occurred_at_ms BETWEEN ?1 AND ?2",
+            params![from_ms, to_ms],
+        )?;
+        Ok(deleted)
+    }
+
+    /// Recompute every target row from the events that are left, and drop the targets
+    /// that have none. Used after events have been deleted: the projection must never
+    /// describe a history that is no longer there.
+    pub fn rebuild_from_events(&self) -> Result<(), StoreError> {
+        self.connection.execute_batch(
+            "DELETE FROM targets
+              WHERE NOT EXISTS (SELECT 1 FROM events WHERE events.target = targets.target);
+             UPDATE targets SET
+                first_seen_at_ms  = (SELECT MIN(e.occurred_at_ms) FROM events e
+                                      WHERE e.target = targets.target),
+                last_change_at_ms = (SELECT MAX(e.occurred_at_ms) FROM events e
+                                      WHERE e.target = targets.target),
+                current_state     = (SELECT e.state FROM events e
+                                      WHERE e.target = targets.target
+                                      ORDER BY e.occurred_at_ms DESC, e.id DESC LIMIT 1),
+                last_rtt_us       = (SELECT e.rtt_us FROM events e
+                                      WHERE e.target = targets.target
+                                      ORDER BY e.occurred_at_ms DESC, e.id DESC LIMIT 1)",
+        )?;
+        Ok(())
+    }
+
+    /// Make the stored chain consistent whatever order the events arrived in.
+    ///
+    /// Two repairs, both driven by the timestamps rather than by insertion order:
+    /// an event that repeats the state of the one before it is dropped (BR-1), and every
+    /// event is told which state it really replaced. Returns how many events were dropped.
+    pub fn normalize_history(&self) -> Result<u32, StoreError> {
+        let dropped = self.connection.execute(
+            "DELETE FROM events WHERE id IN (
+                 SELECT id FROM (
+                     SELECT id,
+                            state AS current,
+                            LAG(state) OVER (
+                                PARTITION BY target ORDER BY occurred_at_ms, id
+                            ) AS previous_state
+                     FROM events
+                 )
+                 WHERE previous_state = current
+             )",
+            [],
+        )? as u32;
+
+        self.connection.execute(
+            "UPDATE events SET previous_state = COALESCE((
+                 SELECT earlier.state FROM events earlier
+                  WHERE earlier.target = events.target
+                    AND (earlier.occurred_at_ms < events.occurred_at_ms
+                         OR (earlier.occurred_at_ms = events.occurred_at_ms
+                             AND earlier.id < events.id))
+                  ORDER BY earlier.occurred_at_ms DESC, earlier.id DESC
+                  LIMIT 1), 'unknown')",
+            [],
+        )?;
+
+        Ok(dropped)
+    }
+
     /// Delete events older than `before_ms`; the `targets` rows are kept (FR-10).
     pub fn prune(&self, before_ms: i64) -> Result<usize, StoreError> {
         let deleted = self.connection.execute(
@@ -516,6 +657,41 @@ impl Store {
             day += DAY_MS;
         }
         Ok(days)
+    }
+
+    /// One page of the whole history in insertion order, for a streamed export.
+    ///
+    /// Paging keeps every read transaction short, so a slow download never holds the
+    /// WAL checkpoints of the writer.
+    pub fn events_after(
+        &self,
+        after_id: i64,
+        limit: u32,
+    ) -> Result<Vec<ExportedEvent>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT e.id, e.target, t.label, e.interface, e.state, e.occurred_at_ms, e.rtt_us
+               FROM events e
+               LEFT JOIN targets t ON t.target = e.target
+              WHERE e.id > ?1
+              ORDER BY e.id
+              LIMIT ?2",
+        )?;
+
+        let rows = statement
+            .query_map(params![after_id, limit], |row| {
+                let state: String = row.get(4)?;
+                Ok(ExportedEvent {
+                    id: row.get(0)?,
+                    target: row.get(1)?,
+                    label: row.get(2)?,
+                    interface: row.get(3)?,
+                    state: TargetState::parse(&state).unwrap_or(TargetState::Unknown),
+                    occurred_at_ms: row.get(5)?,
+                    rtt_us: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// The most recent disconnections of every target, newest first.

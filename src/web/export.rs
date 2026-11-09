@@ -1,4 +1,4 @@
-//! Streamed export of the disconnection history.
+//! Streamed export of the whole history.
 //!
 //! The response is chunked and the CSV is compressed while it is sent, one page of
 //! events at a time: the server never holds the file in memory, and every read
@@ -7,6 +7,9 @@
 //! The format is a plain gzipped CSV, not an archive: gzip is a single stream with
 //! its header in front and the checksum and length in a trailer, so nothing has to be
 //! known before the first byte goes out.
+//!
+//! One row per event, with the same columns the import reads: an exported file can be
+//! imported back as it is.
 
 use std::io::{self, Write};
 
@@ -14,7 +17,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use thiserror::Error;
 
-use crate::store::{DownEpisode, Store, StoreError};
+use crate::store::{ExportedEvent, Store, StoreError};
 use crate::time::{format_rfc3339, now_ms};
 
 /// Events read from the database per page of the export.
@@ -33,57 +36,46 @@ pub fn exported_at() -> i64 {
     now_ms()
 }
 
-/// Stream every disconnection, oldest first, as a gzipped CSV.
-pub fn write_csv_gz<W: Write>(
-    out: W,
-    store: &Store,
-    exported_at_ms: i64,
-) -> Result<(), ExportError> {
+/// Stream every event, oldest first, as a gzipped CSV.
+pub fn write_csv_gz<W: Write>(out: W, store: &Store) -> Result<(), ExportError> {
     let mut gzip = GzEncoder::new(out, Compression::fast());
     gzip.write_all(header().as_bytes())?;
 
     let mut after_id = i64::MIN;
     loop {
-        let page = store.downs_after(after_id, PAGE_SIZE)?;
+        let page = store.events_after(after_id, PAGE_SIZE)?;
         if page.is_empty() {
             break;
         }
-        for episode in &page {
-            gzip.write_all(row(episode, exported_at_ms).as_bytes())?;
+        for event in &page {
+            gzip.write_all(row(event).as_bytes())?;
         }
-        after_id = page[page.len() - 1].event_id;
+        after_id = page[page.len() - 1].id;
     }
 
     gzip.finish()?;
     Ok(())
 }
 
-/// The header of the CSV file.
+/// The header of the CSV file. The import reads exactly these columns.
 fn header() -> String {
-    "target,started_at,ended_at,duration_seconds,ongoing\n".to_string()
+    "target,label,interface,state,occurred_at,rtt_us\n".to_string()
 }
 
-/// One CSV row: ISO 8601 timestamps, whole seconds, and whether the target is still
-/// down — in which case the duration runs to the moment of the export.
-fn row(episode: &DownEpisode, exported_at_ms: i64) -> String {
-    let (ended, duration) = match episode.ended_at_ms {
-        Some(end) => (
-            format_rfc3339(end),
-            ((end - episode.started_at_ms) / 1_000).max(0),
-        ),
-        None => (
-            String::new(),
-            ((exported_at_ms - episode.started_at_ms) / 1_000).max(0),
-        ),
-    };
-
+/// One CSV row: the identity of the target, what happened, when, and the round-trip
+/// time when the event is a return to `up`.
+fn row(event: &ExportedEvent) -> String {
     format!(
-        "{},{},{},{},{}\n",
-        field(&episode.target),
-        format_rfc3339(episode.started_at_ms),
-        ended,
-        duration,
-        episode.ended_at_ms.is_none()
+        "{},{},{},{},{},{}\n",
+        field(&event.target),
+        field(event.label.as_deref().unwrap_or_default()),
+        field(event.interface.as_deref().unwrap_or_default()),
+        event.state.as_str(),
+        format_rfc3339(event.occurred_at_ms),
+        event
+            .rtt_us
+            .map(|rtt_us| rtt_us.to_string())
+            .unwrap_or_default()
     )
 }
 
@@ -107,74 +99,109 @@ fn field(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{Event, TargetState};
+    use crate::store::{Event, Store, TargetState};
     use flate2::read::GzDecoder;
     use std::io::Read;
 
-    fn episode(started_at_ms: i64, ended_at_ms: Option<i64>) -> DownEpisode {
-        DownEpisode {
-            event_id: 1,
-            target: "1.1.1.1".to_string(),
-            started_at_ms,
-            ended_at_ms,
-        }
-    }
-
-    fn transition(previous: TargetState, state: TargetState, at: i64) -> Event {
+    fn transition(target: &str, previous: TargetState, state: TargetState, at: i64) -> Event {
         Event {
-            target: "1.1.1.1".to_string(),
-            interface: None,
-            label: None,
+            target: target.to_string(),
+            interface: Some("eth0".to_string()),
+            label: Some("probe".to_string()),
             previous_state: previous,
             state,
             occurred_at_ms: at,
-            rtt_us: None,
+            rtt_us: if state == TargetState::Up {
+                Some(12_000)
+            } else {
+                None
+            },
         }
     }
 
-    #[test]
-    fn a_closed_episode_states_both_times_and_the_duration() {
-        let row = row(&episode(0, Some(90_000)), 500_000);
-        assert_eq!(
-            row,
-            "1.1.1.1,1970-01-01T00:00:00.000Z,1970-01-01T00:01:30.000Z,90,false\n"
-        );
-    }
-
-    #[test]
-    fn an_open_episode_runs_to_the_moment_of_the_export() {
-        let row = row(&episode(0, None), 120_000);
-        assert!(row.contains(",,120,true"), "got {row}");
-    }
-
-    #[test]
-    fn a_hostile_target_is_quoted() {
-        assert_eq!(field("plain"), "plain");
-        assert_eq!(field("a,b"), "\"a,b\"");
-        assert_eq!(field("say \"hi\""), "\"say \"\"hi\"\"\"");
-    }
-
-    #[test]
-    fn the_payload_is_readable_by_a_gzip_reader() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
-        store
-            .record_transition(&transition(TargetState::Unknown, TargetState::Down, 1_000))
-            .unwrap();
-        store
-            .record_transition(&transition(TargetState::Down, TargetState::Up, 61_000))
-            .unwrap();
-
+    fn archive_of(store: &Store) -> String {
         let mut buffer = Vec::new();
-        write_csv_gz(&mut buffer, &store, 100_000).unwrap();
+        write_csv_gz(&mut buffer, store).unwrap();
         assert_eq!(&buffer[..2], &[0x1f, 0x8b], "the gzip magic number");
 
         let mut csv = String::new();
         GzDecoder::new(&buffer[..])
             .read_to_string(&mut csv)
             .expect("the stream decompresses");
+        csv
+    }
 
-        assert!(csv.starts_with("target,started_at,ended_at,duration_seconds,ongoing\n"));
-        assert!(csv.contains("1.1.1.1,1970-01-01T00:00:01.000Z,1970-01-01T00:01:01.000Z,60,false"));
+    #[test]
+    fn a_row_states_the_target_what_happened_and_when() {
+        let event = ExportedEvent {
+            id: 1,
+            target: "1.1.1.1".to_string(),
+            label: Some("cloudflare".to_string()),
+            interface: Some("eth0".to_string()),
+            state: TargetState::Down,
+            occurred_at_ms: 90_000,
+            rtt_us: None,
+        };
+        assert_eq!(
+            row(&event),
+            "1.1.1.1,cloudflare,eth0,down,1970-01-01T00:01:30.000Z,\n"
+        );
+    }
+
+    #[test]
+    fn a_return_to_up_carries_the_round_trip_time() {
+        let event = ExportedEvent {
+            id: 2,
+            target: "1.1.1.1".to_string(),
+            label: None,
+            interface: None,
+            state: TargetState::Up,
+            occurred_at_ms: 90_000,
+            rtt_us: Some(12_500),
+        };
+        assert_eq!(row(&event), "1.1.1.1,,,up,1970-01-01T00:01:30.000Z,12500\n");
+    }
+
+    #[test]
+    fn a_hostile_label_is_quoted() {
+        assert_eq!(field("plain"), "plain");
+        assert_eq!(field("a,b"), "\"a,b\"");
+        assert_eq!(field("say \"hi\""), "\"say \"\"hi\"\"\"");
+    }
+
+    #[test]
+    fn every_event_is_exported_in_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        for event in [
+            transition("1.1.1.1", TargetState::Unknown, TargetState::Up, 1_000),
+            transition("1.1.1.1", TargetState::Up, TargetState::Down, 2_000),
+            transition("1.1.1.1", TargetState::Down, TargetState::Up, 3_000),
+            transition("8.8.8.8", TargetState::Unknown, TargetState::Up, 2_500),
+        ] {
+            store.record_transition(&event).unwrap();
+        }
+
+        let csv = archive_of(&store);
+        let lines: Vec<&str> = csv.lines().collect();
+
+        assert_eq!(lines[0], "target,label,interface,state,occurred_at,rtt_us");
+        assert_eq!(
+            lines[1],
+            "1.1.1.1,probe,eth0,up,1970-01-01T00:00:01.000Z,12000"
+        );
+        assert_eq!(
+            lines[2],
+            "1.1.1.1,probe,eth0,down,1970-01-01T00:00:02.000Z,"
+        );
+        assert_eq!(
+            lines[3],
+            "1.1.1.1,probe,eth0,up,1970-01-01T00:00:03.000Z,12000"
+        );
+        assert_eq!(
+            lines[4],
+            "8.8.8.8,probe,eth0,up,1970-01-01T00:00:02.500Z,12000"
+        );
+        assert_eq!(lines.len(), 5, "every event is a row");
     }
 }

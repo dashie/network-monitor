@@ -234,7 +234,7 @@ fn a_window_can_be_requested_in_the_url() {
 }
 
 #[test]
-fn the_disconnections_can_be_downloaded_as_a_gzipped_csv() {
+fn the_history_can_be_downloaded_as_a_gzipped_csv() {
     let (_directory, database) = seeded_database();
     let server = start(&database);
 
@@ -250,12 +250,13 @@ fn the_disconnections_can_be_downloaded_as_a_gzipped_csv() {
         .read_to_string(&mut csv)
         .expect("the response decompresses");
 
-    assert!(csv.starts_with("target,started_at,ended_at,duration_seconds,ongoing\n"));
+    assert!(csv.starts_with("target,label,interface,state,occurred_at,rtt_us\n"));
     assert!(csv.contains("1.1.1.1"), "got {csv}");
     assert!(
-        csv.contains("true"),
-        "the seeded target was down at the end of the history"
+        csv.contains(",up,"),
+        "the event that came back is exported too"
     );
+    assert!(csv.contains(",down,"), "and the one that went down");
 }
 
 #[test]

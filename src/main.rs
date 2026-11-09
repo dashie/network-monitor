@@ -8,6 +8,7 @@ use thiserror::Error;
 
 use network_monitor::cli::{Cli, Command};
 use network_monitor::config::{self, Config, ConfigError};
+use network_monitor::import::{self, ImportError};
 use network_monitor::logging::{self, Level};
 use network_monitor::monitor::{self, RunError};
 use network_monitor::probe::interface;
@@ -15,6 +16,7 @@ use network_monitor::probe::{IcmpProbe, Probe};
 use network_monitor::query::{self, QueryError};
 use network_monitor::shutdown;
 use network_monitor::store::{Store, StoreError};
+use network_monitor::time::format_rfc3339;
 use network_monitor::web::{self, ServeError};
 
 fn main() -> ExitCode {
@@ -39,6 +41,8 @@ enum AppError {
     Monitor(#[from] RunError),
     #[error("{0}")]
     Serve(#[from] ServeError),
+    #[error("{0}")]
+    Import(#[from] ImportError),
     #[error("{0}")]
     Invalid(String),
 }
@@ -75,6 +79,48 @@ fn run() -> Result<ExitCode, AppError> {
             let stop = shutdown::Shutdown::new();
             shutdown::install();
             web::run(&settings.database, &listen, &stop)?;
+        }
+        Some(Command::Import {
+            source,
+            replace_window,
+        }) => {
+            let report = import::run(
+                &settings.database,
+                &source,
+                import::Options { replace_window },
+            )?;
+            let dropped = if report.dropped > 0 {
+                format!(
+                    ", {} events dropped as repeats of the state before them",
+                    report.dropped
+                )
+            } else {
+                String::new()
+            };
+            if let Some((from, to)) = report.window {
+                println!(
+                    "replaced {} events between {} and {}, then imported {} events for {} \
+                     target(s) from {} ({} rows skipped{dropped}, {} format)",
+                    report.deleted,
+                    format_rfc3339(from),
+                    format_rfc3339(to),
+                    report.events,
+                    report.targets,
+                    report.source,
+                    report.skipped,
+                    if report.gzipped { "gzip" } else { "plain csv" }
+                );
+            } else {
+                println!(
+                    "imported {} events for {} target(s) from {} ({} rows skipped{dropped}, {} \
+                     format)",
+                    report.events,
+                    report.targets,
+                    report.source,
+                    report.skipped,
+                    if report.gzipped { "gzip" } else { "plain csv" }
+                );
+            }
         }
         Some(Command::Query { what }) => {
             query::run(&settings, &what)?;
