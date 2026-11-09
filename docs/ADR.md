@@ -22,6 +22,8 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0008 | Serve a read-only web page from the binary | accepted | 2026-11-09 | Minimal HTTP and server-side SVG; no framework and no client library |
 | ADR-0009 | Serve the page from the monitoring process | accepted | 2026-11-09 | `monitor --listen` runs the same `web` component; one process records and shows |
 | ADR-0010 | Render the timeline without client-side interaction | accepted | 2026-11-09 | Fixed window, 30 s meta refresh, no zoom; last 10 disconnections listed |
+| ADR-0011 | Stream the history export as a hand-written ZIP | superseded by ADR-0012 | 2026-11-09 | Chunked response, deflate on the fly, paged reads, `flate2` only |
+| ADR-0012 | Stream the export as a gzipped CSV instead of a ZIP | accepted | 2026-11-09 | gzip is a single stream: no container, no size known in advance |
 
 ## Records
 
@@ -296,3 +298,67 @@ Below the chart the page lists the last 10 disconnections of any target — star
 - A JavaScript timer or a `fetch` loop instead of the meta refresh: rejected, the browser already provides the behaviour and the script would be more code to get wrong.
 - Server-sent events or WebSocket updates: rejected, a second protocol and a long-lived connection for a page read by one person.
 - A refresh interval derived from `interval_ms`: rejected, the page is read by a human, and 30 s is already below the attention span of a monitoring glance.
+
+## ADR-0011 — Stream the history export as a hand-written ZIP
+
+**Status:** superseded by ADR-0012 · **Date:** 2026-11-09
+**Relates to:** ADR-0008 (the page and the hand-written HTTP loop it generates).
+
+### Context
+
+The page lists the last 10 disconnections, so the operator asked for the whole history in one file, downloadable from the page itself. The `/tmp` of a `scratch` image may not be writable and the database can grow to hundreds of thousands of events, so the response must not be assembled in memory or on disk before it starts.
+
+### Decision
+
+`GET /export/disconnections.zip` answers `200` with `Content-Type: application/zip` and `Transfer-Encoding: chunked`, and writes a single-entry ZIP while the CSV is generated: local header with the "data descriptor" flag, deflated stream, descriptor with the real checksum and sizes, then the central directory and the end record. Sizes and checksum are therefore never required up front, which is what makes streaming possible without seeking.
+
+The events are read in pages of 1 000 by `Store::downs_after`, keyed on the event id, so every read transaction is short and a slow client cannot hold the WAL checkpoints of the writer.
+
+Compression uses `flate2` with its pure-Rust `rust_backend`. The `zip` crate is kept as a **dev-dependency only**, to read the archive back in tests.
+
+### Consequences
+
+- Memory stays flat regardless of the history size: the response holds one page of episodes and the deflate buffers, nothing else.
+- No temporary file, so nothing depends on a writable `/tmp` inside the image.
+- About 120 lines of binary format in `web::export`, tested by reading the result back with a real ZIP reader.
+- A client that disconnects mid-download leaves a truncated archive; the error is logged and the connection closed.
+- The entry uses the 1980 DOS timestamp format, so dates before that are clamped.
+
+### Alternatives considered
+
+- `zip::ZipWriter` at runtime: rejected, it requires `Write + Seek`, and a socket cannot seek; wrapping it in a temporary file would need a writable disk and would delay the first byte until the whole archive exists.
+- A stored (uncompressed) ZIP: rejected, it is a copy of the CSV in a wrapper — 298 KB instead of 116 KB on a 90-day history — for no gain in simplicity.
+- `Content-Encoding: gzip` on a plain CSV: rejected, a browser that saves the response would keep the gzip bytes without the filename the ZIP gives, and the requirement was an archive.
+- A `query export` subcommand: rejected, the download belongs where the numbers are; the CLI already covers scripted access through `query events`.
+
+## ADR-0012 — Stream the export as a gzipped CSV instead of a ZIP
+
+**Status:** accepted · **Date:** 2026-11-09
+**Supersedes:** ADR-0011.
+
+### Context
+
+ADR-0011 streamed the export as a ZIP, which needs a container: local header, data descriptor, central directory, DOS timestamps, and a hand-written 32-bit size arithmetic. The page serves one file, so the archive bought nothing that gzip does not give — and the container was about 160 of the 283 non-test lines of `web::export`.
+
+### Decision
+
+`GET /export/disconnections.csv.gz` answers `200` with `Content-Type: application/gzip`, `Transfer-Encoding: chunked`, and a streamed gzip of the CSV, built with `flate2::write::GzEncoder`.
+
+gzip is a single stream: a fixed 10-byte header, deflate data, and a trailer with the checksum and the length — both computable at the end. Nothing has to be known before the first byte, which is exactly the property tar lacks and the reason the ZIP needed a data descriptor.
+
+`zip` disappears from `Cargo.toml`; `flate2` stays the only runtime addition, and the tests decompress the response with `flate2::read::GzDecoder`.
+
+### Consequences
+
+- `web::export` drops from 367 to 180 lines, and the 160 lines of container arithmetic with it.
+- The download is smaller than the ZIP of the same CSV: 92 KB against 116 KB for a 90-day history, because there is no per-entry header and no directory.
+- No 32-bit size fields of our own; gzip's `ISIZE` is a modulo-2^32 trailer value that readers use only as a hint.
+- The file no longer opens with a double click on Windows or macOS: `gunzip`, `zcat`, `tar -xzf -` on Windows 11, or any archive tool. The operator asked for this trade explicitly.
+- The CSV, not the compression, is the contract: the endpoint name says `.csv.gz` so the content is obvious from the URL.
+
+### Alternatives considered
+
+- Keep the ZIP: rejected, it is the same data behind a container written by hand for no gain on a single file.
+- `tar.gz`: rejected, a tar header carries the file size, so an unknown-length response would need an extra pass over the database with a frozen upper bound, or a buffer.
+- `Content-Encoding: gzip` on a plain CSV: rejected, a browser that saves the response keeps gzip bytes under a `.csv` name.
+- Offer both formats: rejected for now, two code paths for one file; one format is easy to add later if a Windows-only consumer appears.

@@ -30,6 +30,7 @@ pub(crate) const STYLE: &str = r#"
   .legend span { display: inline-flex; align-items: center; gap: 6px; }
   .swatch { width: 14px; height: 10px; border-radius: 2px; display: inline-block; }
   h2 { font-size: 15px; margin: 28px 0 8px; }
+  h2 .download { font-size: 12px; font-weight: 400; margin-left: 12px; opacity: 0.8; }
   table { border-collapse: collapse; font-variant-numeric: tabular-nums; }
   th, td { text-align: left; padding: 3px 20px 3px 0; }
   th { font-weight: 600; opacity: 0.7; border-bottom: 1px solid #e6e6e6; }
@@ -120,7 +121,9 @@ document.getElementById('chart').addEventListener('click', event => {{
 /// The last disconnections, newest first, with how long each one lasted.
 fn downs_table(downs: &[DownEpisode], now_ms: i64) -> String {
     let mut output = String::from(
-        "<h2>Last 10 disconnections</h2>\n<table>\n\
+        "<h2>Last 10 disconnections\
+         <a class=\"download\" href=\"/export/disconnections.csv.gz\">download all (csv.gz)</a>\
+         </h2>\n<table>\n\
          <thead><tr><th>target</th><th>started (UTC)</th><th>lasted</th></tr></thead>\n\
          <tbody>\n",
     );
@@ -432,11 +435,13 @@ mod tests {
     fn the_last_disconnections_are_listed_with_their_duration() {
         let downs = [
             DownEpisode {
+                event_id: 2,
                 target: "1.1.1.1".to_string(),
                 started_at_ms: 7_000_000,
                 ended_at_ms: None,
             },
             DownEpisode {
+                event_id: 1,
                 target: "8.8.8.8".to_string(),
                 started_at_ms: 3_600_000,
                 ended_at_ms: Some(4_320_000),

@@ -5,9 +5,10 @@
 //! Minimal HTTP/1.1 by hand: no framework, no template engine, no port unless asked.
 
 pub mod detail;
+pub mod export;
 pub mod page;
 
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{AddrParseError, SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -245,6 +246,35 @@ fn handle(mut stream: TcpStream, database: &Path) {
                 include_body,
             );
         }
+        "/export/disconnections.csv.gz" => {
+            let store = match open_store(&mut stream, database, include_body) {
+                Some(store) => store,
+                None => return,
+            };
+
+            let exported_at = export::exported_at();
+            let disposition = format!(
+                "Content-Disposition: attachment; filename=\"{}\"\r\n",
+                export_name(exported_at)
+            );
+            begin_chunked(&mut stream, "application/gzip", &disposition);
+            if !include_body {
+                return;
+            }
+
+            // The file is compressed straight into the response: it is never built in
+            // memory and its length is never known in advance.
+            let outcome = {
+                let mut chunked = Chunked {
+                    stream: &mut stream,
+                };
+                export::write_csv_gz(&mut chunked, &store, exported_at)
+            };
+            if let Err(error) = outcome {
+                logging::error(None, &format!("web: export failed: {error}"));
+            }
+            end_chunked(&mut stream);
+        }
         "/healthz" => respond(
             &mut stream,
             200,
@@ -324,6 +354,60 @@ fn respond(
         let _ = stream.write_all(body.as_bytes());
     }
     let _ = stream.flush();
+}
+
+/// A response body of unknown length, written as HTTP/1.1 chunks.
+///
+/// The archive is generated while it is sent, so no size is known in advance and
+/// nothing is buffered.
+struct Chunked<'a> {
+    stream: &'a mut TcpStream,
+}
+
+impl Write for Chunked<'_> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        self.stream
+            .write_all(format!("{:x}\r\n", buffer.len()).as_bytes())?;
+        self.stream.write_all(buffer)?;
+        self.stream.write_all(b"\r\n")?;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.stream.flush()
+    }
+}
+
+fn begin_chunked(stream: &mut TcpStream, content_type: &str, extra_headers: &str) {
+    let head = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: {content_type}\r\n\
+         Transfer-Encoding: chunked\r\n\
+         {extra_headers}\
+         Cache-Control: no-store\r\n\
+         X-Content-Type-Options: nosniff\r\n\
+         Connection: close\r\n\r\n"
+    );
+    let _ = stream.write_all(head.as_bytes());
+}
+
+fn end_chunked(stream: &mut TcpStream) {
+    let _ = stream.write_all(b"0\r\n\r\n");
+    let _ = stream.flush();
+}
+
+/// `disconnections-20261109.csv.gz`, so two downloads never collide.
+fn export_name(now_ms: i64) -> String {
+    let stamp = crate::time::format_rfc3339(now_ms);
+    format!(
+        "disconnections-{}{}{}.csv.gz",
+        &stamp[0..4],
+        &stamp[5..7],
+        &stamp[8..10]
+    )
 }
 
 #[derive(Debug, Default)]

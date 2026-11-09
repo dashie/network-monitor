@@ -75,6 +75,8 @@ belong in [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 - `FR-17`: The read-only web page over the event database is available in two ways from the same binary: `serve --listen …` publishes it without probing, and `monitor --listen …` publishes it from the monitoring process, so one command both records and shows the history. The page shows one lane per target for the last 24 hours with green, red, and grey bands for `up`, `down`, and `unknown`; it has no client-side interaction and the browser reloads it every 30 s. Each lane states the disconnections and the total down time of the window it shows, and below the chart the last 10 disconnections of any target are listed with their start and their duration, an ongoing one included. Selecting a lane opens a page for that target with one bar per day for the last 30 days. Every request opens the database read-only and answers `503` with the reason when it is missing. The page has no authentication. The server stops with the process that runs it, on `SIGINT` or `SIGTERM`.
 
+- `FR-18`: The page offers a download of every disconnection ever recorded, as a gzip-compressed CSV file (`/export/disconnections.csv.gz`). The CSV has one row per disconnection with the target, the start, the end (empty while the target is down), the duration in seconds, and whether it is still running. The file is compressed while it is sent: the server reads the history in pages and never builds the file in memory.
+
 ## Business rules
 
 Rules that always hold, independent of implementation.

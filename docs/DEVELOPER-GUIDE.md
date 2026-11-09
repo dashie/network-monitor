@@ -289,6 +289,19 @@ docker -c qubo run -d --name network-monitor-web \
   serve --listen 0.0.0.0:8642 --database /var/lib/network-monitor/events.db
 ```
 
+### Downloading the disconnection history
+
+The page links it, and the same archive can be fetched from a script:
+
+```bash
+curl -O http://127.0.0.1:8642/export/disconnections.csv.gz
+gunzip -c disconnections-*.csv.gz | head
+```
+
+The response is chunked and the CSV is deflated while it is sent, so the size of the
+history does not change the memory the server needs. A failure in the middle of
+the export is logged and truncates the download; retry it.
+
 ### Choosing the physical interface on a multi-NIC NAS
 
 Interface names inside a container are not the names of the NAS interfaces. A default

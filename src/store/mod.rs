@@ -121,6 +121,8 @@ pub struct DailyDrops {
 /// it did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DownEpisode {
+    /// Id of the `down` event, used to page through the history.
+    pub event_id: i64,
     pub target: String,
     pub started_at_ms: i64,
     /// `None` while the target is still down.
@@ -128,6 +130,15 @@ pub struct DownEpisode {
 }
 
 const DAY_MS: i64 = 86_400_000;
+
+/// The columns of one disconnection: event id, target, start, end. The end is `NULL`
+/// while the target is still down. Shared by the page and the export.
+const DOWNS_SELECT: &str = "
+SELECT e.id, e.target, e.occurred_at_ms,
+       (SELECT MIN(n.occurred_at_ms) FROM events n
+         WHERE n.target = e.target AND n.occurred_at_ms > e.occurred_at_ms)
+FROM events e
+WHERE e.state = 'down'";
 
 /// Turn a starting state and the transitions of a window into segments that cover
 /// the window exactly. Pure, so the rendering and the SQL share the same rule.
@@ -509,22 +520,37 @@ impl Store {
 
     /// The most recent disconnections of every target, newest first.
     pub fn recent_downs(&self, limit: u32) -> Result<Vec<DownEpisode>, StoreError> {
-        let mut statement = self.connection.prepare(
-            "SELECT e.target, e.occurred_at_ms,
-                    (SELECT MIN(n.occurred_at_ms) FROM events n
-                      WHERE n.target = e.target AND n.occurred_at_ms > e.occurred_at_ms)
-             FROM events e
-             WHERE e.state = 'down'
-             ORDER BY e.occurred_at_ms DESC, e.id DESC
-             LIMIT ?1",
-        )?;
+        let query = format!("{DOWNS_SELECT} ORDER BY e.occurred_at_ms DESC, e.id DESC LIMIT ?1");
+        let mut statement = self.connection.prepare(&query)?;
 
         let rows = statement
             .query_map(params![limit], |row| {
                 Ok(DownEpisode {
-                    target: row.get(0)?,
-                    started_at_ms: row.get(1)?,
-                    ended_at_ms: row.get(2)?,
+                    event_id: row.get(0)?,
+                    target: row.get(1)?,
+                    started_at_ms: row.get(2)?,
+                    ended_at_ms: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// One page of disconnections in chronological order, for a streamed export.
+    ///
+    /// Paging keeps every read transaction short, so a slow download never holds the
+    /// WAL checkpoints of the writer.
+    pub fn downs_after(&self, after_id: i64, limit: u32) -> Result<Vec<DownEpisode>, StoreError> {
+        let query = format!("{DOWNS_SELECT} AND e.id > ?1 ORDER BY e.id LIMIT ?2");
+        let mut statement = self.connection.prepare(&query)?;
+
+        let rows = statement
+            .query_map(params![after_id, limit], |row| {
+                Ok(DownEpisode {
+                    event_id: row.get(0)?,
+                    target: row.get(1)?,
+                    started_at_ms: row.get(2)?,
+                    ended_at_ms: row.get(3)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;

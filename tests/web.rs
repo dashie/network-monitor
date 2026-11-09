@@ -27,6 +27,35 @@ impl Server {
             &format!("GET {target} HTTP/1.1\r\nHost: localhost\r\n\r\n"),
         )
     }
+
+    /// The status, the headers, and the de-chunked body of a binary response.
+    fn get_raw(&self, target: &str) -> (u16, String, Vec<u8>) {
+        let mut stream = TcpStream::connect(&self.address).expect("the server answers");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("the timeout is set");
+        stream
+            .write_all(format!("GET {target} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+            .expect("the request is written");
+
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .expect("the response is read");
+        let split = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|at| at + 4)
+            .expect("the headers end");
+
+        let head = String::from_utf8_lossy(&response[..split]).to_string();
+        let status = head
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .unwrap_or(0);
+        (status, head, dechunk(&response[split..]))
+    }
 }
 
 impl Drop for Server {
@@ -56,6 +85,28 @@ fn try_request(address: &str, raw: &str) -> Option<(u16, String)> {
         .and_then(|code| code.parse().ok())
         .unwrap_or(0);
     Some((status, response))
+}
+
+/// Reassemble a chunked body: each chunk is a hexadecimal size, then its bytes.
+fn dechunk(data: &[u8]) -> Vec<u8> {
+    let mut rest = data;
+    let mut body = Vec::new();
+    while let Some(end) = rest.windows(2).position(|window| window == b"\r\n") {
+        let size = usize::from_str_radix(
+            std::str::from_utf8(&rest[..end])
+                .expect("a chunk size is ASCII")
+                .trim(),
+            16,
+        )
+        .expect("a chunk size is hexadecimal");
+        rest = &rest[end + 2..];
+        if size == 0 {
+            break;
+        }
+        body.extend_from_slice(&rest[..size]);
+        rest = &rest[size + 2..];
+    }
+    body
 }
 
 fn event(target: &str, previous: TargetState, state: TargetState, at: i64) -> Event {
@@ -156,6 +207,10 @@ fn serves_the_page_with_a_band_per_state() {
         "the page lists the latest disconnections"
     );
     assert!(
+        response.contains("href=\"/export/disconnections.csv.gz\""),
+        "the page offers the full export"
+    );
+    assert!(
         response.contains("and counting"),
         "the seeded target was down at the end of the window"
     );
@@ -176,6 +231,31 @@ fn a_window_can_be_requested_in_the_url() {
     assert_eq!(status, 200);
     assert!(response.contains("<p class=\"window\">"));
     assert!(response.contains("1.1.1.1"));
+}
+
+#[test]
+fn the_disconnections_can_be_downloaded_as_a_gzipped_csv() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, head, body) = server.get_raw("/export/disconnections.csv.gz");
+    assert_eq!(status, 200);
+    assert!(head.contains("Content-Type: application/gzip"));
+    assert!(head.contains("Transfer-Encoding: chunked"), "streamed");
+    assert!(head.contains("attachment; filename=\"disconnections-"));
+    assert!(head.contains(".csv.gz\""));
+
+    let mut csv = String::new();
+    flate2::read::GzDecoder::new(&body[..])
+        .read_to_string(&mut csv)
+        .expect("the response decompresses");
+
+    assert!(csv.starts_with("target,started_at,ended_at,duration_seconds,ongoing\n"));
+    assert!(csv.contains("1.1.1.1"), "got {csv}");
+    assert!(
+        csv.contains("true"),
+        "the seeded target was down at the end of the history"
+    );
 }
 
 #[test]
