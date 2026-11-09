@@ -4,6 +4,8 @@ The domain language of this project. Each term has exactly one definition; code,
 documentation, and conversations use these terms and no synonyms. Add a term when it
 appears in a requirement, in a component name, or in a public interface.
 
+| Term | Definition |
+|---|---|
 | **Config file** | The TOML file that declares global defaults and the list of targets; read once at startup. |
 | **Default interface** | The interface the operating system routing table selects for a destination when no interface is configured for the probe. |
 | **Event** | One persisted row describing a single state transition of a single target. |
