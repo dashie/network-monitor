@@ -27,6 +27,7 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0013 | Import the exported CSV back into the database | accepted | 2026-11-09 | One positional source, format sniffed, batched writes, idempotent |
 | ADR-0014 | Replace the window the archive covers on import | accepted | 2026-11-09 | `--replace-window`: delete the covered period, rebuild the projection |
 | ADR-0015 | Export every event so one file serves export and import | accepted | 2026-11-09 | One row per event with label and interface; round trip is lossless |
+| ADR-0016 | Build the container image with a dev profile and a cached `target` | accepted | 2026-11-10 | `release-dev` profile plus a BuildKit cache mount; `PROFILE=release` publishes |
 
 ## Records
 
@@ -255,7 +256,7 @@ The address is a command-line option and not a configuration key: the page is a 
 
 The timeline page adds two columns per lane — the number of disconnections and the total down time of the window being shown — computed from the same segments that draw the bands. The columns follow the displayed window, so zooming changes them; a down segment that started before the window opened counts as down time but not as a disconnection.
 
-Selecting a lane opens `/target?target=…`, which resolves an address or a label to one target and renders one bar per day for the last 30 days from the `down` transitions, bucketed by UTC day with zero-filled days.
+Selecting a lane opens `/target?target=…`, which resolves an address or a label to one target and renders one bar per day for the last 30 days from the `down` transitions, bucketed by UTC day with zero-filled days. The same buckets fill a table under the chart that repeats each day's disconnections and adds the total down time of the day, so the exact durations sit next to the bars that sum them.
 
 ### Consequences
 
@@ -478,3 +479,55 @@ target,label,interface,state,occurred_at,rtt_us
 - Keep both formats and sniff one from the other: rejected, two readers for one feature, and the ambiguity never ends.
 - Export events but keep reading the old shape on import: rejected, the same complexity with a longer life.
 - Export a database copy instead of a CSV: rejected in ADR-0013 and still rejected; the page has a portable file, and `cp` remains the answer when the volume survives.
+
+## ADR-0016 — Build the container image with a dev profile and a cached `target`
+
+**Status:** accepted · **Date:** 2026-11-10
+
+### Context
+
+The image is built by a Docker context that points at the NAS, so the compilation runs
+on that machine: four cores, a 2014-era desktop CPU. The `release` profile asks for fat
+LTO and a single codegen unit, and the Dockerfile copied `Cargo.toml`, `Cargo.lock`, and
+`src` before one `cargo build`, so every change to a source file invalidated the only
+build layer and recompiled all dependencies plus the bundled SQLite amalgamation.
+
+Measured on that NAS, with this crate: a cold build took 2 min 13 s, of which 32 s was
+the edit-to-binary cost of the crate alone. The remaining 1 min 41 s was paid again for
+every one-line change.
+
+### Decision
+
+- A `release-dev` profile inherits `release` and overrides `lto = "thin"` and
+  `codegen-units = 16`. The Dockerfile builds it by default through the `PROFILE`
+  build argument.
+- The build step mounts a BuildKit cache on `/src/target` and copies the binary out of
+  the mount in the same step, so the artifacts survive the layer invalidation without
+  ending up in an intermediate layer.
+- `PROFILE=release` builds the artifact that leaves the development machine; releases
+  keep fat LTO and one codegen unit.
+
+### Consequences
+
+- On the NAS a cold build is 2 min 14 s and a rebuild after a source change is 20 s
+  (0 s of it in Docker layer export), against 2 min 13 s before for every change.
+- The binary is slightly larger and marginally slower than a fat-LTO one; the
+  difference is not measurable for an ICMP monitor and never reaches a published
+  artifact.
+- The build requires BuildKit (Docker 23 or newer) and a `target` cache in the daemon.
+  Clearing the daemon cache costs one cold build and nothing else.
+- The dependency-cache trick with a stub `main.rs` was rejected: Cargo fingerprints on
+  modification time, and the real sources copied afterwards can look older than the
+  stub artifacts, which silently ships the stub binary.
+
+### Alternatives considered
+
+- Keep the single `cargo build` and accept the cold build on every change: rejected, it
+  pays 1 min 41 s of dependency compilation for a one-line edit.
+- Pre-build dependencies in their own layer through a stub source: rejected, unsafe for
+  the reason above, and it needs a `touch` on every source to stay correct.
+- Build on the laptop and cross-compile to `x86_64-unknown-linux-musl`: rejected, it
+  adds a cross toolchain and a second build path for an image that is deployed from one
+  host.
+- Lower the optimisation level of the whole `release` profile: rejected, it would
+  degrade the published artifact to speed up a development loop.

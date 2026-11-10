@@ -1,27 +1,39 @@
-# docker compose project for network-monitor, used on a NAS (QNAP Container
-# Station) and on any host with Docker.
+# Self-contained compose project for network-monitor: nothing has to exist before
+# the first run — no configuration file, no volume, no image — so the same file
+# works on the machine that holds the sources and on a remote Docker context.
 #
-#   docker compose up -d
-#   docker compose logs -f
+#   docker -c qubo compose up -d --build   # build, recreate, start
+#   docker -c qubo compose logs -f
+#   docker -c qubo compose down            # stop and remove, keep the volume
 #
 # The page is served by the monitor process itself, so one container records and
 # shows: see `--listen` in the command below.
 #
-# Container Station: Applications > Create > Create Application, then paste this
-# file. Adjust the image name and the host paths to the NAS layout.
+# Targets are given on the command line rather than in a mounted file: with a
+# remote context a bind mount is resolved on the daemon's filesystem, not on the
+# machine running compose. To externalise the configuration later, mount it
+# read-only over /etc/network-monitor/config.toml and pass `--config` instead of
+# every `--target`.
 
 services:
   network-monitor:
-    # Development tag; tag the same image with the release version when publishing.
+    # Built from the Dockerfile in this directory when the image is missing, and
+    # rebuilt by `--build`. Development tag; tag the same image with the release
+    # version when publishing.
+    build: .
     image: network-monitor:dev
     container_name: network-monitor
     restart: unless-stopped
 
-    # Host networking is what makes `interface = "eth1"` in the configuration mean
-    # the physical interface of the NAS. With the default bridge the container gets
-    # its own eth0 on a virtual network and the NAS interfaces are not visible.
-    # It also means the page listens on the NAS address directly, with no port to
-    # publish: open http://<nas>:8642/ .
+    # Host networking is what makes `interface = "eth1"` mean the physical
+    # interface of the NAS. With the default bridge the container gets its own
+    # eth0 on a virtual network and the NAS interfaces are not visible. It also
+    # means the page listens on the NAS address directly, with no port to publish:
+    # open http://<nas>:8642/ . Never add `ports` next to this setting, Docker
+    # ignores it.
+    #
+    # Linux only: this file is for the NAS, not for Docker Desktop on macOS, where
+    # host networking is not supported.
     network_mode: host
 
     # Opening a raw ICMP socket is the only privileged operation.
@@ -31,20 +43,26 @@ services:
       - NET_RAW
 
     volumes:
-      # Configuration, read-only. It can point anywhere; the database path below
-      # wins anyway.
-      - ./network-monitor.toml:/etc/network-monitor/config.toml:ro
-      # Event database. Must be a local volume, not a network share: WAL does not
-      # work on SMB or NFS.
-      - ./data:/var/lib/network-monitor
+      # Event database. Created on first use and kept across recreations; the
+      # history survives `compose down` because the volume is named.
+      - network-monitor-data:/var/lib/network-monitor
 
-    # The command line wins over the file, so the database always lands on the
-    # mounted volume even when the configuration says something else.
+    # Targets come from the command line and replace the configuration file, which
+    # is never read: without `--config` the monitor looks for ./network-monitor.toml,
+    # which does not exist in the image.
     command:
       - monitor
-      - --config
-      - /etc/network-monitor/config.toml
+      - --target
+      - 1.1.1.1,interface=eth1
+      - --target
+      - 192.168.1.1
       - --database
       - /var/lib/network-monitor/events.db
       - --listen
       - 0.0.0.0:8642
+
+volumes:
+  # Explicit name: without it Compose prefixes the volume with the project name and
+  # the monitor would start from an empty history.
+  network-monitor-data:
+    name: network-monitor-data

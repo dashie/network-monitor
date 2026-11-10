@@ -38,7 +38,7 @@ network-monitor/
 ├── Cargo.lock            pinned dependency graph, committed
 ├── Dockerfile            multi-stage static build for the container image
 ├── docker/config.toml    default configuration shipped in the image
-├── docker-compose.yml    NAS / Container Station project (host networking)
+├── docker-compose.yml    self-contained compose project (host networking)
 ├── .dockerignore         keeps the build context to the sources
 ├── network-monitor.toml  example configuration, kept in sync with the defaults
 ├── src/
@@ -115,15 +115,19 @@ container is probed. Mount your own file over that path, or pass `--config` else
 to monitor real targets. Without a mounted volume the events live in the container
 layer and disappear with it.
 
-Create the configuration file before starting the compose project: when a bind-mount
-source does not exist, Compose creates a directory in its place and the monitor
-reports `Is a directory` instead of reading the file.
+The compose project below needs none of that: it passes the targets on the command
+line and keeps the history in a named volume. The paragraph applies when you choose to
+mount a configuration file instead: create it before starting the project, because when
+a bind-mount source does not exist Compose creates a directory in its place and the
+monitor reports `Is a directory` instead of reading the file.
 
 ### Building and running through a Docker context
 
 The simplest path when the NAS exposes its Docker daemon to a local context (`qubo` in
 the examples): the local build context is streamed to the NAS, the build runs there,
-and the image never travels as a file.
+and the image never travels as a file. With [docker-compose.yml](../docker-compose.yml)
+the whole update is `docker -c qubo compose up -d --build`, described in the next
+section; the commands here are the same steps written by hand.
 
 ```bash
 docker context ls                                   # qubo -> tcp://qubo:2376
@@ -144,16 +148,25 @@ docker context create qubo --docker "host=tcp://qubo:2376"
 docker context create qubo --docker "host=ssh://admin@qubo"   # alternative over SSH
 ```
 
-`dev` is the development tag. Tag a release with its version before publishing:
+The compilation runs on the NAS, so the build costs what that CPU costs. Two choices
+keep it short: the `release-dev` profile — `release` with thin LTO and parallel codegen
+units — and a BuildKit cache mount on the `target` directory, so a change to a source
+file recompiles this crate only. Measured on the QNAP (i5-4590S, four cores): about two
+minutes for the first, cold build and about twenty seconds for the next one. Both are
+Docker 23 or newer features; the cache lives in the daemon, not in the build context.
+
+The image is tagged `network-monitor:dev` for development. Build and tag the artifact
+that leaves the machine with the `release` profile:
 
 ```bash
-docker -c qubo tag network-monitor:dev network-monitor:0.1.0
+docker -c qubo build --build-arg PROFILE=release -t network-monitor:0.1.0 .
 ```
 
 **Through a registry**, multi-architecture in one command, built on the laptop:
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
+  --build-arg PROFILE=release \
   -t registry.example.com/network-monitor:0.1.0 --push .
 ```
 
@@ -166,13 +179,51 @@ scp network-monitor-dev.tar.gz admin@nas:/share/Container/
 ssh admin@nas 'gzip -dc /share/Container/network-monitor-dev.tar.gz | docker load'
 ```
 
-On the NAS, start the project from [docker-compose.yml](../docker-compose.yml),
-adjusting the image name and the host paths:
+### Through compose, from the machine that holds the sources
+
+[docker-compose.yml](../docker-compose.yml) is the deployment: it builds the image,
+sets the capabilities, keeps host networking and the page port, and lists the targets
+on the command line. Nothing has to exist on the daemon before the first run — no
+configuration file, no volume, no image — so one command updates the NAS from the
+laptop, over the context:
 
 ```bash
-docker -c qubo compose up -d
+docker -c qubo compose up -d --build   # build on the NAS, recreate, start
 docker -c qubo compose logs -f
+docker -c qubo compose down            # stop and remove; the volume stays
 ```
+
+The build context is streamed to the daemon and only the changed layers are rebuilt,
+so a one-line source change costs seconds. Edit the `--target` entries in the `command`
+block to change what is probed. The history lives in the `network-monitor-data` volume
+and survives `down` and `up`.
+
+#### Rebuilding a project that is already running
+
+`compose up -d --build` is the whole update: it rebuilds the image from the Dockerfile
+and, because the image or the configuration changed, recreates the container — stop,
+remove, create, start — then starts it again under `restart: unless-stopped`. A `down`
+first is not needed, and the volume keeps the history across the recreation.
+
+```bash
+docker -c qubo compose up -d --build                 # rebuild, recreate, start
+docker -c qubo compose build                         # build only; the old image keeps running
+docker -c qubo compose up -d --force-recreate        # recreate even with an unchanged image
+docker -c qubo compose up -d --pull always --build   # rebuild against a newer base image
+docker -c qubo compose logs -f                       # confirm the new version started
+```
+
+When the rebuild produces an identical image (no source change) `up -d` leaves the
+container alone: it already matches the definition. That is the intended behaviour;
+`--force-recreate` is the way to restart it anyway. This path is the manual one in the
+previous section — `build`, `rm -f`, `run` — with stop, remove and create left to
+Compose.
+
+To externalise the configuration later, mount the file read-only over
+`/etc/network-monitor/config.toml` and pass `--config` instead of the `--target`
+entries; the file must then exist on the daemon host, because a bind mount is resolved
+there, not on the machine running compose. Host networking is Linux only, so the file
+is meant for the NAS, not for Docker Desktop on macOS.
 
 ### Without compose
 

@@ -115,6 +115,8 @@ pub struct DailyDrops {
     /// Start of the UTC day, in epoch milliseconds.
     pub day_start_ms: i64,
     pub drops: u32,
+    /// Time spent in `down` inside the day, clipped to the queried window.
+    pub down_ms: i64,
 }
 
 /// One event as the export writes it: the label comes from the target row, because the
@@ -152,6 +154,21 @@ SELECT e.id, e.target, e.occurred_at_ms,
          WHERE n.target = e.target AND n.occurred_at_ms > e.occurred_at_ms)
 FROM events e
 WHERE e.state = 'down'";
+
+/// Split the part of `[start_ms, end_ms)` that falls inside `[from_ms, to_ms)` into
+/// per-UTC-day slices: the start of the day and the milliseconds spent inside it.
+fn day_slices(start_ms: i64, end_ms: i64, from_ms: i64, to_ms: i64) -> Vec<(i64, i64)> {
+    let mut slices = Vec::new();
+    let mut cursor = start_ms.max(from_ms);
+    let end = end_ms.min(to_ms);
+    while cursor < end {
+        let day = cursor.div_euclid(DAY_MS) * DAY_MS;
+        let next = (day + DAY_MS).min(end);
+        slices.push((day, next - cursor));
+        cursor = next;
+    }
+    slices
+}
 
 /// Turn a starting state and the transitions of a window into segments that cover
 /// the window exactly. Pure, so the rendering and the SQL share the same rule.
@@ -625,35 +642,60 @@ impl Store {
         Ok(row)
     }
 
-    /// Number of transitions to `down` per UTC day, one entry per day in the window.
+    /// Number of transitions to `down` and time spent down per UTC day, one entry per
+    /// day in the window.
+    ///
+    /// A disconnection that opened before the window is not counted as a drop, but the
+    /// part of it that falls inside the window is counted as down time. An open
+    /// disconnection ends at `to_ms`, the end of the window.
     pub fn daily_drops(
         &self,
         target: &str,
         from_ms: i64,
         to_ms: i64,
     ) -> Result<Vec<DailyDrops>, StoreError> {
-        let mut statement = self.connection.prepare(
-            "SELECT occurred_at_ms FROM events
-             WHERE target = ?1 AND state = 'down'
-               AND occurred_at_ms >= ?2 AND occurred_at_ms < ?3",
-        )?;
+        let query = format!("{DOWNS_SELECT} AND e.target = ?1 AND e.occurred_at_ms < ?2");
+        let mut statement = self.connection.prepare(&query)?;
 
-        let mut buckets: HashMap<i64, u32> = HashMap::new();
-        for row in
-            statement.query_map(params![target, from_ms, to_ms], |row| row.get::<_, i64>(0))?
-        {
-            let occurred_at_ms = row?;
-            let day = occurred_at_ms.div_euclid(DAY_MS) * DAY_MS;
-            *buckets.entry(day).or_insert(0) += 1;
+        let mut buckets: HashMap<i64, DailyDrops> = HashMap::new();
+        let mut day = from_ms.div_euclid(DAY_MS) * DAY_MS;
+        while day < to_ms {
+            buckets.insert(
+                day,
+                DailyDrops {
+                    day_start_ms: day,
+                    drops: 0,
+                    down_ms: 0,
+                },
+            );
+            day += DAY_MS;
+        }
+
+        let episodes = statement.query_map(params![target, to_ms], |row| {
+            Ok((row.get::<_, i64>(2)?, row.get::<_, Option<i64>>(3)?))
+        })?;
+        for episode in episodes {
+            let (started_at_ms, ended_at_ms) = episode?;
+            let ended_at_ms = ended_at_ms.unwrap_or(to_ms);
+            if started_at_ms >= from_ms && started_at_ms < to_ms {
+                if let Some(bucket) = buckets.get_mut(&(started_at_ms.div_euclid(DAY_MS) * DAY_MS))
+                {
+                    bucket.drops += 1;
+                }
+            }
+            for (day, down_ms) in day_slices(started_at_ms, ended_at_ms, from_ms, to_ms) {
+                if let Some(bucket) = buckets.get_mut(&day) {
+                    bucket.down_ms += down_ms;
+                }
+            }
         }
 
         let mut days = Vec::new();
         let mut day = from_ms.div_euclid(DAY_MS) * DAY_MS;
         while day < to_ms {
-            days.push(DailyDrops {
-                day_start_ms: day,
-                drops: buckets.get(&day).copied().unwrap_or(0),
-            });
+            if let Some(bucket) = buckets.remove(&day) {
+                days.push(bucket);
+            }
             day += DAY_MS;
         }
         Ok(days)
@@ -1049,6 +1091,40 @@ mod tests {
         assert_eq!(days[0].drops, 2);
         assert_eq!(days[1].drops, 1);
         assert_eq!(days[2].drops, 0);
+        assert_eq!(days[0].down_ms, DAY_MS - 2_000);
+        assert_eq!(days[1].down_ms, DAY_MS - 1_000);
+        assert_eq!(days[2].down_ms, DAY_MS, "the open one ends at the window");
+    }
+
+    #[test]
+    fn a_disconnection_open_before_the_window_is_down_time_but_not_a_drop() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        store
+            .record_transition(&event(
+                "1.1.1.1",
+                TargetState::Unknown,
+                TargetState::Down,
+                1_000,
+            ))
+            .unwrap();
+        store
+            .record_transition(&event(
+                "1.1.1.1",
+                TargetState::Down,
+                TargetState::Up,
+                5 * DAY_MS,
+            ))
+            .unwrap();
+
+        let days = store
+            .daily_drops("1.1.1.1", 2 * DAY_MS, 4 * DAY_MS)
+            .unwrap();
+        assert_eq!(days.len(), 2);
+        assert_eq!(days[0].drops, 0);
+        assert_eq!(days[0].down_ms, DAY_MS);
+        assert_eq!(days[1].drops, 0);
+        assert_eq!(days[1].down_ms, DAY_MS);
     }
 
     #[test]

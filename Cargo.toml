@@ -34,3 +34,11 @@ tempfile = "3"
 strip = true
 lto = true
 codegen-units = 1
+
+# Container and local builds: the release optimisations with thin LTO and parallel
+# codegen units, which keep the link step short on the NAS that builds the image.
+# Published artifacts keep the `release` profile.
+[profile.release-dev]
+inherits = "release"
+lto = "thin"
+codegen-units = 16

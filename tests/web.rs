@@ -278,7 +278,24 @@ fn every_row_shows_its_statistics_and_links_to_its_detail_page() {
         "one bar per day of the last 30 days"
     );
     assert!(detail.contains("1 disconnections"));
+    assert!(
+        detail.contains("Disconnections per day") && detail.contains("Day by day"),
+        "the chart and the table are titled"
+    );
+    assert!(
+        detail.matches("<tr><td>").count() >= 30,
+        "one row per day of the window, like the chart"
+    );
+    assert!(detail.contains("<th class=\"num\">down time</th>"));
+    assert!(
+        detail.contains("<td class=\"num\">30m</td>"),
+        "the target has been down for half an hour"
+    );
     assert!(detail.contains("href=\"/\""), "a way back to the timeline");
+    assert!(
+        detail.find("href=\"/\"").unwrap() < detail.find("<svg").unwrap(),
+        "the way back is at the top, before the chart"
+    );
 }
 
 #[test]

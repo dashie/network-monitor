@@ -18,23 +18,108 @@ const AXIS_HEIGHT: f64 = 20.0;
 
 /// Shared stylesheet of both pages.
 pub(crate) const STYLE: &str = r#"
-  :root { color-scheme: light dark; }
-  body { margin: 0; padding: 24px; font: 14px/1.4 system-ui, -apple-system, sans-serif; }
-  main { max-width: 1060px; margin: 0 auto; }
-  h1 { font-size: 20px; margin: 0 0 4px; }
-  .hint { margin: 0 0 16px; opacity: 0.7; }
-  .window { margin: 0 0 8px; font-variant-numeric: tabular-nums; }
+  :root {
+    color-scheme: light dark;
+    --rule: rgba(127, 127, 127, 0.28);
+    --muted: 0.65;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 32px 24px 48px;
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 1040px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+  h2 {
+    font-size: 12px;
+    margin: 32px 0 10px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    opacity: var(--muted);
+  }
+  h2 .download {
+    font-size: 12px;
+    font-weight: 400;
+    letter-spacing: 0;
+    text-transform: none;
+    margin-left: 12px;
+  }
+  .hint { margin: 4px 0 20px; font-size: 13px; opacity: var(--muted); }
+  .breadcrumb {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 18px;
+    font-size: 13px;
+  }
+  .breadcrumb a {
+    color: inherit;
+    text-decoration: none;
+    border-bottom: 1px solid transparent;
+    padding-bottom: 1px;
+  }
+  .breadcrumb a:hover { border-bottom-color: currentColor; }
+  .breadcrumb .sep { opacity: 0.4; }
+  .breadcrumb [aria-current] { opacity: var(--muted); }
+  .title { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+  .badge {
+    padding: 2px 9px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: #ffffff;
+  }
+  .badge.up { background: #2e7d32; }
+  .badge.down { background: #c62828; }
+  .badge.unknown { background: #9e9e9e; }
+  .stats { display: flex; flex-wrap: wrap; gap: 12px; margin: 20px 0 0; }
+  .stat {
+    flex: 1 1 150px;
+    padding: 10px 14px;
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+  }
+  .stat b {
+    display: block;
+    font-size: 19px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat span { font-size: 12px; opacity: var(--muted); }
+  .window {
+    margin: 0 0 10px;
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    opacity: var(--muted);
+  }
   svg { width: 100%; height: auto; display: block; }
   a:hover text { text-decoration: underline; }
-  .legend { display: flex; gap: 16px; margin-top: 12px; opacity: 0.8; }
+  .legend { display: flex; gap: 18px; margin-top: 14px; font-size: 13px; opacity: 0.8; }
   .legend span { display: inline-flex; align-items: center; gap: 6px; }
   .swatch { width: 14px; height: 10px; border-radius: 2px; display: inline-block; }
-  h2 { font-size: 15px; margin: 28px 0 8px; }
-  h2 .download { font-size: 12px; font-weight: 400; margin-left: 12px; opacity: 0.8; }
-  table { border-collapse: collapse; font-variant-numeric: tabular-nums; }
-  th, td { text-align: left; padding: 3px 20px 3px 0; }
-  th { font-weight: 600; opacity: 0.7; border-bottom: 1px solid #e6e6e6; }
+  /* One table style for both pages: as wide as `main`, text left, numbers right.
+     The numeric columns carry `.num`; no table is narrower than the chart above it. */
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 7px 18px 7px 0; }
+  th {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    opacity: var(--muted);
+    border-bottom: 1px solid var(--rule);
+  }
+  tbody td { border-bottom: 1px solid var(--rule); }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr:hover { background: rgba(127, 127, 127, 0.07); }
+  .num { text-align: right; }
   td.down { color: #c62828; }
+  @media (max-width: 620px) { body { padding: 20px 16px 40px; } }
 "#;
 
 /// How often the browser reloads a page by itself.
@@ -124,7 +209,7 @@ fn downs_table(downs: &[DownEpisode], now_ms: i64) -> String {
         "<h2>Last 10 disconnections\
          <a class=\"download\" href=\"/export/disconnections.csv.gz\">download all (csv.gz)</a>\
          </h2>\n<table>\n\
-         <thead><tr><th>target</th><th>started (UTC)</th><th>lasted</th></tr></thead>\n\
+         <thead><tr><th>target</th><th>started (UTC)</th><th class=\"num\">lasted</th></tr></thead>\n\
          <tbody>\n",
     );
 
@@ -144,7 +229,11 @@ fn downs_table(downs: &[DownEpisode], now_ms: i64) -> String {
             escape(&episode.target),
             &started[5..10],
             &started[11..19],
-            if ongoing { " class=\"down\"" } else { "" },
+            if ongoing {
+                " class=\"num down\""
+            } else {
+                " class=\"num\""
+            },
             lasted,
             if ongoing { " and counting" } else { "" }
         );
@@ -189,7 +278,7 @@ fn chart(timelines: &[TargetTimeline], window: Window) -> String {
         let x = window.x(tick);
         let _ = write!(
             output,
-            "<line x1=\"{x:.1}\" y1=\"{}\" x2=\"{x:.1}\" y2=\"{:.0}\" stroke=\"#e6e6e6\"/>",
+            "<line x1=\"{x:.1}\" y1=\"{}\" x2=\"{x:.1}\" y2=\"{:.0}\" stroke=\"rgba(127,127,127,0.35)\"/>",
             TOP_PAD + AXIS_HEIGHT - 4.0,
             height - 4.0
         );
@@ -459,6 +548,44 @@ mod tests {
             "still down at the window end"
         );
         assert!(rendered.contains("8.8.8.8"));
+    }
+
+    #[test]
+    fn the_duration_column_uses_the_style_shared_with_the_detail_page() {
+        let downs = [DownEpisode {
+            event_id: 1,
+            target: "8.8.8.8".to_string(),
+            started_at_ms: 3_600_000,
+            ended_at_ms: Some(4_320_000),
+        }];
+        let window = Window {
+            from_ms: 0,
+            to_ms: 7_200_000,
+        };
+        let rendered = page(&[timeline()], &downs, window);
+        assert!(rendered.contains("<th class=\"num\">lasted</th>"));
+        assert!(rendered.contains("<td class=\"num\">12m</td>"));
+        assert!(
+            !STYLE.contains(".numeric"),
+            "one table style for both pages"
+        );
+        assert!(STYLE.contains(".num { text-align: right; }"));
+    }
+
+    #[test]
+    fn an_ongoing_disconnection_keeps_both_the_numeric_and_the_down_style() {
+        let downs = [DownEpisode {
+            event_id: 1,
+            target: "1.1.1.1".to_string(),
+            started_at_ms: 7_000_000,
+            ended_at_ms: None,
+        }];
+        let window = Window {
+            from_ms: 0,
+            to_ms: 7_200_000,
+        };
+        let rendered = page(&[timeline()], &downs, window);
+        assert!(rendered.contains("<td class=\"num down\">"));
     }
 
     #[test]

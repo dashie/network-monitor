@@ -6,10 +6,19 @@ RUN apk add --no-cache build-base
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-RUN cargo build --release --locked
+
+# `release-dev` is `release` with thin LTO and parallel codegen: the same optimised
+# binary for practical purposes, and a link step that no longer dominates the build
+# on the NAS. The cached target directory survives between builds, so a change to a
+# source file recompiles this crate only instead of every dependency. Pass
+# `--build-arg PROFILE=release` to produce the artifact that gets published.
+ARG PROFILE=release-dev
+RUN --mount=type=cache,target=/src/target \
+    cargo build --profile "$PROFILE" --locked && \
+    cp "target/$PROFILE/network-monitor" /usr/local/bin/network-monitor
 
 FROM scratch
-COPY --from=build /src/target/release/network-monitor /network-monitor
+COPY --from=build /usr/local/bin/network-monitor /network-monitor
 
 # Default configuration: a bare `docker run` starts and probes the container's own
 # loopback, which proves the raw socket and the database work. Mount a file over this
