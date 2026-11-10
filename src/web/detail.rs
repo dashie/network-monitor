@@ -10,7 +10,7 @@ use crate::store::{DailyDrops, TargetStateRow, TimelineSegment};
 use crate::time::format_rfc3339;
 
 use super::page::{
-    escape, format_runs, format_span, runs_stats, LOCALIZE_SCRIPT, REFRESH_SECONDS, STYLE,
+    escape, format_runs, format_span, runs_stats, up_for, LOCALIZE_SCRIPT, REFRESH_SECONDS, STYLE,
 };
 use super::stats;
 
@@ -29,6 +29,7 @@ pub fn target_page(
     target: &TargetStateRow,
     days: &[DailyDrops],
     segments: &[TimelineSegment],
+    now_ms: i64,
 ) -> String {
     let name = target
         .label
@@ -41,6 +42,13 @@ pub fn target_page(
     let total: u32 = days.iter().map(|day| day.drops).sum();
     let down_ms: i64 = days.iter().map(|day| day.down_ms).sum();
     let runs = runs_stats(segments);
+    let since = match up_for(target.state, target.last_change_at_ms, now_ms) {
+        Some(up_for_ms) => format!(
+            "<span class=\"since\">for {}</span>",
+            format_span(up_for_ms)
+        ),
+        None => String::new(),
+    };
 
     let body = format!(
         "<nav class=\"breadcrumb\" aria-label=\"Breadcrumb\">\
@@ -51,6 +59,7 @@ pub fn target_page(
          <div class=\"title\">\
          <h1>{name}</h1>\
          <span class=\"badge {state}\">{state}</span>\
+         {since}\
          </div>\n\
          <p class=\"hint\">{address}{interface} · times in your time zone</p>\n\
          <div class=\"stats\">\
@@ -66,6 +75,7 @@ pub fn target_page(
         address = escape(&target.target),
         interface = interface,
         state = target.state.as_str(),
+        since = since,
         total = total,
         down_ms = format_span(down_ms),
         avg_up = format_runs(runs),
@@ -242,6 +252,9 @@ mod tests {
     use super::*;
     use crate::store::TargetState;
 
+    /// A fixed instant, so the age of the current `up` state is deterministic.
+    const NOW: i64 = 10_000_000;
+
     fn target() -> TargetStateRow {
         TargetStateRow {
             target: "1.1.1.1".to_string(),
@@ -249,7 +262,7 @@ mod tests {
             label: Some("cloudflare".to_string()),
             state: TargetState::Up,
             first_seen_at_ms: 0,
-            last_change_at_ms: 0,
+            last_change_at_ms: 9_000_000,
             last_rtt_us: None,
         }
     }
@@ -265,7 +278,7 @@ mod tests {
     #[test]
     fn the_page_draws_one_bar_per_day_with_drops() {
         let days = [day(0, 2, 90_000), day(1, 0, 0), day(2, 5, 600_000)];
-        let rendered = target_page(&target(), &days, &[]);
+        let rendered = target_page(&target(), &days, &[], NOW);
         assert_eq!(rendered.matches("<rect ").count(), 2);
         assert!(rendered.contains("data-format=\"day\" data-suffix=\": 2\">01-01: 2</title>"));
         assert!(rendered.contains("data-suffix=\": 5\">01-03: 5</title>"));
@@ -277,7 +290,7 @@ mod tests {
     #[test]
     fn the_table_lists_every_day_newest_first_with_its_down_time() {
         let days = [day(0, 2, 90_000), day(1, 0, 0), day(2, 5, 600_000)];
-        let rendered = target_page(&target(), &days, &[]);
+        let rendered = target_page(&target(), &days, &[], NOW);
         assert_eq!(rendered.matches("<tr><td>").count(), 3);
         let first = rendered
             .find("<time datetime=\"1970-01-03")
@@ -305,7 +318,7 @@ mod tests {
 
     #[test]
     fn the_table_uses_the_style_shared_with_the_timeline_page() {
-        let rendered = target_page(&target(), &[day(0, 1, 60_000)], &[]);
+        let rendered = target_page(&target(), &[day(0, 1, 60_000)], &[], NOW);
         assert!(
             rendered.contains("<table>"),
             "no class: the table takes the width of main, like the chart above it"
@@ -320,14 +333,14 @@ mod tests {
     #[test]
     fn a_quiet_month_states_zero_disconnections() {
         let days = [day(0, 0, 0), day(1, 0, 0)];
-        let rendered = target_page(&target(), &days, &[]);
+        let rendered = target_page(&target(), &days, &[], NOW);
         assert!(!rendered.contains("<rect "));
         assert!(rendered.contains("0 disconnections"));
     }
 
     #[test]
     fn a_busiest_day_of_one_labels_the_axis_without_repeating_a_value() {
-        let rendered = target_page(&target(), &[day(0, 1, 1_000)], &[]);
+        let rendered = target_page(&target(), &[day(0, 1, 1_000)], &[], NOW);
         assert_eq!(
             rendered
                 .matches("text-anchor=\"end\" font-size=\"10\" fill=\"#666666\">1</text>")
@@ -340,7 +353,7 @@ mod tests {
 
     #[test]
     fn the_way_back_sits_at_the_top_of_the_page() {
-        let rendered = target_page(&target(), &[day(0, 1, 1_000)], &[]);
+        let rendered = target_page(&target(), &[day(0, 1, 1_000)], &[], NOW);
         let crumb = rendered
             .find("href=\"/\"")
             .expect("the breadcrumb links to the timeline");
@@ -355,7 +368,7 @@ mod tests {
     #[test]
     fn the_page_states_the_state_and_the_total_down_time() {
         let days = [day(0, 2, 90_000), day(1, 0, 0), day(2, 5, 600_000)];
-        let rendered = target_page(&target(), &days, &[]);
+        let rendered = target_page(&target(), &days, &[], NOW);
         assert!(rendered.contains("<span class=\"badge up\">up</span>"));
         assert!(rendered.contains("<b>7 disconnections</b>"));
         assert!(
@@ -368,7 +381,7 @@ mod tests {
     fn the_target_label_is_escaped() {
         let mut hostile = target();
         hostile.label = Some("<script>alert(1)</script>".to_string());
-        let rendered = target_page(&hostile, &[day(0, 1, 1_000)], &[]);
+        let rendered = target_page(&hostile, &[day(0, 1, 1_000)], &[], NOW);
         assert!(!rendered.contains("<script>alert(1)</script>"));
         assert!(rendered.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
     }
@@ -395,7 +408,7 @@ mod tests {
 
     #[test]
     fn the_header_states_the_average_up_run_of_the_period() {
-        let rendered = target_page(&target(), &[day(0, 1, 300_000)], &runs());
+        let rendered = target_page(&target(), &[day(0, 1, 300_000)], &runs(), NOW);
         assert!(
             rendered.contains("<b>1h15±15m</b>"),
             "1 h and 1h30 average into 1h15 with a spread of 15 min"
@@ -410,7 +423,7 @@ mod tests {
             from_ms: 0,
             to_ms: 60_000,
         }];
-        let rendered = target_page(&target(), &[day(0, 1, 60_000)], &down);
+        let rendered = target_page(&target(), &[day(0, 1, 60_000)], &down, NOW);
         assert!(rendered.contains("<b>—</b>"));
         assert!(rendered.contains("no up run in the last 30 days"));
     }
@@ -424,7 +437,7 @@ mod tests {
             to_ms: 27 * 3_600_000,
         }];
         let days = [day(0, 0, 0), day(1, 0, 0)];
-        let rendered = target_page(&target(), &days, &crossing);
+        let rendered = target_page(&target(), &days, &crossing, NOW);
         assert!(
             rendered.contains("<td class=\"num\" title=\"1 up run that day\">3h00</td>"),
             "three hours before midnight"
@@ -438,7 +451,7 @@ mod tests {
     #[test]
     fn each_bar_states_its_own_count() {
         let days = [day(0, 2, 90_000), day(1, 0, 0), day(2, 5, 600_000)];
-        let rendered = target_page(&target(), &days, &[]);
+        let rendered = target_page(&target(), &days, &[], NOW);
         assert!(rendered.contains("fill=\"#c62828\">2</text>"));
         assert!(rendered.contains("fill=\"#c62828\">5</text>"));
         assert!(
@@ -448,8 +461,22 @@ mod tests {
     }
 
     #[test]
+    fn the_badge_says_how_long_the_target_has_been_up() {
+        let rendered = target_page(&target(), &[day(0, 1, 60_000)], &[], NOW);
+        assert!(rendered.contains("<span class=\"since\">for 16m</span>"));
+    }
+
+    #[test]
+    fn a_target_that_is_not_up_states_no_streak() {
+        let mut down = target();
+        down.state = TargetState::Down;
+        let rendered = target_page(&down, &[day(0, 1, 60_000)], &[], NOW);
+        assert!(!rendered.contains("class=\"since\""));
+    }
+
+    #[test]
     fn every_instant_is_machine_readable_and_localised_by_the_browser() {
-        let rendered = target_page(&target(), &[day(0, 1, 60_000)], &[]);
+        let rendered = target_page(&target(), &[day(0, 1, 60_000)], &[], NOW);
         assert!(rendered.contains(
             "<time datetime=\"1970-01-01T00:00:00.000Z\" data-format=\"date\">1970-01-01</time>"
         ));

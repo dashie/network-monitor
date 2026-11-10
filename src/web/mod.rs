@@ -191,7 +191,26 @@ fn handle(mut stream: TcpStream, database: &Path) {
                 }
             };
 
-            let body = page::page(&timelines, &downs, window);
+            // How long each target has been up without a drop: the age of the current
+            // state, from the transition that set it, which the segments cannot say when
+            // the window opened in the middle of a run.
+            let states = match store.states() {
+                Ok(states) => states,
+                Err(error) => {
+                    query_failed(&mut stream, &error, include_body);
+                    return;
+                }
+            };
+            let mut up_since = std::collections::HashMap::new();
+            for state in &states {
+                if let Some(up_for_ms) =
+                    page::up_for(state.state, state.last_change_at_ms, now_ms())
+                {
+                    up_since.insert(state.target.clone(), up_for_ms);
+                }
+            }
+
+            let body = page::page(&timelines, &downs, &up_since, window);
             respond(
                 &mut stream,
                 200,
@@ -254,7 +273,7 @@ fn handle(mut stream: TcpStream, database: &Path) {
                 }
             };
 
-            let body = detail::target_page(&target, &days, &segments);
+            let body = detail::target_page(&target, &days, &segments, now);
             respond(
                 &mut stream,
                 200,

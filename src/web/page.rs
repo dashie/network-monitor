@@ -3,6 +3,7 @@
 //! The page is generated from the same segments the query path uses; the browser
 //! only asks for another window. No chart library, no client-side data handling.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use crate::store::{DownEpisode, TargetState, TargetTimeline, TimelineSegment};
@@ -12,7 +13,7 @@ use super::stats::{self, RunStats};
 
 const WIDTH: f64 = 1000.0;
 const LABEL_WIDTH: f64 = 190.0;
-const STATS_WIDTH: f64 = 250.0;
+const STATS_WIDTH: f64 = 300.0;
 const ROW_HEIGHT: f64 = 24.0;
 const ROW_GAP: f64 = 6.0;
 const TOP_PAD: f64 = 6.0;
@@ -94,6 +95,7 @@ pub(crate) const STYLE: &str = r#"
   .badge.up { background: #2e7d32; }
   .badge.down { background: #c62828; }
   .badge.unknown { background: #9e9e9e; }
+  .since { font-size: 13px; opacity: var(--muted); font-variant-numeric: tabular-nums; }
   .stats { display: flex; flex-wrap: wrap; gap: 12px; margin: 20px 0 0; }
   .stat {
     flex: 1 1 150px;
@@ -168,6 +170,16 @@ const TICK_STEPS_MS: [i64; 10] = [
     604_800_000,
 ];
 
+/// Right edge of every statistics column of a lane, relative to the start of the block,
+/// with its header and what the column means.
+const COLUMNS: [(f64, &str, &str); 5] = [
+    (26.0, "DROPS", "disconnections in the window"),
+    (86.0, "DOWN", "time spent down in the window"),
+    (142.0, "UP %", "up share of the time the target was probed"),
+    (200.0, "UP FOR", "how long it has been up without a drop"),
+    (284.0, "RUN ±σ", "average up run, with its spread"),
+];
+
 /// The time window shown by the chart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Window {
@@ -220,8 +232,13 @@ for (const element of document.querySelectorAll('time[datetime], [data-datetime]
 
 /// The full page: the windows, the chart, the legend, the last disconnections, and the
 /// scripts that follow a lane link and localise the instants.
-pub fn page(timelines: &[TargetTimeline], downs: &[DownEpisode], window: Window) -> String {
-    let body = chart(timelines, window);
+pub fn page(
+    timelines: &[TargetTimeline],
+    downs: &[DownEpisode],
+    up_since: &HashMap<String, i64>,
+    window: Window,
+) -> String {
+    let body = chart(timelines, up_since, window);
     let downs = downs_table(downs, window.to_ms);
 
     format!(
@@ -321,7 +338,7 @@ fn downs_table(downs: &[DownEpisode], now_ms: i64) -> String {
 }
 
 /// The window label plus the SVG.
-fn chart(timelines: &[TargetTimeline], window: Window) -> String {
+fn chart(timelines: &[TargetTimeline], up_since: &HashMap<String, i64>, window: Window) -> String {
     let mut output = String::new();
     let _ = write!(
         output,
@@ -373,24 +390,15 @@ fn chart(timelines: &[TargetTimeline], window: Window) -> String {
         tick += step;
     }
 
-    // Column headers of the per-lane statistics: what went down, how long, how much of
-    // the window was up, and how long a run of `up` lasts on average.
+    // Column headers of the per-lane statistics. The numbers are right-aligned, like the
+    // tables of the detail page, so a reader compares magnitudes by column edge.
     let stats_x = WIDTH - STATS_WIDTH + 8.0;
-    let headers = [
-        (stats_x, "DROPS", "disconnections in the window"),
-        (stats_x + 48.0, "DOWN", "time spent down in the window"),
-        (
-            stats_x + 100.0,
-            "UP %",
-            "up share of the time the target was probed",
-        ),
-        (stats_x + 152.0, "RUN ±σ", "average up run, with its spread"),
-    ];
-    for (x, label, hint) in headers {
+    for (offset, label, hint) in COLUMNS {
         let _ = write!(
             output,
-            "<text x=\"{x:.1}\" y=\"{:.1}\" font-size=\"10\" fill=\"#666666\">\
-             <title>{hint}</title>{label}</text>",
+            "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"10\" fill=\"#666666\" \
+             text-anchor=\"end\"><title>{hint}</title>{label}</text>",
+            stats_x + offset,
             TOP_PAD + 8.0
         );
     }
@@ -442,27 +450,29 @@ fn chart(timelines: &[TargetTimeline], window: Window) -> String {
 
         let runs = runs_stats(&timeline.segments);
         let values = [
-            (stats_x, stats.drops.to_string()),
-            (stats_x + 48.0, format_span(stats.down_ms)),
-            (
-                stats_x + 100.0,
-                format_share(availability(&timeline.segments)),
-            ),
+            stats.drops.to_string(),
+            format_span(stats.down_ms),
+            format_share(availability(&timeline.segments)),
+            match up_since.get(&timeline.target) {
+                Some(up_for_ms) => format_span(*up_for_ms),
+                None => "—".to_string(),
+            },
         ];
-        for (x, label) in values {
+        for ((offset, _, _), value) in COLUMNS.iter().zip(&values) {
             let _ = write!(
                 output,
-                "<text x=\"{x:.1}\" y=\"{:.1}\" font-size=\"11\" fill=\"currentColor\">\
-                 {}</text>",
+                "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"11\" fill=\"currentColor\" \
+                 text-anchor=\"end\">{}</text>",
+                stats_x + offset,
                 y + ROW_HEIGHT * 0.7,
-                escape(&label)
+                escape(value)
             );
         }
         let _ = write!(
             output,
-            "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"11\" fill=\"currentColor\">\
-             <title>{}</title>{}</text>",
-            stats_x + 152.0,
+            "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"11\" fill=\"currentColor\" \
+             text-anchor=\"end\"><title>{}</title>{}</text>",
+            stats_x + COLUMNS[4].0,
             y + ROW_HEIGHT * 0.7,
             run_count_hint(runs),
             escape(&format_runs(runs))
@@ -524,6 +534,13 @@ pub fn format_span(ms: i64) -> String {
 /// Mean and spread of the `up` runs of a lane, over the window it shows.
 pub fn runs_stats(segments: &[TimelineSegment]) -> RunStats {
     stats::summarize(&stats::up_runs(segments))
+}
+
+/// How long a target has been continuously `up`: the distance from the transition that
+/// turned it up to `now_ms`. `None` while it is down or unknown, because there is no
+/// running `up` stretch to measure.
+pub fn up_for(state: TargetState, last_change_at_ms: i64, now_ms: i64) -> Option<i64> {
+    (state == TargetState::Up).then(|| (now_ms - last_change_at_ms).max(0))
 }
 
 /// Share of the probed time spent `up`, in permille; `None` when nothing was probed.
@@ -642,6 +659,11 @@ pub(crate) fn escape(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// No target is up in these pages unless a test says so.
+    fn no_streaks() -> HashMap<String, i64> {
+        HashMap::new()
+    }
     use crate::store::TimelineSegment;
 
     fn timeline() -> TargetTimeline {
@@ -669,7 +691,7 @@ mod tests {
             from_ms: 0,
             to_ms: 7_200_000,
         };
-        let rendered = chart(&[timeline()], window);
+        let rendered = chart(&[timeline()], &no_streaks(), window);
         assert_eq!(rendered.matches("rx=\"2\"").count(), 2);
         assert!(rendered.contains("#2e7d32"));
         assert!(rendered.contains("#c62828"));
@@ -682,7 +704,7 @@ mod tests {
             from_ms: 0,
             to_ms: 7_200_000,
         };
-        let rendered = chart(&[timeline()], window);
+        let rendered = chart(&[timeline()], &no_streaks(), window);
         assert!(rendered.contains("DROPS"));
         assert!(rendered.contains("DOWN"));
         assert!(rendered.contains("1h00"));
@@ -709,7 +731,7 @@ mod tests {
             from_ms: 0,
             to_ms: 7_200_000,
         };
-        let rendered = page(&[timeline()], &downs, window);
+        let rendered = page(&[timeline()], &downs, &no_streaks(), window);
         assert!(rendered.contains("Last 10 disconnections"));
         assert!(rendered.contains("12m"), "720 s down");
         assert!(
@@ -731,7 +753,7 @@ mod tests {
             from_ms: 0,
             to_ms: 7_200_000,
         };
-        let rendered = page(&[timeline()], &downs, window);
+        let rendered = page(&[timeline()], &downs, &no_streaks(), window);
         assert!(rendered.contains("<th class=\"num\">lasted</th>"));
         assert!(rendered.contains("<td class=\"num\">12m</td>"));
         assert!(
@@ -753,7 +775,7 @@ mod tests {
             from_ms: 0,
             to_ms: 7_200_000,
         };
-        let rendered = page(&[timeline()], &downs, window);
+        let rendered = page(&[timeline()], &downs, &no_streaks(), window);
         assert!(rendered.contains("<td class=\"num down\">"));
     }
 
@@ -763,7 +785,7 @@ mod tests {
             from_ms: 0,
             to_ms: 7_200_000,
         };
-        let rendered = page(&[timeline()], &[], window);
+        let rendered = page(&[timeline()], &[], &no_streaks(), window);
         assert!(rendered.contains("No disconnection recorded yet."));
     }
 
@@ -773,7 +795,7 @@ mod tests {
             from_ms: 0,
             to_ms: 7_200_000,
         };
-        let rendered = page(&[timeline()], &[], window);
+        let rendered = page(&[timeline()], &[], &no_streaks(), window);
         assert!(rendered.starts_with("<!doctype html>"));
         assert!(rendered.contains("<meta http-equiv=\"refresh\" content=\"30\">"));
         assert!(!rendered.contains("wheel"), "no zoom");
@@ -787,7 +809,7 @@ mod tests {
             from_ms: 0,
             to_ms: 7_200_000,
         };
-        let rendered = page(&[timeline()], &[], window);
+        let rendered = page(&[timeline()], &[], &no_streaks(), window);
         assert!(rendered.contains("closest('a')"));
         assert!(rendered.contains("href=\"/target?target=1.1.1.1\""));
     }
@@ -798,7 +820,7 @@ mod tests {
             from_ms: 0,
             to_ms: 1_000,
         };
-        let rendered = chart(&[], window);
+        let rendered = chart(&[], &no_streaks(), window);
         assert!(rendered.contains("Start the monitor first"));
         assert!(!rendered.contains("<svg"));
     }
@@ -811,7 +833,7 @@ mod tests {
             from_ms: 0,
             to_ms: 7_200_000,
         };
-        let rendered = chart(&[hostile], window);
+        let rendered = chart(&[hostile], &no_streaks(), window);
         assert!(!rendered.contains("<script>"));
         assert!(rendered.contains("&lt;script&gt;"));
     }
@@ -867,7 +889,7 @@ mod tests {
             from_ms: 0,
             to_ms: 7_200_000,
         };
-        let rendered = page(&[timeline()], &[], window);
+        let rendered = page(&[timeline()], &[], &no_streaks(), window);
         assert!(rendered.contains("UP %"), "the availability column");
         assert!(rendered.contains("RUN ±σ"), "the average column");
         assert!(rendered.contains(">50.0%<"), "half of the window was up");
@@ -908,9 +930,51 @@ mod tests {
             from_ms: 0,
             to_ms: 14_400_000,
         };
-        let rendered = page(&[timeline], &[], window);
+        let rendered = page(&[timeline], &[], &no_streaks(), window);
         assert!(rendered.contains(">1h30±30m<"));
         assert!(rendered.contains("mean of 2 up runs in the window"));
+    }
+
+    #[test]
+    fn a_lane_states_how_long_its_target_has_been_up() {
+        let window = Window {
+            from_ms: 0,
+            to_ms: 7_200_000,
+        };
+        let mut up_since = HashMap::new();
+        up_since.insert("1.1.1.1".to_string(), 11_220_000);
+        let rendered = page(&[timeline()], &[], &up_since, window);
+        assert!(rendered.contains("UP FOR"), "the streak column");
+        assert!(rendered.contains(">3h07<"));
+    }
+
+    #[test]
+    fn a_target_that_is_not_up_states_no_streak() {
+        let window = Window {
+            from_ms: 0,
+            to_ms: 7_200_000,
+        };
+        let rendered = page(&[timeline()], &[], &no_streaks(), window);
+        assert!(rendered.contains(">—<"), "no running up stretch");
+        assert!(
+            rendered.contains(">1h00<"),
+            "the average run is still there"
+        );
+    }
+
+    #[test]
+    fn the_streak_is_the_age_of_the_current_up_state() {
+        assert_eq!(
+            up_for(TargetState::Up, 9_000_000, 10_000_000),
+            Some(1_000_000)
+        );
+        assert_eq!(up_for(TargetState::Down, 9_000_000, 10_000_000), None);
+        assert_eq!(up_for(TargetState::Unknown, 0, 10_000_000), None);
+        assert_eq!(
+            up_for(TargetState::Up, 20_000_000, 10_000_000),
+            Some(0),
+            "a transition ahead of the clock never yields a negative age"
+        );
     }
 
     #[test]
@@ -938,7 +1002,7 @@ mod tests {
             from_ms: 0,
             to_ms: hours_span(6),
         };
-        let rendered = page(&[timeline()], &[], window);
+        let rendered = page(&[timeline()], &[], &no_streaks(), window);
         for hours in WINDOWS {
             assert!(
                 rendered.contains(&format!("href=\"/?window={hours}h\"")),
@@ -955,7 +1019,7 @@ mod tests {
             from_ms: 0,
             to_ms: hours_span(DEFAULT_WINDOW_HOURS),
         };
-        let rendered = page(&[timeline()], &[], window);
+        let rendered = page(&[timeline()], &[], &no_streaks(), window);
         assert!(rendered.contains("<a href=\"/?window=24h\" aria-current=\"page\">24h</a>"));
     }
 
@@ -965,7 +1029,7 @@ mod tests {
             from_ms: 0,
             to_ms: hours_span(DEFAULT_WINDOW_HOURS),
         };
-        let rendered = page(&[timeline()], &[], window);
+        let rendered = page(&[timeline()], &[], &no_streaks(), window);
         assert!(rendered.contains(
             "<time datetime=\"1970-01-01T00:00:00.000Z\">1970-01-01 00:00:00 UTC</time>"
         ));
@@ -985,7 +1049,7 @@ mod tests {
             from_ms: 0,
             to_ms: 3 * 86_400_000,
         };
-        let rendered = page(&[timeline()], &[], window);
+        let rendered = page(&[timeline()], &[], &no_streaks(), window);
         assert!(rendered.contains("data-format=\"daytime\""));
     }
 
@@ -995,7 +1059,7 @@ mod tests {
             from_ms: 0,
             to_ms: hours_span(DEFAULT_WINDOW_HOURS),
         };
-        let rendered = page(&[timeline()], &[], window);
+        let rendered = page(&[timeline()], &[], &no_streaks(), window);
         assert!(rendered.contains(
             "data-datetime=\"1970-01-01T01:00:00.000Z\" \
              data-until=\"1970-01-01T02:00:00.000Z\" data-prefix=\"down — \""
@@ -1014,7 +1078,7 @@ mod tests {
             from_ms: 0,
             to_ms: hours_span(DEFAULT_WINDOW_HOURS),
         };
-        let rendered = page(&[timeline()], &downs, window);
+        let rendered = page(&[timeline()], &downs, &no_streaks(), window);
         assert!(rendered.contains(
             "<td><time datetime=\"1970-01-01T01:00:00.000Z\">1970-01-01 01:00:00 UTC</time></td>"
         ));

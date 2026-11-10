@@ -142,6 +142,15 @@ fn seeded_database() -> (tempfile::TempDir, PathBuf) {
             now - 1_800_000,
         ))
         .expect("the second transition is recorded");
+    // A second target that is still up, so the page has a running `up` stretch to state.
+    store
+        .record_transition(&event(
+            "9.9.9.9",
+            TargetState::Unknown,
+            TargetState::Up,
+            now - 600_000,
+        ))
+        .expect("the up transition is recorded");
     (directory, path)
 }
 
@@ -304,6 +313,14 @@ fn every_row_shows_its_statistics_and_links_to_its_detail_page() {
         page.contains("RUN ±σ"),
         "the average up run column has a header"
     );
+    assert!(
+        page.contains("UP FOR"),
+        "the column stating how long the target has been up"
+    );
+    assert!(
+        page.contains(">10m<"),
+        "the target that is up states the ten minutes of its running stretch"
+    );
     assert!(page.contains("href=\"/target?target=1.1.1.1\""));
 
     let (status, detail) = server.get("/target?target=1.1.1.1");
@@ -338,6 +355,10 @@ fn every_row_shows_its_statistics_and_links_to_its_detail_page() {
     assert!(
         detail.contains("<td class=\"num\">30m</td>"),
         "the target has been down for half an hour"
+    );
+    assert!(
+        !detail.contains("class=\"since\""),
+        "the target is down, so there is no running up stretch to state"
     );
     assert!(detail.contains("href=\"/\""), "a way back to the timeline");
     assert!(
