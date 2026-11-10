@@ -7,6 +7,7 @@
 pub mod detail;
 pub mod export;
 pub mod page;
+pub mod stats;
 
 use std::io::{self, Read, Write};
 use std::net::{AddrParseError, SocketAddr, TcpListener, TcpStream};
@@ -167,7 +168,7 @@ fn handle(mut stream: TcpStream, database: &Path) {
     match path {
         "/" => {
             let params = parse_query(query);
-            let window = resolve_window(params.from, params.to, now_ms());
+            let window = resolve_window(params.from, params.to, params.window, now_ms());
 
             let store = match open_store(&mut stream, database, include_body) {
                 Some(store) => store,
@@ -229,7 +230,8 @@ fn handle(mut stream: TcpStream, database: &Path) {
             };
 
             let now = now_ms();
-            let days = match store.daily_drops(&target.target, now - 30 * DAY_MS, now) {
+            let from_ms = now - 30 * DAY_MS;
+            let days = match store.daily_drops(&target.target, from_ms, now) {
                 Ok(days) => days,
                 Err(error) => {
                     query_failed(&mut stream, &error, include_body);
@@ -237,7 +239,22 @@ fn handle(mut stream: TcpStream, database: &Path) {
                 }
             };
 
-            let body = detail::target_page(&target, &days);
+            // The same segments the timeline page draws, for this target only: the
+            // per-day average of the `up` runs comes from the run boundaries, which
+            // the aggregated day buckets do not carry.
+            let segments = match store.timeline(from_ms, now) {
+                Ok(timelines) => timelines
+                    .into_iter()
+                    .find(|timeline| timeline.target == target.target)
+                    .map(|timeline| timeline.segments)
+                    .unwrap_or_default(),
+                Err(error) => {
+                    query_failed(&mut stream, &error, include_body);
+                    return;
+                }
+            };
+
+            let body = detail::target_page(&target, &days, &segments);
             respond(
                 &mut stream,
                 200,
@@ -414,6 +431,7 @@ fn export_name(now_ms: i64) -> String {
 struct Params {
     from: Option<i64>,
     to: Option<i64>,
+    window: Option<u8>,
     target: Option<String>,
 }
 
@@ -427,11 +445,19 @@ fn parse_query(query: &str) -> Params {
         match key {
             "from" => params.from = value.parse().ok(),
             "to" => params.to = value.parse().ok(),
+            "window" => params.window = parse_hours(value),
             "target" => params.target = Some(decode(value)),
             _ => {}
         }
     }
     params
+}
+
+/// `6h` selects one of the windows the page offers; anything else is ignored, so a
+/// hand-edited query falls back to the default instead of failing.
+fn parse_hours(value: &str) -> Option<u8> {
+    let hours: u8 = value.strip_suffix('h').unwrap_or(value).parse().ok()?;
+    page::WINDOWS.contains(&hours).then_some(hours)
 }
 
 /// Decode the escapes a browser puts in a query value.
@@ -470,12 +496,16 @@ fn decode(value: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn resolve_window(from: Option<i64>, to: Option<i64>, now: i64) -> Window {
+fn resolve_window(from: Option<i64>, to: Option<i64>, hours: Option<u8>, now: i64) -> Window {
+    let span = hours.map_or_else(
+        || page::hours_span(page::DEFAULT_WINDOW_HOURS),
+        page::hours_span,
+    );
     let to = to.unwrap_or(now).min(now);
-    let mut from = from.unwrap_or(to - DAY_MS);
+    let mut from = from.unwrap_or(to - span);
 
     if from >= to {
-        from = to - DAY_MS;
+        from = to - span;
     }
     if to - from < MIN_SPAN_MS {
         from = to - MIN_SPAN_MS;
@@ -498,15 +528,43 @@ mod tests {
     #[test]
     fn the_default_window_is_the_last_day() {
         let now = 1_794_096_000_000;
-        let window = resolve_window(None, None, now);
+        let window = resolve_window(None, None, None, now);
         assert_eq!(window.to_ms, now);
         assert_eq!(window.from_ms, now - DAY_MS);
     }
 
     #[test]
+    fn a_selected_window_ends_now_and_lasts_what_it_says() {
+        let now = 1_794_096_000_000;
+        for hours in page::WINDOWS {
+            let window = resolve_window(None, None, Some(hours), now);
+            assert_eq!(window.to_ms, now);
+            assert_eq!(window.to_ms - window.from_ms, page::hours_span(hours));
+        }
+    }
+
+    #[test]
+    fn the_window_value_names_one_of_the_offered_spans() {
+        assert_eq!(parse_query("window=6h").window, Some(6));
+        assert_eq!(parse_query("window=1h").window, Some(1));
+        assert_eq!(parse_query("window=24h").window, Some(24));
+        assert_eq!(parse_query("window=5h").window, None, "not offered");
+        assert_eq!(parse_query("window=abc").window, None);
+        assert_eq!(parse_query("window=").window, None);
+    }
+
+    #[test]
+    fn an_unknown_window_falls_back_to_the_default() {
+        let now = 1_794_096_000_000;
+        let params = parse_query("window=99h");
+        let window = resolve_window(params.from, params.to, params.window, now);
+        assert_eq!(window.to_ms - window.from_ms, page::hours_span(24));
+    }
+
+    #[test]
     fn the_window_never_extends_into_the_future() {
         let now = 1_000_000;
-        let window = resolve_window(Some(500_000), Some(2_000_000), now);
+        let window = resolve_window(Some(500_000), Some(2_000_000), None, now);
         assert_eq!(window.to_ms, now);
         assert_eq!(window.from_ms, 500_000);
     }
@@ -514,14 +572,14 @@ mod tests {
     #[test]
     fn a_reversed_window_falls_back_to_a_day() {
         let now = 10 * DAY_MS;
-        let window = resolve_window(Some(now), Some(now - DAY_MS), now);
+        let window = resolve_window(Some(now), Some(now - DAY_MS), None, now);
         assert_eq!(window.to_ms - window.from_ms, DAY_MS);
     }
 
     #[test]
     fn a_tiny_window_is_widened() {
         let now = 10 * DAY_MS;
-        let window = resolve_window(Some(now - 1_000), Some(now), now);
+        let window = resolve_window(Some(now - 1_000), Some(now), None, now);
         assert_eq!(window.to_ms - window.from_ms, MIN_SPAN_MS);
     }
 

@@ -234,6 +234,34 @@ fn a_window_can_be_requested_in_the_url() {
 }
 
 #[test]
+fn the_window_links_change_the_span_and_only_one_is_current() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, page) = server.get("/");
+    assert_eq!(status, 200);
+    for hours in [24, 12, 6, 4, 2, 1] {
+        assert!(
+            page.contains(&format!("href=\"/?window={hours}h\"")),
+            "{hours} h is offered"
+        );
+    }
+    assert!(
+        page.contains("href=\"/?window=24h\" aria-current=\"page\""),
+        "the default window is the one marked current"
+    );
+
+    let (status, narrow) = server.get("/?window=1h");
+    assert_eq!(status, 200);
+    assert!(narrow.contains("href=\"/?window=1h\" aria-current=\"page\""));
+    assert!(!narrow.contains("href=\"/?window=24h\" aria-current"));
+
+    let (status, unknown) = server.get("/?window=99h");
+    assert_eq!(status, 200, "an unknown window is ignored, not refused");
+    assert!(unknown.contains("href=\"/?window=24h\" aria-current=\"page\""));
+}
+
+#[test]
 fn the_history_can_be_downloaded_as_a_gzipped_csv() {
     let (_directory, database) = seeded_database();
     let server = start(&database);
@@ -268,6 +296,14 @@ fn every_row_shows_its_statistics_and_links_to_its_detail_page() {
     assert_eq!(status, 200);
     assert!(page.contains("DROPS"), "the drop column has a header");
     assert!(page.contains("DOWN"), "the down-time column has a header");
+    assert!(
+        page.contains("UP %"),
+        "the availability column has a header"
+    );
+    assert!(
+        page.contains("RUN ±σ"),
+        "the average up run column has a header"
+    );
     assert!(page.contains("href=\"/target?target=1.1.1.1\""));
 
     let (status, detail) = server.get("/target?target=1.1.1.1");
@@ -287,6 +323,18 @@ fn every_row_shows_its_statistics_and_links_to_its_detail_page() {
         "one row per day of the window, like the chart"
     );
     assert!(detail.contains("<th class=\"num\">down time</th>"));
+    assert!(
+        detail.contains("<th class=\"num\">average up</th>"),
+        "every day states the average of its up runs"
+    );
+    assert!(
+        detail.contains("up run in the last 30 days"),
+        "the third KPI states the sample it is built on"
+    );
+    assert!(
+        detail.contains("<span>average up run in 30 days</span>"),
+        "the third KPI names what it averages"
+    );
     assert!(
         detail.contains("<td class=\"num\">30m</td>"),
         "the target has been down for half an hour"

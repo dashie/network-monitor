@@ -23,10 +23,12 @@ appears in a requirement, in a component name, or in a public interface.
 | **State transition** | A change of a target's verdict between two consecutive probe cycles. |
 | **Target** | One IP address under supervision, with an optional interface and an optional label. |
 | **Target specification** | The command-line form of a target: `IP[,interface=NAME][,label=NAME]`. |
+| **Availability** | The share of the probed time of a window spent `up`; `unknown` time is not probed and is left out. |
 | **Archive** | The gzipped CSV of every event, written by the page and read by `import`; one format, two directions. |
 | **Down episode** | One `down` transition and, if it happened, the transition back to `up`; its duration is the distance between the two, or from the transition to now while the target is still down. |
 | **Timeline segment** | An interval of constant state for one target, from one transition to the next or to the edge of the window. |
 | **Timeout** | The maximum time a probe waits for a matching echo reply; its expiry yields `down`. |
+| **Up run** | A maximal stretch of `up` of one target inside a window; a run that the window opens or closes in the middle of counts as it appears. |
 | **Unknown state** | The state of a target before its first verdict has been recorded. |
 | **Unreachable (`down`)** | The state of a target whose probe received no matching echo reply within the timeout. |
 | **Verdict** | The outcome of one probe cycle: `up` with a round-trip time, or `down`. A local failure is a `ProbeError`, not a verdict. |

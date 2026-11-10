@@ -8,9 +8,11 @@ use std::fmt::Write as _;
 use crate::store::{DownEpisode, TargetState, TargetTimeline, TimelineSegment};
 use crate::time::format_rfc3339;
 
+use super::stats::{self, RunStats};
+
 const WIDTH: f64 = 1000.0;
 const LABEL_WIDTH: f64 = 190.0;
-const STATS_WIDTH: f64 = 150.0;
+const STATS_WIDTH: f64 = 250.0;
 const ROW_HEIGHT: f64 = 24.0;
 const ROW_GAP: f64 = 6.0;
 const TOP_PAD: f64 = 6.0;
@@ -47,6 +49,21 @@ pub(crate) const STYLE: &str = r#"
     margin-left: 12px;
   }
   .hint { margin: 4px 0 20px; font-size: 13px; opacity: var(--muted); }
+  .windows { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 20px; font-size: 13px; }
+  .windows a {
+    padding: 2px 11px;
+    border: 1px solid var(--rule);
+    border-radius: 999px;
+    color: inherit;
+    text-decoration: none;
+    font-variant-numeric: tabular-nums;
+  }
+  .windows a:hover { border-color: currentColor; }
+  .windows a[aria-current] {
+    background: rgba(127, 127, 127, 0.16);
+    border-color: transparent;
+    font-weight: 600;
+  }
   .breadcrumb {
     display: flex;
     flex-wrap: wrap;
@@ -125,6 +142,19 @@ pub(crate) const STYLE: &str = r#"
 /// How often the browser reloads a page by itself.
 pub(crate) const REFRESH_SECONDS: u32 = 30;
 
+const HOUR_MS: i64 = 3_600_000;
+
+/// The windows the timeline offers, largest first.
+pub(crate) const WINDOWS: [u8; 6] = [24, 12, 6, 4, 2, 1];
+
+/// The window shown when the query names none.
+pub(crate) const DEFAULT_WINDOW_HOURS: u8 = 24;
+
+/// The length of a window, in milliseconds.
+pub(crate) fn hours_span(hours: u8) -> i64 {
+    i64::from(hours) * HOUR_MS
+}
+
 const TICK_STEPS_MS: [i64; 10] = [
     60_000,
     300_000,
@@ -157,8 +187,39 @@ impl Window {
     }
 }
 
-/// The full page: the chart, the legend, the last disconnections, and the script that
-/// follows a lane link.
+/// Follow a lane link from script: some engines ignore an `<a href>` that wraps SVG
+/// shapes.
+const LANE_SCRIPT: &str = r#"document.getElementById('chart').addEventListener('click', event => {
+  const link = event.target instanceof Element ? event.target.closest('a') : null;
+  if (link === null) return;
+  event.preventDefault();
+  window.location.assign(link.getAttribute('href'));
+}, true);"#;
+
+/// Replace every instant the server wrote in UTC with the locale and the time zone of
+/// the visitor. The server stays on UTC; only the presentation moves.
+pub(crate) const LOCALIZE_SCRIPT: &str = r#"const FORMATS = {
+  datetime: { dateStyle: 'medium', timeStyle: 'medium' },
+  time: { hour: '2-digit', minute: '2-digit' },
+  daytime: { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' },
+  date: { dateStyle: 'medium', timeZone: 'UTC' },
+  day: { month: 'short', day: 'numeric', timeZone: 'UTC' },
+};
+const label = (instant, kind) =>
+  new Intl.DateTimeFormat(undefined, FORMATS[kind] ?? FORMATS.datetime).format(instant);
+for (const element of document.querySelectorAll('time[datetime], [data-datetime]')) {
+  const from = new Date(element.getAttribute('data-datetime') ?? element.getAttribute('datetime'));
+  if (Number.isNaN(from.getTime())) continue;
+  const until = element.getAttribute('data-until');
+  const prefix = element.getAttribute('data-prefix') ?? '';
+  const suffix = element.getAttribute('data-suffix') ?? '';
+  element.textContent = prefix + (until === null
+    ? label(from, element.getAttribute('data-format'))
+    : `${label(from, 'datetime')} → ${label(new Date(until), 'datetime')}`) + suffix;
+}"#;
+
+/// The full page: the windows, the chart, the legend, the last disconnections, and the
+/// scripts that follow a lane link and localise the instants.
 pub fn page(timelines: &[TargetTimeline], downs: &[DownEpisode], window: Window) -> String {
     let body = chart(timelines, window);
     let downs = downs_table(downs, window.to_ms);
@@ -176,8 +237,9 @@ pub fn page(timelines: &[TargetTimeline], downs: &[DownEpisode], window: Window)
 <body>
 <main>
 <h1>network-monitor</h1>
-<p class="hint">Times are UTC. The page reloads every {REFRESH_SECONDS} s; select a lane for
-its last 30 days.</p>
+<p class="hint">Times follow the time zone of your browser. The page reloads every
+{REFRESH_SECONDS} s; select a lane for its last 30 days.</p>
+{windows}
 <div id="chart">{body}</div>
 <div class="legend">
   <span><i class="swatch" style="background:#2e7d32"></i>up</span>
@@ -187,20 +249,36 @@ its last 30 days.</p>
 {downs}
 </main>
 <script>
-// Navigate from script: some engines ignore an <a href> that wraps SVG shapes.
-document.getElementById('chart').addEventListener('click', event => {{
-  const link = event.target instanceof Element ? event.target.closest('a') : null;
-  if (link === null) return;
-  event.preventDefault();
-  window.location.assign(link.getAttribute('href'));
-}}, true);
+{lane}
+{localize}
 </script>
 </body>
 </html>
 "#,
+        windows = window_links(window),
         body = body,
         downs = downs,
+        lane = LANE_SCRIPT,
+        localize = LOCALIZE_SCRIPT,
     )
+}
+
+/// The links that change the window of the chart.
+fn window_links(window: Window) -> String {
+    let mut output = String::from("<nav class=\"windows\" aria-label=\"Time window\">");
+    for hours in WINDOWS {
+        let current = if window.span() == hours_span(hours) {
+            " aria-current=\"page\""
+        } else {
+            ""
+        };
+        let _ = write!(
+            output,
+            "<a href=\"/?window={hours}h\"{current}>{hours}h</a>"
+        );
+    }
+    output.push_str("</nav>\n");
+    output
 }
 
 /// The last disconnections, newest first, with how long each one lasted.
@@ -209,7 +287,7 @@ fn downs_table(downs: &[DownEpisode], now_ms: i64) -> String {
         "<h2>Last 10 disconnections\
          <a class=\"download\" href=\"/export/disconnections.csv.gz\">download all (csv.gz)</a>\
          </h2>\n<table>\n\
-         <thead><tr><th>target</th><th>started (UTC)</th><th class=\"num\">lasted</th></tr></thead>\n\
+         <thead><tr><th>target</th><th>started</th><th class=\"num\">lasted</th></tr></thead>\n\
          <tbody>\n",
     );
 
@@ -218,17 +296,16 @@ fn downs_table(downs: &[DownEpisode], now_ms: i64) -> String {
     }
 
     for episode in downs {
-        let started = format_rfc3339(episode.started_at_ms);
         let (lasted, ongoing) = match episode.ended_at_ms {
             Some(end) => (format_span(end - episode.started_at_ms), false),
             None => (format_span(now_ms - episode.started_at_ms), true),
         };
         let _ = writeln!(
             output,
-            "<tr><td>{}</td><td>{} {}</td><td{}>{}{}</td></tr>",
+            "<tr><td>{}</td><td><time datetime=\"{}\">{}</time></td><td{}>{}{}</td></tr>",
             escape(&episode.target),
-            &started[5..10],
-            &started[11..19],
+            format_rfc3339(episode.started_at_ms),
+            utc_text(episode.started_at_ms),
             if ongoing {
                 " class=\"num down\""
             } else {
@@ -248,9 +325,11 @@ fn chart(timelines: &[TargetTimeline], window: Window) -> String {
     let mut output = String::new();
     let _ = write!(
         output,
-        "<p class=\"window\">{} → {} (UTC)</p>",
+        "<p class=\"window\"><time datetime=\"{}\">{}</time> → <time datetime=\"{}\">{}</time></p>",
         format_rfc3339(window.from_ms),
-        format_rfc3339(window.to_ms)
+        utc_text(window.from_ms),
+        format_rfc3339(window.to_ms),
+        utc_text(window.to_ms)
     );
 
     if timelines.is_empty() {
@@ -285,26 +364,36 @@ fn chart(timelines: &[TargetTimeline], window: Window) -> String {
         let _ = write!(
             output,
             "<text x=\"{x:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-size=\"10\" \
-             fill=\"#666666\">{}</text>",
+             fill=\"#666666\" data-datetime=\"{}\" data-format=\"{}\">{}</text>",
             TOP_PAD + 8.0,
+            format_rfc3339(tick),
+            tick_format(span),
             escape(&tick_label(tick, span))
         );
         tick += step;
     }
 
-    // Column headers of the per-lane statistics.
+    // Column headers of the per-lane statistics: what went down, how long, how much of
+    // the window was up, and how long a run of `up` lasts on average.
     let stats_x = WIDTH - STATS_WIDTH + 8.0;
-    let _ = write!(
-        output,
-        "<text x=\"{stats_x:.1}\" y=\"{:.1}\" font-size=\"10\" fill=\"#666666\">DROPS</text>",
-        TOP_PAD + 8.0
-    );
-    let _ = write!(
-        output,
-        "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"10\" fill=\"#666666\">DOWN</text>",
-        stats_x + 62.0,
-        TOP_PAD + 8.0
-    );
+    let headers = [
+        (stats_x, "DROPS", "disconnections in the window"),
+        (stats_x + 48.0, "DOWN", "time spent down in the window"),
+        (
+            stats_x + 100.0,
+            "UP %",
+            "up share of the time the target was probed",
+        ),
+        (stats_x + 152.0, "RUN ±σ", "average up run, with its spread"),
+    ];
+    for (x, label, hint) in headers {
+        let _ = write!(
+            output,
+            "<text x=\"{x:.1}\" y=\"{:.1}\" font-size=\"10\" fill=\"#666666\">\
+             <title>{hint}</title>{label}</text>",
+            TOP_PAD + 8.0
+        );
+    }
 
     // One lane per target; the whole lane links to the 30-day detail page.
     for (index, timeline) in timelines.iter().enumerate() {
@@ -339,28 +428,44 @@ fn chart(timelines: &[TargetTimeline], window: Window) -> String {
             let _ = write!(
                 output,
                 "<rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{width:.1}\" height=\"{ROW_HEIGHT}\" \
-                 rx=\"2\" fill=\"{}\"><title>{} — {} to {}</title></rect>",
+                 rx=\"2\" fill=\"{}\"><title data-datetime=\"{}\" data-until=\"{}\" \
+                 data-prefix=\"{} — \">{} — {} to {}</title></rect>",
                 colour(segment.state),
-                state_label(segment.state),
                 format_rfc3339(segment.from_ms),
-                format_rfc3339(segment.to_ms)
+                format_rfc3339(segment.to_ms),
+                state_label(segment.state),
+                state_label(segment.state),
+                utc_text(segment.from_ms),
+                utc_text(segment.to_ms)
             );
         }
 
-        let _ = write!(
-            output,
-            "<text x=\"{stats_x:.1}\" y=\"{:.1}\" font-size=\"11\" fill=\"currentColor\">\
-             {}</text>",
-            y + ROW_HEIGHT * 0.7,
-            stats.drops
-        );
+        let runs = runs_stats(&timeline.segments);
+        let values = [
+            (stats_x, stats.drops.to_string()),
+            (stats_x + 48.0, format_span(stats.down_ms)),
+            (
+                stats_x + 100.0,
+                format_share(availability(&timeline.segments)),
+            ),
+        ];
+        for (x, label) in values {
+            let _ = write!(
+                output,
+                "<text x=\"{x:.1}\" y=\"{:.1}\" font-size=\"11\" fill=\"currentColor\">\
+                 {}</text>",
+                y + ROW_HEIGHT * 0.7,
+                escape(&label)
+            );
+        }
         let _ = write!(
             output,
             "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"11\" fill=\"currentColor\">\
-             {}</text>",
-            stats_x + 62.0,
+             <title>{}</title>{}</text>",
+            stats_x + 152.0,
             y + ROW_HEIGHT * 0.7,
-            format_span(stats.down_ms)
+            run_count_hint(runs),
+            escape(&format_runs(runs))
         );
         output.push_str("</a>");
     }
@@ -416,6 +521,48 @@ pub fn format_span(ms: i64) -> String {
     format!("{}d{:02}h", hours / 24, hours % 24)
 }
 
+/// Mean and spread of the `up` runs of a lane, over the window it shows.
+pub fn runs_stats(segments: &[TimelineSegment]) -> RunStats {
+    stats::summarize(&stats::up_runs(segments))
+}
+
+/// Share of the probed time spent `up`, in permille; `None` when nothing was probed.
+pub fn availability(segments: &[TimelineSegment]) -> Option<i64> {
+    stats::up_permille(segments)
+}
+
+/// `1h12±45m`, `1h12` when a single run gives no spread to state, or `—` when the
+/// window holds no `up` run at all.
+pub fn format_runs(runs: RunStats) -> String {
+    match runs.count {
+        0 => "—".to_string(),
+        1 => format_span(runs.mean_ms),
+        _ => format!(
+            "{}±{}",
+            format_span(runs.mean_ms),
+            format_span(runs.sigma_ms)
+        ),
+    }
+}
+
+/// `99.8%`, from a share in permille; `—` when there is no probed time to share.
+pub fn format_share(permille: Option<i64>) -> String {
+    match permille {
+        Some(permille) => format!("{}.{}%", permille / 10, permille % 10),
+        None => "—".to_string(),
+    }
+}
+
+/// The sample behind an average, for the tooltip: an average of one run has no
+/// spread, and an average of none does not exist.
+fn run_count_hint(runs: RunStats) -> String {
+    match runs.count {
+        0 => "no up run in the window".to_string(),
+        1 => "1 up run in the window: no spread to speak of".to_string(),
+        count => format!("mean of {count} up runs in the window"),
+    }
+}
+
 fn tick_step(span_ms: i64) -> i64 {
     for step in TICK_STEPS_MS {
         if span_ms / step <= 8 {
@@ -425,13 +572,35 @@ fn tick_step(span_ms: i64) -> i64 {
     (span_ms / 6).max(1)
 }
 
+/// A tick wider than a day and a half also names the day, so a long window is not a
+/// row of identical clock times.
+fn shows_date(span_ms: i64) -> bool {
+    span_ms > 36 * HOUR_MS
+}
+
+/// How the browser formats a tick, mirroring [`tick_label`].
+fn tick_format(span_ms: i64) -> &'static str {
+    if shows_date(span_ms) {
+        "daytime"
+    } else {
+        "time"
+    }
+}
+
 fn tick_label(at_ms: i64, span_ms: i64) -> String {
     let stamp = format_rfc3339(at_ms);
-    if span_ms > 36 * 3_600_000 {
+    if shows_date(span_ms) {
         format!("{} {}", &stamp[5..10], &stamp[11..16])
     } else {
         stamp[11..16].to_string()
     }
+}
+
+/// The fallback text of an instant: readable, explicitly UTC, and replaced in the
+/// browser by the time zone and the locale of the visitor.
+fn utc_text(at_ms: i64) -> String {
+    let stamp = format_rfc3339(at_ms);
+    format!("{} {} UTC", &stamp[0..10], &stamp[11..19])
 }
 
 fn short(text: &str, limit: usize) -> String {
@@ -690,6 +859,166 @@ mod tests {
         let late_window = window_stats(&segments, 2_000);
         assert_eq!(late_window.drops, 0);
         assert_eq!(late_window.down_ms, 2_500);
+    }
+
+    #[test]
+    fn a_lane_states_its_availability_and_its_average_up_run() {
+        let window = Window {
+            from_ms: 0,
+            to_ms: 7_200_000,
+        };
+        let rendered = page(&[timeline()], &[], window);
+        assert!(rendered.contains("UP %"), "the availability column");
+        assert!(rendered.contains("RUN ±σ"), "the average column");
+        assert!(rendered.contains(">50.0%<"), "half of the window was up");
+        assert!(
+            rendered.contains(">1h00<"),
+            "the only up run lasted an hour"
+        );
+        assert!(
+            rendered.contains("1 up run in the window"),
+            "the sample behind the average goes in the tooltip"
+        );
+    }
+
+    #[test]
+    fn a_lane_with_several_runs_states_its_spread() {
+        let timeline = TargetTimeline {
+            target: "1.1.1.1".to_string(),
+            label: None,
+            segments: vec![
+                TimelineSegment {
+                    state: TargetState::Up,
+                    from_ms: 0,
+                    to_ms: 3_600_000,
+                },
+                TimelineSegment {
+                    state: TargetState::Down,
+                    from_ms: 3_600_000,
+                    to_ms: 7_200_000,
+                },
+                TimelineSegment {
+                    state: TargetState::Up,
+                    from_ms: 7_200_000,
+                    to_ms: 14_400_000,
+                },
+            ],
+        };
+        let window = Window {
+            from_ms: 0,
+            to_ms: 14_400_000,
+        };
+        let rendered = page(&[timeline], &[], window);
+        assert!(rendered.contains(">1h30±30m<"));
+        assert!(rendered.contains("mean of 2 up runs in the window"));
+    }
+
+    #[test]
+    fn an_average_of_one_run_states_no_spread() {
+        let single = RunStats {
+            count: 1,
+            mean_ms: 3_600_000,
+            sigma_ms: 0,
+        };
+        assert_eq!(format_runs(single), "1h00");
+        assert_eq!(format_runs(RunStats::default()), "—");
+    }
+
+    #[test]
+    fn a_share_is_a_percentage_with_one_decimal() {
+        assert_eq!(format_share(Some(1_000)), "100.0%");
+        assert_eq!(format_share(Some(998)), "99.8%");
+        assert_eq!(format_share(Some(0)), "0.0%");
+        assert_eq!(format_share(None), "—", "nothing was probed");
+    }
+
+    #[test]
+    fn the_timeline_offers_every_window_and_marks_the_current_one() {
+        let window = Window {
+            from_ms: 0,
+            to_ms: hours_span(6),
+        };
+        let rendered = page(&[timeline()], &[], window);
+        for hours in WINDOWS {
+            assert!(
+                rendered.contains(&format!("href=\"/?window={hours}h\"")),
+                "{hours}h is offered"
+            );
+        }
+        assert!(rendered.contains("<a href=\"/?window=6h\" aria-current=\"page\">6h</a>"));
+        assert!(!rendered.contains("<a href=\"/?window=24h\" aria-current"));
+    }
+
+    #[test]
+    fn the_default_window_is_the_one_marked_current() {
+        let window = Window {
+            from_ms: 0,
+            to_ms: hours_span(DEFAULT_WINDOW_HOURS),
+        };
+        let rendered = page(&[timeline()], &[], window);
+        assert!(rendered.contains("<a href=\"/?window=24h\" aria-current=\"page\">24h</a>"));
+    }
+
+    #[test]
+    fn the_window_label_and_the_axis_carry_the_instant_for_the_browser() {
+        let window = Window {
+            from_ms: 0,
+            to_ms: hours_span(DEFAULT_WINDOW_HOURS),
+        };
+        let rendered = page(&[timeline()], &[], window);
+        assert!(rendered.contains(
+            "<time datetime=\"1970-01-01T00:00:00.000Z\">1970-01-01 00:00:00 UTC</time>"
+        ));
+        assert!(
+            rendered.contains("data-format=\"time\""),
+            "a short window labels a clock time"
+        );
+        assert!(
+            !rendered.contains("(UTC)"),
+            "the server no longer names the zone"
+        );
+    }
+
+    #[test]
+    fn a_long_window_labels_the_day_before_the_clock_time() {
+        let window = Window {
+            from_ms: 0,
+            to_ms: 3 * 86_400_000,
+        };
+        let rendered = page(&[timeline()], &[], window);
+        assert!(rendered.contains("data-format=\"daytime\""));
+    }
+
+    #[test]
+    fn the_segment_tooltip_carries_both_instants_and_the_state() {
+        let window = Window {
+            from_ms: 0,
+            to_ms: hours_span(DEFAULT_WINDOW_HOURS),
+        };
+        let rendered = page(&[timeline()], &[], window);
+        assert!(rendered.contains(
+            "data-datetime=\"1970-01-01T01:00:00.000Z\" \
+             data-until=\"1970-01-01T02:00:00.000Z\" data-prefix=\"down — \""
+        ));
+    }
+
+    #[test]
+    fn the_start_of_a_disconnection_is_localised_like_every_other_instant() {
+        let downs = [DownEpisode {
+            event_id: 1,
+            target: "8.8.8.8".to_string(),
+            started_at_ms: 3_600_000,
+            ended_at_ms: Some(4_320_000),
+        }];
+        let window = Window {
+            from_ms: 0,
+            to_ms: hours_span(DEFAULT_WINDOW_HOURS),
+        };
+        let rendered = page(&[timeline()], &downs, window);
+        assert!(rendered.contains(
+            "<td><time datetime=\"1970-01-01T01:00:00.000Z\">1970-01-01 01:00:00 UTC</time></td>"
+        ));
+        assert!(rendered.contains("Intl.DateTimeFormat"));
     }
 
     #[test]

@@ -67,7 +67,10 @@ network-monitor/
 │   ├── import.rs         restore a history from the exported CSV (path, URL, stdin)
 │   └── web/
 │       ├── mod.rs        HTTP loop, routes, window parsing
-│       └── page.rs       HTML and SVG generation
+│       ├── page.rs       timeline page: HTML, SVG, shared stylesheet and scripts
+│       ├── detail.rs     detail page of one target: per-day chart and table
+│       ├── stats.rs      up runs, mean and spread, availability
+│       └── export.rs     the streamed gzipped CSV
 ├── tests/
 │   ├── config_precedence.rs  every key, file and flag, in both directions
 │   ├── monitor_e2e.rs        end-to-end loop, transitions only, restart continuity

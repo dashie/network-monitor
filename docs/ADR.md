@@ -28,6 +28,8 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0014 | Replace the window the archive covers on import | accepted | 2026-11-09 | `--replace-window`: delete the covered period, rebuild the projection |
 | ADR-0015 | Export every event so one file serves export and import | accepted | 2026-11-09 | One row per event with label and interface; round trip is lossless |
 | ADR-0016 | Build the container image with a dev profile and a cached `target` | accepted | 2026-11-10 | `release-dev` profile plus a BuildKit cache mount; `PROFILE=release` publishes |
+| ADR-0017 | Localise the instants in the browser and offer the window as links | accepted | 2026-11-10 | UTC in the markup, `Intl` in the browser; `/?window=6h` for 24/12/6/4/2/1 h |
+| ADR-0018 | Report the average `up` run with its spread and the availability | accepted | 2026-11-10 | Mean ± σ of the runs, clipped by the window; `unknown` excluded from availability |
 
 ## Records
 
@@ -531,3 +533,79 @@ every one-line change.
   host.
 - Lower the optimisation level of the whole `release` profile: rejected, it would
   degrade the published artifact to speed up a development loop.
+
+## ADR-0017 — Localise the instants in the browser and offer the window as links
+
+**Status:** accepted · **Date:** 2026-11-10
+**Amends:** ADR-0010. The timeline is still generated once, server-side, with no zoom, no pan, no `fetch` and no client-side data handling; the window becomes selectable with plain links, and the browser formats the instants.
+
+### Context
+
+Every instant on the page was a UTC RFC 3339 string. That is right for a query and wrong for a status board: the reader looks at the page at a glance and thinks in the clock of the room, not in UTC. `BR-6` already separates the two — storage and wire format are UTC epoch milliseconds, and the time zone is a matter of presentation — so this is a presentation defect, not a data one.
+
+The window was fixed at 24 hours unless the operator edited `from`/`to` by hand, and a disconnection that happened an hour ago is easier to read over one hour than over a day.
+
+### Decision
+
+The server writes every instant twice: the machine-readable UTC value in the `datetime` attribute of a `<time>` element, or in `data-datetime`/`data-until` on an SVG `<text>` and `<title>`, and a readable UTC fallback as the text. A small inline script at the end of each page rewrites that text through `Intl.DateTimeFormat` with no explicit locale, so the visitor reads the format and the time zone of its own browser. Nothing else runs on the client: no data is loaded, nothing is re-rendered, no state is kept.
+
+The fallback stays visible when the script does not run, and it always names `UTC`, so a reader is never shown a wrong zone: the page degrades to exact but unlocalised, never to plausible but wrong.
+
+The timeline offers the last 24, 12, 6, 4, 2 and 1 hour as links — `/?window=6h` — with 24 hours as the default and the current one marked `aria-current="page"`. The value is validated against that list and an unknown one falls back to the default, so a hand-edited URL never fails. An explicit `from`/`to` still wins.
+
+The per-day buckets of the detail page stay UTC days, because that is what `BR-6` and the store mean by a day; the browser localises their format with `timeZone: 'UTC'` and the header keeps saying so.
+
+### Consequences
+
+- A readable page for a reader whose clock is not UTC, with no configuration: the server needs neither the locale nor the time zone.
+- The page needs a script for the local presentation only. Without it the reader sees UTC, explicitly labelled.
+- The window lives in the URL, so the 30 s meta refresh keeps it and a bookmark reproduces it; nothing about the choice reaches the server, so no cookie and no session.
+- Tick count and tick width are still decided on the server, so a locale with long month names can crowd the axis of a window longer than a day and a half.
+- `/?window=…` joins `/?from=…&to=…` as a public URL contract, and the offered list is a contract too: removing a value breaks the link that used it.
+
+### Alternatives considered
+
+- Format on the server from `Accept-Language`: rejected, the header carries a language and not the time zone of the reader, which is the half that matters here.
+- Send the time zone to the server (`?tz=Europe/Rome`) and render there: rejected, every zone becomes a distinct response, and a script is still needed to discover the zone.
+- Keep the fixed window and the hand-edited URL: rejected, the operator asked for a control, and a link is the smallest one that works without script.
+- A `<select>` with a `fetch` of the new range: rejected, it reintroduces the client-side data handling ADR-0008 removed, for a choice a link already expresses.
+- A date library on the server with the zone of the host: rejected, the host runs in UTC and would localise nothing.
+
+## ADR-0018 — Report the average `up` run with its spread
+
+**Status:** accepted · **Date:** 2026-11-10
+**Amends:** ADR-0009. The per-lane numbers and the per-day table stay as decided there; two of them are added.
+
+### Context
+
+The page answered "how bad was it" — disconnections and down time — and not "how long does it stay up". The operator asked for the average duration of a continuous `up` run, with a dispersion figure, on the timeline window, on the detail page, and per day.
+
+The obvious companion of a mean is the variance, which is the wrong figure twice over: it is expressed in squared milliseconds, so it cannot be written next to a duration, and it describes a symmetric distribution, while run lengths are heavily right-skewed — a few long runs against many short ones. The median and the interquartile range describe that shape better; the operator chose the mean, and the mean is what the page states, with σ beside it so the unit stays a duration.
+
+### Decision
+
+`web::stats` turns the segments of a window into the `up` runs, then into a mean and a population standard deviation in whole milliseconds, and into an availability share. Every figure comes from the segments the page draws, so a reader can check it against the bands, and none of them needs a query the page does not already run.
+
+A run that the window opens or closes in the middle of **counts as it appears**: the first and the last run are lower bounds, never overestimates. Excluding them would leave a window with zero or one disconnection with no average at all, which is the common case on a healthy link.
+
+The sample size travels with the figure: the lane tooltip and the detail header state how many runs the mean is built on, and an average of one run states no spread at all rather than `± 0s`.
+
+Availability is the share of the **probed** time spent `up`. `unknown` — before the first probe of a target, or after a gap — is left out of numerator and denominator instead of counting as down, because it is time nobody measured (`BR-4` says a local failure is never a down state; the same reasoning applies to a page that would otherwise report a day-old target as 5 % available).
+
+The day buckets of the detail page are split at the UTC day boundary, so a run that crosses midnight contributes a piece to each day it touches.
+
+### Consequences
+
+- Three figures that a reader can verify by eye against the chart, and a fourth per lane that answers "how long does it stay up".
+- A window whose target is down or unknown for its whole length states `—`, not zero: there is no average of nothing.
+- The mean is pulled up by a long final run and pulled down by a short first one; the count in the tooltip is what tells the reader how much to trust it.
+- The detail page needs the segments, not only the aggregated day buckets, so the route runs `Store::timeline` for the 30-day window and picks the target. One more read per request, no schema change.
+- A per-day average and the average of the same period are not the arithmetic combination of one another: the period uses the runs, the days use the pieces. Stated in `BR-10` so nobody reads one as the sum of the other.
+
+### Alternatives considered
+
+- Variance instead of standard deviation: rejected, it is in squared milliseconds and cannot sit next to a duration.
+- Median and interquartile range: proposed, rejected by the operator in favour of the mean. The tooltip carries the sample size, which is what makes the mean readable.
+- Only complete runs inside the window: rejected, it erases the figure exactly when there are one or two disconnections, and it would hide the current run, which is the one a reader looks at.
+- Availability over the whole window, `unknown` counting as down: rejected, it reports a freshly deployed target as nearly always unavailable.
+- Store the runs or the aggregates in the database: rejected, it adds a table and a migration for figures that are derived from the events in one pass and must match the drawing exactly.

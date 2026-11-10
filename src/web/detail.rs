@@ -6,20 +6,30 @@
 
 use std::fmt::Write as _;
 
-use crate::store::{DailyDrops, TargetStateRow};
+use crate::store::{DailyDrops, TargetStateRow, TimelineSegment};
 use crate::time::format_rfc3339;
 
-use super::page::{escape, format_span, REFRESH_SECONDS, STYLE};
+use super::page::{
+    escape, format_runs, format_span, runs_stats, LOCALIZE_SCRIPT, REFRESH_SECONDS, STYLE,
+};
+use super::stats;
 
 const WIDTH: f64 = 1000.0;
 const HEIGHT: f64 = 300.0;
 const LEFT: f64 = 44.0;
 const RIGHT: f64 = 12.0;
-const TOP: f64 = 16.0;
+const TOP: f64 = 26.0;
 const BOTTOM: f64 = 34.0;
+const DAY_MS: i64 = 86_400_000;
 
-/// The whole page for one target.
-pub fn target_page(target: &TargetStateRow, days: &[DailyDrops]) -> String {
+/// The whole page for one target. `segments` is the same target over the same 30 days:
+/// the run boundaries are not in the aggregated day buckets, so the per-day averages of
+/// the `up` runs are computed from the segments.
+pub fn target_page(
+    target: &TargetStateRow,
+    days: &[DailyDrops],
+    segments: &[TimelineSegment],
+) -> String {
     let name = target
         .label
         .clone()
@@ -30,6 +40,7 @@ pub fn target_page(target: &TargetStateRow, days: &[DailyDrops]) -> String {
     };
     let total: u32 = days.iter().map(|day| day.drops).sum();
     let down_ms: i64 = days.iter().map(|day| day.down_ms).sum();
+    let runs = runs_stats(segments);
 
     let body = format!(
         "<nav class=\"breadcrumb\" aria-label=\"Breadcrumb\">\
@@ -41,10 +52,12 @@ pub fn target_page(target: &TargetStateRow, days: &[DailyDrops]) -> String {
          <h1>{name}</h1>\
          <span class=\"badge {state}\">{state}</span>\
          </div>\n\
-         <p class=\"hint\">{address}{interface} · times are UTC</p>\n\
+         <p class=\"hint\">{address}{interface} · times in your time zone</p>\n\
          <div class=\"stats\">\
          <div class=\"stat\"><b>{total} disconnections</b><span>last 30 days</span></div>\
          <div class=\"stat\"><b>{down_ms}</b><span>down time in the last 30 days</span></div>\
+         <div class=\"stat\" title=\"{avg_up_hint}\"><b>{avg_up}</b>\
+         <span>average up run in 30 days</span></div>\
          </div>\n\
          <h2>Disconnections per day</h2>\n\
          {bars}\n\
@@ -55,8 +68,14 @@ pub fn target_page(target: &TargetStateRow, days: &[DailyDrops]) -> String {
         state = target.state.as_str(),
         total = total,
         down_ms = format_span(down_ms),
+        avg_up = format_runs(runs),
+        avg_up_hint = match runs.count {
+            0 => "no up run in the last 30 days".to_string(),
+            1 => "1 up run in the last 30 days: no spread to state".to_string(),
+            count => format!("mean of {count} up runs in the last 30 days"),
+        },
         bars = bars(days),
-        table = days_table(days),
+        table = days_table(days, segments),
     );
 
     layout(&format!("{name} — last 30 days"), &body)
@@ -77,10 +96,14 @@ fn layout(title: &str, body: &str) -> String {
 <main>
 {body}
 </main>
+<script>
+{localize}
+</script>
 </body>
 </html>
 "#,
         title = escape(title),
+        localize = LOCALIZE_SCRIPT,
     )
 }
 
@@ -130,11 +153,21 @@ fn bars(days: &[DailyDrops]) -> String {
 
         if day.drops > 0 {
             let height = (day.drops as f64 / max as f64) * plot;
+            let y_bar = TOP + plot - height;
             let _ = write!(
                 svg,
-                "<rect x=\"{x:.1}\" y=\"{:.1}\" width=\"{bar_width:.1}\" height=\"{height:.1}\" \
-                 rx=\"1\" fill=\"#c62828\"><title>{day_label}: {}</title></rect>",
-                TOP + plot - height,
+                "<rect x=\"{x:.1}\" y=\"{y_bar:.1}\" width=\"{bar_width:.1}\" \
+                 height=\"{height:.1}\" rx=\"1\" fill=\"#c62828\"><title data-datetime=\"{date}\" \
+                 data-format=\"day\" data-suffix=\": {}\">{day_label}: {}</title></rect>",
+                day.drops, day.drops
+            );
+            // The count above the bar; a day without drops draws no bar and gets no label.
+            let _ = write!(
+                svg,
+                "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-size=\"10\" \
+                 fill=\"#c62828\">{}</text>",
+                x + bar_width / 2.0,
+                y_bar - 5.0,
                 day.drops
             );
         }
@@ -142,7 +175,7 @@ fn bars(days: &[DailyDrops]) -> String {
             let _ = write!(
                 svg,
                 "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-size=\"10\" \
-                 fill=\"#666666\">{day_label}</text>",
+                 fill=\"#666666\" data-datetime=\"{date}\" data-format=\"day\">{day_label}</text>",
                 x + bar_width / 2.0,
                 HEIGHT - 12.0
             );
@@ -153,32 +186,55 @@ fn bars(days: &[DailyDrops]) -> String {
     svg
 }
 
-/// The same numbers as the chart, day by day, newest first.
-fn days_table(days: &[DailyDrops]) -> String {
+/// The same numbers as the chart, day by day, newest first. A day is a UTC day, so the
+/// browser localises the format of the date but keeps the day it belongs to.
+fn days_table(days: &[DailyDrops], segments: &[TimelineSegment]) -> String {
     let mut output = String::from(
         "<h2>Day by day</h2>\n<table>\n\
          <thead><tr><th>day (UTC)</th><th class=\"num\">disconnections</th>\
-         <th class=\"num\">down time</th></tr></thead>\n\
+         <th class=\"num\">down time</th><th class=\"num\">average up</th></tr></thead>\n\
          <tbody>\n",
     );
 
     if days.is_empty() {
-        output.push_str("<tr><td colspan=\"3\">No day in the window.</td></tr>\n");
+        output.push_str("<tr><td colspan=\"4\">No day in the window.</td></tr>\n");
     }
+
+    // A run that crosses midnight is split, so each day states the average of the `up`
+    // stretches that fall inside it.
+    let runs = stats::up_runs_per_day(segments, DAY_MS);
 
     for day in days.iter().rev() {
         let date = format_rfc3339(day.day_start_ms);
+        let summary = stats::summarize(
+            runs.get(&day.day_start_ms)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        );
         let _ = writeln!(
             output,
-            "<tr><td>{}</td><td class=\"num\">{}</td><td class=\"num\">{}</td></tr>",
+            "<tr><td><time datetime=\"{date}\" data-format=\"date\">{}</time></td>\
+             <td class=\"num\">{}</td><td class=\"num\">{}</td>\
+             <td class=\"num\" title=\"{}\">{}</td></tr>",
             &date[..10],
             day.drops,
-            format_span(day.down_ms)
+            format_span(day.down_ms),
+            run_hint(summary.count),
+            format_runs(summary)
         );
     }
 
     output.push_str("</tbody>\n</table>");
     output
+}
+
+/// How many runs an average is built on, for the tooltip of a cell.
+fn run_hint(count: u32) -> String {
+    match count {
+        0 => "no up run that day".to_string(),
+        1 => "1 up run that day".to_string(),
+        count => format!("{count} up runs that day"),
+    }
 }
 
 #[cfg(test)]
@@ -209,10 +265,10 @@ mod tests {
     #[test]
     fn the_page_draws_one_bar_per_day_with_drops() {
         let days = [day(0, 2, 90_000), day(1, 0, 0), day(2, 5, 600_000)];
-        let rendered = target_page(&target(), &days);
+        let rendered = target_page(&target(), &days, &[]);
         assert_eq!(rendered.matches("<rect ").count(), 2);
-        assert!(rendered.contains("<title>01-01: 2</title>"));
-        assert!(rendered.contains("<title>01-03: 5</title>"));
+        assert!(rendered.contains("data-format=\"day\" data-suffix=\": 2\">01-01: 2</title>"));
+        assert!(rendered.contains("data-suffix=\": 5\">01-03: 5</title>"));
         assert!(rendered.contains("cloudflare"));
         assert!(rendered.contains("7 disconnections"));
         assert!(rendered.contains("href=\"/\""));
@@ -221,25 +277,35 @@ mod tests {
     #[test]
     fn the_table_lists_every_day_newest_first_with_its_down_time() {
         let days = [day(0, 2, 90_000), day(1, 0, 0), day(2, 5, 600_000)];
-        let rendered = target_page(&target(), &days);
+        let rendered = target_page(&target(), &days, &[]);
         assert_eq!(rendered.matches("<tr><td>").count(), 3);
         let first = rendered
-            .find("1970-01-03")
+            .find("<time datetime=\"1970-01-03")
             .expect("the newest day comes first");
-        let second = rendered.find("1970-01-02").expect("then the one before it");
-        let last = rendered.find("1970-01-01").expect("then the oldest");
+        let second = rendered
+            .find("<time datetime=\"1970-01-02")
+            .expect("then the one before it");
+        let last = rendered
+            .find("<time datetime=\"1970-01-01")
+            .expect("then the oldest");
         assert!(first < second && second < last);
-        assert!(rendered
-            .contains("<td>1970-01-03</td><td class=\"num\">5</td><td class=\"num\">10m</td>"));
-        assert!(rendered
-            .contains("<td>1970-01-02</td><td class=\"num\">0</td><td class=\"num\">0s</td>"));
-        assert!(rendered
-            .contains("<td>1970-01-01</td><td class=\"num\">2</td><td class=\"num\">1m</td>"));
+        assert!(rendered.contains(
+            "<td><time datetime=\"1970-01-03T00:00:00.000Z\" data-format=\"date\">1970-01-03</time></td>\
+             <td class=\"num\">5</td><td class=\"num\">10m</td>"
+        ));
+        assert!(rendered.contains(
+            "<td><time datetime=\"1970-01-02T00:00:00.000Z\" data-format=\"date\">1970-01-02</time></td>\
+             <td class=\"num\">0</td><td class=\"num\">0s</td>"
+        ));
+        assert!(rendered.contains(
+            "<td><time datetime=\"1970-01-01T00:00:00.000Z\" data-format=\"date\">1970-01-01</time></td>\
+             <td class=\"num\">2</td><td class=\"num\">1m</td>"
+        ));
     }
 
     #[test]
     fn the_table_uses_the_style_shared_with_the_timeline_page() {
-        let rendered = target_page(&target(), &[day(0, 1, 60_000)]);
+        let rendered = target_page(&target(), &[day(0, 1, 60_000)], &[]);
         assert!(
             rendered.contains("<table>"),
             "no class: the table takes the width of main, like the chart above it"
@@ -254,21 +320,27 @@ mod tests {
     #[test]
     fn a_quiet_month_states_zero_disconnections() {
         let days = [day(0, 0, 0), day(1, 0, 0)];
-        let rendered = target_page(&target(), &days);
+        let rendered = target_page(&target(), &days, &[]);
         assert!(!rendered.contains("<rect "));
         assert!(rendered.contains("0 disconnections"));
     }
 
     #[test]
     fn a_busiest_day_of_one_labels_the_axis_without_repeating_a_value() {
-        let rendered = target_page(&target(), &[day(0, 1, 1_000)]);
-        assert_eq!(rendered.matches(">1</text>").count(), 1);
-        assert_eq!(rendered.matches(">0</text>").count(), 1);
+        let rendered = target_page(&target(), &[day(0, 1, 1_000)], &[]);
+        assert_eq!(
+            rendered
+                .matches("text-anchor=\"end\" font-size=\"10\" fill=\"#666666\">1</text>")
+                .count(),
+            1,
+            "the axis names the top value once"
+        );
+        assert_eq!(rendered.matches("fill=\"#c62828\">1</text>").count(), 1);
     }
 
     #[test]
     fn the_way_back_sits_at_the_top_of_the_page() {
-        let rendered = target_page(&target(), &[day(0, 1, 1_000)]);
+        let rendered = target_page(&target(), &[day(0, 1, 1_000)], &[]);
         let crumb = rendered
             .find("href=\"/\"")
             .expect("the breadcrumb links to the timeline");
@@ -283,7 +355,7 @@ mod tests {
     #[test]
     fn the_page_states_the_state_and_the_total_down_time() {
         let days = [day(0, 2, 90_000), day(1, 0, 0), day(2, 5, 600_000)];
-        let rendered = target_page(&target(), &days);
+        let rendered = target_page(&target(), &days, &[]);
         assert!(rendered.contains("<span class=\"badge up\">up</span>"));
         assert!(rendered.contains("<b>7 disconnections</b>"));
         assert!(
@@ -296,8 +368,99 @@ mod tests {
     fn the_target_label_is_escaped() {
         let mut hostile = target();
         hostile.label = Some("<script>alert(1)</script>".to_string());
-        let rendered = target_page(&hostile, &[day(0, 1, 1_000)]);
-        assert!(!rendered.contains("<script>"));
-        assert!(rendered.contains("&lt;script&gt;"));
+        let rendered = target_page(&hostile, &[day(0, 1, 1_000)], &[]);
+        assert!(!rendered.contains("<script>alert(1)</script>"));
+        assert!(rendered.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+    }
+
+    fn runs() -> Vec<TimelineSegment> {
+        vec![
+            TimelineSegment {
+                state: TargetState::Up,
+                from_ms: 0,
+                to_ms: 3_600_000,
+            },
+            TimelineSegment {
+                state: TargetState::Down,
+                from_ms: 3_600_000,
+                to_ms: 3_900_000,
+            },
+            TimelineSegment {
+                state: TargetState::Up,
+                from_ms: 3_900_000,
+                to_ms: 9_300_000,
+            },
+        ]
+    }
+
+    #[test]
+    fn the_header_states_the_average_up_run_of_the_period() {
+        let rendered = target_page(&target(), &[day(0, 1, 300_000)], &runs());
+        assert!(
+            rendered.contains("<b>1h15±15m</b>"),
+            "1 h and 1h30 average into 1h15 with a spread of 15 min"
+        );
+        assert!(rendered.contains("mean of 2 up runs in the last 30 days"));
+    }
+
+    #[test]
+    fn a_period_without_any_up_run_states_no_average() {
+        let down = [TimelineSegment {
+            state: TargetState::Down,
+            from_ms: 0,
+            to_ms: 60_000,
+        }];
+        let rendered = target_page(&target(), &[day(0, 1, 60_000)], &down);
+        assert!(rendered.contains("<b>—</b>"));
+        assert!(rendered.contains("no up run in the last 30 days"));
+    }
+
+    #[test]
+    fn each_day_states_the_average_of_the_up_runs_inside_it() {
+        // One run that crosses midnight: each day states the piece it holds.
+        let crossing = [TimelineSegment {
+            state: TargetState::Up,
+            from_ms: 21 * 3_600_000,
+            to_ms: 27 * 3_600_000,
+        }];
+        let days = [day(0, 0, 0), day(1, 0, 0)];
+        let rendered = target_page(&target(), &days, &crossing);
+        assert!(
+            rendered.contains("<td class=\"num\" title=\"1 up run that day\">3h00</td>"),
+            "three hours before midnight"
+        );
+        assert!(
+            rendered.contains("<td class=\"num\" title=\"1 up run that day\">3h00</td>"),
+            "and three after it"
+        );
+    }
+
+    #[test]
+    fn each_bar_states_its_own_count() {
+        let days = [day(0, 2, 90_000), day(1, 0, 0), day(2, 5, 600_000)];
+        let rendered = target_page(&target(), &days, &[]);
+        assert!(rendered.contains("fill=\"#c62828\">2</text>"));
+        assert!(rendered.contains("fill=\"#c62828\">5</text>"));
+        assert!(
+            !rendered.contains("fill=\"#c62828\">0</text>"),
+            "a quiet day draws no bar and needs no label"
+        );
+    }
+
+    #[test]
+    fn every_instant_is_machine_readable_and_localised_by_the_browser() {
+        let rendered = target_page(&target(), &[day(0, 1, 60_000)], &[]);
+        assert!(rendered.contains(
+            "<time datetime=\"1970-01-01T00:00:00.000Z\" data-format=\"date\">1970-01-01</time>"
+        ));
+        assert!(
+            rendered.contains("data-datetime=\"1970-01-01T00:00:00.000Z\" data-format=\"day\""),
+            "the axis labels carry the instant the browser reformats"
+        );
+        assert!(
+            rendered.contains("Intl.DateTimeFormat"),
+            "the page localises its own instants"
+        );
+        assert!(!rendered.contains("times are UTC"));
     }
 }
