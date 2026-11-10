@@ -13,7 +13,7 @@ use super::stats::{self, RunStats};
 
 const WIDTH: f64 = 1000.0;
 const LABEL_WIDTH: f64 = 190.0;
-const STATS_WIDTH: f64 = 300.0;
+const STATS_WIDTH: f64 = 270.0;
 const ROW_HEIGHT: f64 = 24.0;
 const ROW_GAP: f64 = 6.0;
 const TOP_PAD: f64 = 6.0;
@@ -146,11 +146,13 @@ pub(crate) const REFRESH_SECONDS: u32 = 30;
 
 const HOUR_MS: i64 = 3_600_000;
 
-/// The windows the timeline offers, largest first.
-pub(crate) const WINDOWS: [u8; 6] = [24, 12, 6, 4, 2, 1];
+/// The windows the timeline offers, smallest first: the links read left to right from
+/// the narrowest to the widest.
+pub(crate) const WINDOWS: [u8; 6] = [1, 2, 4, 6, 12, 24];
 
-/// The window shown when the query names none.
-pub(crate) const DEFAULT_WINDOW_HOURS: u8 = 24;
+/// The window shown when the query names none: the shortest one, because a reader opens
+/// the page to see what is happening now.
+pub(crate) const DEFAULT_WINDOW_HOURS: u8 = 1;
 
 /// The length of a window, in milliseconds.
 pub(crate) fn hours_span(hours: u8) -> i64 {
@@ -175,9 +177,9 @@ const TICK_STEPS_MS: [i64; 10] = [
 const COLUMNS: [(f64, &str, &str); 5] = [
     (26.0, "DROPS", "disconnections in the window"),
     (86.0, "DOWN", "time spent down in the window"),
-    (142.0, "UP %", "up share of the time the target was probed"),
-    (200.0, "UP FOR", "how long it has been up without a drop"),
-    (284.0, "RUN ±σ", "average up run, with its spread"),
+    (160.0, "RUN ±σ", "average up run, with its spread"),
+    (206.0, "UP FOR", "how long it has been up without a drop"),
+    (252.0, "UP %", "up share of the time the target was probed"),
 ];
 
 /// The time window shown by the chart.
@@ -450,33 +452,36 @@ fn chart(timelines: &[TargetTimeline], up_since: &HashMap<String, i64>, window: 
 
         let runs = runs_stats(&timeline.segments);
         let values = [
-            stats.drops.to_string(),
-            format_span(stats.down_ms),
-            format_share(availability(&timeline.segments)),
-            match up_since.get(&timeline.target) {
-                Some(up_for_ms) => format_span(*up_for_ms),
-                None => "—".to_string(),
-            },
+            (stats.drops.to_string(), String::new()),
+            (format_span(stats.down_ms), String::new()),
+            (format_runs(runs), run_count_hint(runs)),
+            (
+                match up_since.get(&timeline.target) {
+                    Some(up_for_ms) => format_span(*up_for_ms),
+                    None => "—".to_string(),
+                },
+                String::new(),
+            ),
+            (
+                format_share(availability(&timeline.segments)),
+                String::new(),
+            ),
         ];
-        for ((offset, _, _), value) in COLUMNS.iter().zip(&values) {
+        for ((offset, _, _), (value, hint)) in COLUMNS.iter().zip(&values) {
+            let title = if hint.is_empty() {
+                String::new()
+            } else {
+                format!("<title>{hint}</title>")
+            };
             let _ = write!(
                 output,
                 "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"11\" fill=\"currentColor\" \
-                 text-anchor=\"end\">{}</text>",
+                 text-anchor=\"end\">{title}{}</text>",
                 stats_x + offset,
                 y + ROW_HEIGHT * 0.7,
                 escape(value)
             );
         }
-        let _ = write!(
-            output,
-            "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"11\" fill=\"currentColor\" \
-             text-anchor=\"end\"><title>{}</title>{}</text>",
-            stats_x + COLUMNS[4].0,
-            y + ROW_HEIGHT * 0.7,
-            run_count_hint(runs),
-            escape(&format_runs(runs))
-        );
         output.push_str("</a>");
     }
 
@@ -892,6 +897,15 @@ mod tests {
         let rendered = page(&[timeline()], &[], &no_streaks(), window);
         assert!(rendered.contains("UP %"), "the availability column");
         assert!(rendered.contains("RUN ±σ"), "the average column");
+        let order = ["DROPS", "DOWN", "RUN ±σ", "UP FOR", "UP %"].map(|label| {
+            rendered
+                .find(label)
+                .unwrap_or_else(|| panic!("{label} is a column"))
+        });
+        assert!(
+            order.windows(2).all(|pair| pair[0] < pair[1]),
+            "the columns read left to right as requested"
+        );
         assert!(rendered.contains(">50.0%<"), "half of the window was up");
         assert!(
             rendered.contains(">1h00<"),
@@ -1020,7 +1034,28 @@ mod tests {
             to_ms: hours_span(DEFAULT_WINDOW_HOURS),
         };
         let rendered = page(&[timeline()], &[], &no_streaks(), window);
-        assert!(rendered.contains("<a href=\"/?window=24h\" aria-current=\"page\">24h</a>"));
+        assert!(rendered.contains("<a href=\"/?window=1h\" aria-current=\"page\">1h</a>"));
+    }
+
+    #[test]
+    fn the_windows_are_offered_from_the_narrowest_to_the_widest() {
+        let window = Window {
+            from_ms: 0,
+            to_ms: hours_span(DEFAULT_WINDOW_HOURS),
+        };
+        let rendered = page(&[timeline()], &[], &no_streaks(), window);
+        let order: Vec<usize> = WINDOWS
+            .iter()
+            .map(|hours| {
+                rendered
+                    .find(&format!("href=\"/?window={hours}h\""))
+                    .expect("every window is offered")
+            })
+            .collect();
+        assert!(
+            order.windows(2).all(|pair| pair[0] < pair[1]),
+            "1h first, 24h last"
+        );
     }
 
     #[test]

@@ -545,11 +545,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_default_window_is_the_last_day() {
+    fn the_default_window_is_the_last_hour() {
         let now = 1_794_096_000_000;
         let window = resolve_window(None, None, None, now);
         assert_eq!(window.to_ms, now);
-        assert_eq!(window.from_ms, now - DAY_MS);
+        assert_eq!(
+            window.from_ms,
+            now - page::hours_span(page::DEFAULT_WINDOW_HOURS)
+        );
+        assert_eq!(window.to_ms - window.from_ms, 3_600_000);
     }
 
     #[test]
@@ -577,7 +581,10 @@ mod tests {
         let now = 1_794_096_000_000;
         let params = parse_query("window=99h");
         let window = resolve_window(params.from, params.to, params.window, now);
-        assert_eq!(window.to_ms - window.from_ms, page::hours_span(24));
+        assert_eq!(
+            window.to_ms - window.from_ms,
+            page::hours_span(page::DEFAULT_WINDOW_HOURS)
+        );
     }
 
     #[test]
@@ -589,10 +596,10 @@ mod tests {
     }
 
     #[test]
-    fn a_reversed_window_falls_back_to_a_day() {
+    fn a_reversed_window_falls_back_to_the_default() {
         let now = 10 * DAY_MS;
         let window = resolve_window(Some(now), Some(now - DAY_MS), None, now);
-        assert_eq!(window.to_ms - window.from_ms, DAY_MS);
+        assert_eq!(window.to_ms - window.from_ms, page::hours_span(1));
     }
 
     #[test]

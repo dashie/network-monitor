@@ -249,25 +249,29 @@ fn the_window_links_change_the_span_and_only_one_is_current() {
 
     let (status, page) = server.get("/");
     assert_eq!(status, 200);
-    for hours in [24, 12, 6, 4, 2, 1] {
+    for hours in [1, 2, 4, 6, 12, 24] {
         assert!(
             page.contains(&format!("href=\"/?window={hours}h\"")),
             "{hours} h is offered"
         );
     }
     assert!(
-        page.contains("href=\"/?window=24h\" aria-current=\"page\""),
-        "the default window is the one marked current"
+        page.find("href=\"/?window=1h\"").unwrap() < page.find("href=\"/?window=24h\"").unwrap(),
+        "the links read from the narrowest window to the widest"
+    );
+    assert!(
+        page.contains("href=\"/?window=1h\" aria-current=\"page\""),
+        "the default window is one hour, marked current"
     );
 
-    let (status, narrow) = server.get("/?window=1h");
+    let (status, wide) = server.get("/?window=24h");
     assert_eq!(status, 200);
-    assert!(narrow.contains("href=\"/?window=1h\" aria-current=\"page\""));
-    assert!(!narrow.contains("href=\"/?window=24h\" aria-current"));
+    assert!(wide.contains("href=\"/?window=24h\" aria-current=\"page\""));
+    assert!(!wide.contains("href=\"/?window=1h\" aria-current"));
 
     let (status, unknown) = server.get("/?window=99h");
     assert_eq!(status, 200, "an unknown window is ignored, not refused");
-    assert!(unknown.contains("href=\"/?window=24h\" aria-current=\"page\""));
+    assert!(unknown.contains("href=\"/?window=1h\" aria-current=\"page\""));
 }
 
 #[test]

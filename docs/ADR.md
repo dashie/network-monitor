@@ -30,6 +30,7 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0016 | Build the container image with a dev profile and a cached `target` | accepted | 2026-11-10 | `release-dev` profile plus a BuildKit cache mount; `PROFILE=release` publishes |
 | ADR-0017 | Localise the instants in the browser and offer the window as links | accepted | 2026-11-10 | UTC in the markup, `Intl` in the browser; `/?window=6h` for 24/12/6/4/2/1 h |
 | ADR-0018 | Report the average `up` run with its spread and the availability | accepted | 2026-11-10 | Mean ± σ of the runs, clipped by the window; `unknown` excluded from availability |
+| ADR-0019 | Open the timeline on the last hour | accepted | 2026-11-10 | Default span 1 h; links read 1, 2, 4, 6, 12, 24 h from left to right |
 
 ## Records
 
@@ -609,3 +610,28 @@ The day buckets of the detail page are split at the UTC day boundary, so a run t
 - Only complete runs inside the window: rejected, it erases the figure exactly when there are one or two disconnections, and it would hide the current run, which is the one a reader looks at.
 - Availability over the whole window, `unknown` counting as down: rejected, it reports a freshly deployed target as nearly always unavailable.
 - Store the runs or the aggregates in the database: rejected, it adds a table and a migration for figures that are derived from the events in one pass and must match the drawing exactly.
+
+## ADR-0019 — Open the timeline on the last hour
+
+**Status:** accepted · **Date:** 2026-11-10
+**Amends:** ADR-0017. The links, their validation, the `aria-current` marker, and the localisation stay as decided there; the default span and the order of the links change.
+
+### Context
+
+ADR-0017 offered the six windows with 24 hours as the default, because that was the span the page had always drawn. In use the page is opened to answer "what is happening now": a day of green bands squeezes a recent disturbance into a strip a few pixels wide, and the reader clicks back to a narrower window on almost every visit. A status board that reloads every 30 s is read in seconds.
+
+### Decision
+
+The page opens on the last hour, and the links read left to right from the narrowest window to the widest — 1 h, 2 h, 4 h, 6 h, 12 h, 24 h — so the reading order matches the zoom. The set of windows, its validation, and the fallback for an unknown value are unchanged: an unknown `window` still falls back to the default, which is now one hour, and an explicit `from`/`to` still wins.
+
+### Consequences
+
+- The first thing a reader sees is the last hour, with the lane statistics, the streak columns, and the last-10 table unchanged.
+- The whole day is one click and one bookmark away (`/?window=24h`).
+- A disturbance older than an hour is invisible on the default view; the window links exist for exactly that, and the per-target page keeps its 30 days.
+- The 30 s refresh keeps whatever window the URL carries, so the choice survives the reload.
+
+### Alternatives considered
+
+- Keep 24 hours as the default: rejected, it is the span a reader has to undo most often.
+- Derive the default from the probe interval: rejected, it guesses from a number that says nothing about how the page is read, and hides the choice instead of exposing it.
