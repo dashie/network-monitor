@@ -13,7 +13,7 @@ use super::stats::{self, RunStats};
 
 const WIDTH: f64 = 1000.0;
 const LABEL_WIDTH: f64 = 190.0;
-const STATS_WIDTH: f64 = 270.0;
+const STATS_WIDTH: f64 = 330.0;
 const ROW_HEIGHT: f64 = 24.0;
 const ROW_GAP: f64 = 6.0;
 const TOP_PAD: f64 = 6.0;
@@ -136,7 +136,23 @@ pub(crate) const STYLE: &str = r#"
   tbody td { border-bottom: 1px solid var(--rule); }
   tbody tr:last-child td { border-bottom: 0; }
   tbody tr:hover { background: rgba(127, 127, 127, 0.07); }
+  /* The row of the day still running states a rolling window, not a calendar one. */
+  td.current { background: rgba(127, 127, 127, 0.1); }
+  .tag {
+    display: inline-block;
+    margin-right: 7px;
+    padding: 0 7px;
+    border: 1px solid var(--rule);
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    opacity: 0.75;
+    vertical-align: 1px;
+  }
   .num { text-align: right; }
+  .sub { font-size: 11px; opacity: 0.65; font-variant-numeric: tabular-nums; }
   td.down { color: #c62828; }
   @media (max-width: 620px) { body { padding: 20px 16px 40px; } }
 "#;
@@ -174,12 +190,13 @@ const TICK_STEPS_MS: [i64; 10] = [
 
 /// Right edge of every statistics column of a lane, relative to the start of the block,
 /// with its header and what the column means.
-const COLUMNS: [(f64, &str, &str); 5] = [
+const COLUMNS: [(f64, &str, &str); 6] = [
     (26.0, "DROPS", "disconnections in the window"),
     (86.0, "DOWN", "time spent down in the window"),
-    (160.0, "RUN ±σ", "average up run, with its spread"),
-    (206.0, "UP FOR", "how long it has been up without a drop"),
-    (252.0, "UP %", "up share of the time the target was probed"),
+    (160.0, "AVG UP", "average up run, with its spread"),
+    (208.0, "MAX", "longest up run in the window"),
+    (258.0, "UP FOR", "how long it has been up without a drop"),
+    (318.0, "UP %", "up share of the time the target was probed"),
 ];
 
 /// The time window shown by the chart.
@@ -455,6 +472,13 @@ fn chart(timelines: &[TargetTimeline], up_since: &HashMap<String, i64>, window: 
             (stats.drops.to_string(), String::new()),
             (format_span(stats.down_ms), String::new()),
             (format_runs(runs), run_count_hint(runs)),
+            (
+                match stats::longest_run(&timeline.segments) {
+                    Some(longest_ms) => format_span(longest_ms),
+                    None => "—".to_string(),
+                },
+                "the longest up run of the window".to_string(),
+            ),
             (
                 match up_since.get(&timeline.target) {
                     Some(up_for_ms) => format_span(*up_for_ms),
@@ -896,8 +920,9 @@ mod tests {
         };
         let rendered = page(&[timeline()], &[], &no_streaks(), window);
         assert!(rendered.contains("UP %"), "the availability column");
-        assert!(rendered.contains("RUN ±σ"), "the average column");
-        let order = ["DROPS", "DOWN", "RUN ±σ", "UP FOR", "UP %"].map(|label| {
+        assert!(rendered.contains("AVG UP"), "the average column");
+        assert!(rendered.contains("MAX"), "the longest-run column");
+        let order = ["DROPS", "DOWN", "AVG UP", "MAX", "UP FOR", "UP %"].map(|label| {
             rendered
                 .find(label)
                 .unwrap_or_else(|| panic!("{label} is a column"))
@@ -909,7 +934,7 @@ mod tests {
         assert!(rendered.contains(">50.0%<"), "half of the window was up");
         assert!(
             rendered.contains(">1h00<"),
-            "the only up run lasted an hour"
+            "the only up run lasted an hour, and is also the longest one"
         );
         assert!(
             rendered.contains("1 up run in the window"),

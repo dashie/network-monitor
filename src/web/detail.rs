@@ -42,6 +42,10 @@ pub fn target_page(
     let total: u32 = days.iter().map(|day| day.drops).sum();
     let down_ms: i64 = days.iter().map(|day| day.down_ms).sum();
     let runs = runs_stats(segments);
+    let longest = match stats::longest_run(segments) {
+        Some(longest_ms) => format_span(longest_ms),
+        None => "—".to_string(),
+    };
     let since = match up_for(target.state, target.last_change_at_ms, now_ms) {
         Some(up_for_ms) => format!(
             "<span class=\"since\">for {}</span>",
@@ -66,7 +70,7 @@ pub fn target_page(
          <div class=\"stat\"><b>{total} disconnections</b><span>last 30 days</span></div>\
          <div class=\"stat\"><b>{down_ms}</b><span>down time in the last 30 days</span></div>\
          <div class=\"stat\" title=\"{avg_up_hint}\"><b>{avg_up}</b>\
-         <span>average up run in 30 days</span></div>\
+         <span>avg up run in 30 days · max {longest}</span></div>\
          </div>\n\
          <h2>Disconnections per day</h2>\n\
          {bars}\n\
@@ -79,13 +83,14 @@ pub fn target_page(
         total = total,
         down_ms = format_span(down_ms),
         avg_up = format_runs(runs),
+        longest = longest,
         avg_up_hint = match runs.count {
             0 => "no up run in the last 30 days".to_string(),
             1 => "1 up run in the last 30 days: no spread to state".to_string(),
             count => format!("mean of {count} up runs in the last 30 days"),
         },
         bars = bars(days),
-        table = days_table(days, segments),
+        table = days_table(days, segments, now_ms),
     );
 
     layout(&format!("{name} — last 30 days"), &body)
@@ -198,11 +203,16 @@ fn bars(days: &[DailyDrops]) -> String {
 
 /// The same numbers as the chart, day by day, newest first. A day is a UTC day, so the
 /// browser localises the format of the date but keeps the day it belongs to.
-fn days_table(days: &[DailyDrops], segments: &[TimelineSegment]) -> String {
+///
+/// The first row is the current UTC day, which is still running: its average `up` run
+/// covers the last 24 hours instead, tagged so nobody reads it as a full day.
+fn days_table(days: &[DailyDrops], segments: &[TimelineSegment], now_ms: i64) -> String {
     let mut output = String::from(
         "<h2>Day by day</h2>\n<table>\n\
          <thead><tr><th>day (UTC)</th><th class=\"num\">disconnections</th>\
-         <th class=\"num\">down time</th><th class=\"num\">average up</th></tr></thead>\n\
+         <th class=\"num\">down time</th><th class=\"num\" \
+         title=\"average up run of each day; the current day states the last 24 hours\">\
+         avg up</th></tr></thead>\n\
          <tbody>\n",
     );
 
@@ -213,29 +223,57 @@ fn days_table(days: &[DailyDrops], segments: &[TimelineSegment]) -> String {
     // A run that crosses midnight is split, so each day states the average of the `up`
     // stretches that fall inside it.
     let runs = stats::up_runs_per_day(segments, DAY_MS);
+    let current_day_ms = now_ms.div_euclid(DAY_MS) * DAY_MS;
 
     for day in days.iter().rev() {
         let date = format_rfc3339(day.day_start_ms);
-        let summary = stats::summarize(
-            runs.get(&day.day_start_ms)
+        let average = if day.day_start_ms == current_day_ms {
+            let rolling = stats::up_runs_between(segments, now_ms - DAY_MS, now_ms);
+            let summary = stats::summarize(&rolling);
+            format!(
+                "<td class=\"num current\" title=\"average up run over the last 24 hours: {}\">\
+                 <span class=\"tag\">last 24 h</span>{}</td>",
+                run_hint_24h(summary.count),
+                value_with_max(summary, rolling.iter().copied().max())
+            )
+        } else {
+            let pieces = runs
+                .get(&day.day_start_ms)
                 .map(Vec::as_slice)
-                .unwrap_or(&[]),
-        );
+                .unwrap_or(&[]);
+            let summary = stats::summarize(pieces);
+            format!(
+                "<td class=\"num\" title=\"{}\">{}</td>",
+                run_hint(summary.count),
+                value_with_max(summary, pieces.iter().copied().max())
+            )
+        };
         let _ = writeln!(
             output,
             "<tr><td><time datetime=\"{date}\" data-format=\"date\">{}</time></td>\
-             <td class=\"num\">{}</td><td class=\"num\">{}</td>\
-             <td class=\"num\" title=\"{}\">{}</td></tr>",
+             <td class=\"num\">{}</td><td class=\"num\">{}</td>{}</tr>",
             &date[..10],
             day.drops,
             format_span(day.down_ms),
-            run_hint(summary.count),
-            format_runs(summary)
+            average
         );
     }
 
     output.push_str("</tbody>\n</table>");
     output
+}
+
+/// The mean of the runs and, under it, the longest one: a day that holds one long run
+/// and a storm of short ones has a mean that describes neither.
+fn value_with_max(runs: stats::RunStats, longest: Option<i64>) -> String {
+    match longest {
+        Some(longest_ms) => format!(
+            "{}<br><span class=\"sub\">max {}</span>",
+            format_runs(runs),
+            format_span(longest_ms)
+        ),
+        None => format_runs(runs),
+    }
 }
 
 /// How many runs an average is built on, for the tooltip of a cell.
@@ -244,6 +282,15 @@ fn run_hint(count: u32) -> String {
         0 => "no up run that day".to_string(),
         1 => "1 up run that day".to_string(),
         count => format!("{count} up runs that day"),
+    }
+}
+
+/// The same sample, stated over a rolling day instead of a calendar day.
+fn run_hint_24h(count: u32) -> String {
+    match count {
+        0 => "no up run in the last 24 hours".to_string(),
+        1 => "1 up run in the last 24 hours".to_string(),
+        count => format!("{count} up runs in the last 24 hours"),
     }
 }
 
@@ -326,6 +373,10 @@ mod tests {
         assert!(
             rendered.contains("<th class=\"num\">disconnections</th>"),
             "the numbers are right-aligned by the shared rule"
+        );
+        assert!(
+            rendered.contains(">avg up</th>"),
+            "the column keeps the name the timeline uses"
         );
         assert!(!rendered.contains("class=\"numeric\""));
     }
@@ -414,6 +465,10 @@ mod tests {
             "1 h and 1h30 average into 1h15 with a spread of 15 min"
         );
         assert!(rendered.contains("mean of 2 up runs in the last 30 days"));
+        assert!(
+            rendered.contains("avg up run in 30 days · max 1h30"),
+            "the longest run of the period travels with the mean"
+        );
     }
 
     #[test]
@@ -433,18 +488,57 @@ mod tests {
         // One run that crosses midnight: each day states the piece it holds.
         let crossing = [TimelineSegment {
             state: TargetState::Up,
-            from_ms: 21 * 3_600_000,
-            to_ms: 27 * 3_600_000,
+            from_ms: 45 * 3_600_000,
+            to_ms: 51 * 3_600_000,
         }];
-        let days = [day(0, 0, 0), day(1, 0, 0)];
+        let days = [day(1, 0, 0), day(2, 0, 0)];
         let rendered = target_page(&target(), &days, &crossing, NOW);
         assert!(
-            rendered.contains("<td class=\"num\" title=\"1 up run that day\">3h00</td>"),
+            rendered.contains(
+                "<td class=\"num\" title=\"1 up run that day\">3h00\
+                 <br><span class=\"sub\">max 3h00</span></td>"
+            ),
             "three hours before midnight"
         );
         assert!(
-            rendered.contains("<td class=\"num\" title=\"1 up run that day\">3h00</td>"),
+            rendered.contains(
+                "<td class=\"num\" title=\"1 up run that day\">3h00\
+                 <br><span class=\"sub\">max 3h00</span></td>"
+            ),
             "and three after it"
+        );
+    }
+
+    #[test]
+    fn the_longest_run_sits_next_to_the_mean_it_outweighs() {
+        // One hour and one hour and a half: the mean is neither, and the longest run is
+        // what says the link was not uniformly bad.
+        let rendered = target_page(&target(), &[day(0, 1, 300_000)], &runs(), NOW);
+        assert!(
+            rendered.contains("1h15±15m<br><span class=\"sub\">max 1h30</span>"),
+            "the 24-hour cell states the longest run of the same window"
+        );
+    }
+
+    #[test]
+    fn the_day_still_running_states_the_average_of_the_last_24_hours() {
+        // One run that began before midnight: the day so far holds 2h46 of it, the
+        // rolling last 24 hours hold 4h10.
+        let running = [TimelineSegment {
+            state: TargetState::Up,
+            from_ms: -5_000_000,
+            to_ms: NOW,
+        }];
+        let rendered = target_page(&target(), &[day(0, 0, 0)], &running, NOW);
+        assert!(rendered.contains(
+            "<td class=\"num current\" title=\"average up run over the last 24 hours: \
+             1 up run in the last 24 hours\"><span class=\"tag\">last 24 h</span>\
+             4h10<br><span class=\"sub\">max 4h10</span></td>"
+        ));
+        assert_eq!(
+            rendered.matches("class=\"tag\"").count(),
+            1,
+            "only the current day states a rolling window"
         );
     }
 

@@ -38,6 +38,29 @@ pub fn up_runs(segments: &[TimelineSegment]) -> Vec<i64> {
         .collect()
 }
 
+/// The longest `up` run of the segments, if any.
+///
+/// The mean of a window that holds one long run and a storm of short ones sits far
+/// below both, so the longest run travels with it.
+pub fn longest_run(segments: &[TimelineSegment]) -> Option<i64> {
+    up_runs(segments).into_iter().max()
+}
+
+/// The `up` runs clipped to `[from_ms, to_ms]`, in milliseconds.
+///
+/// A run that the window opens or closes in the middle of counts as it appears, like
+/// every other figure of the page: the edge runs are lower bounds, never overestimates.
+pub fn up_runs_between(segments: &[TimelineSegment], from_ms: i64, to_ms: i64) -> Vec<i64> {
+    up_ranges(segments)
+        .into_iter()
+        .filter_map(|(start, end)| {
+            let start = start.max(from_ms);
+            let end = end.min(to_ms);
+            (end > start).then_some(end - start)
+        })
+        .collect()
+}
+
 /// The `up` runs split at UTC day boundaries: one entry per day, oldest first, with the
 /// length of every piece of a run that falls inside that day.
 pub fn up_runs_per_day(segments: &[TimelineSegment], day_ms: i64) -> BTreeMap<i64, Vec<i64>> {
@@ -170,6 +193,40 @@ mod tests {
         assert_eq!(stats.count, 1);
         assert_eq!(stats.mean_ms, 7_200_000);
         assert_eq!(stats.sigma_ms, 0);
+    }
+
+    #[test]
+    fn the_longest_run_is_the_widest_up_stretch() {
+        let segments = [
+            segment(TargetState::Up, 0, 10),
+            segment(TargetState::Down, 10, 20),
+            segment(TargetState::Up, 20, 45),
+            segment(TargetState::Down, 45, 50),
+        ];
+        assert_eq!(longest_run(&segments), Some(25_000));
+        assert_eq!(
+            longest_run(&[segment(TargetState::Down, 0, 10)]),
+            None,
+            "no up run, no longest run"
+        );
+    }
+
+    #[test]
+    fn a_run_is_clipped_to_the_window_it_is_asked_about() {
+        let segments = [
+            segment(TargetState::Up, 0, 10),
+            segment(TargetState::Down, 10, 20),
+            segment(TargetState::Up, 20, 30),
+        ];
+        assert_eq!(
+            up_runs_between(&segments, 5_000, 25_000),
+            vec![5_000, 5_000]
+        );
+        assert_eq!(
+            up_runs_between(&segments, 30_000, 40_000),
+            Vec::<i64>::new(),
+            "a window that holds no `up` time has no run"
+        );
     }
 
     #[test]

@@ -314,8 +314,12 @@ fn every_row_shows_its_statistics_and_links_to_its_detail_page() {
         "the availability column has a header"
     );
     assert!(
-        page.contains("RUN ±σ"),
+        page.contains("AVG UP"),
         "the average up run column has a header"
+    );
+    assert!(
+        page.contains("MAX"),
+        "the longest up run column has a header"
     );
     assert!(
         page.contains("UP FOR"),
@@ -345,16 +349,20 @@ fn every_row_shows_its_statistics_and_links_to_its_detail_page() {
     );
     assert!(detail.contains("<th class=\"num\">down time</th>"));
     assert!(
-        detail.contains("<th class=\"num\">average up</th>"),
-        "every day states the average of its up runs"
+        detail.contains(">avg up</th>"),
+        "every day states the average of its up runs, named as on the timeline"
+    );
+    assert!(
+        detail.contains("<span class=\"tag\">last 24 h</span>"),
+        "the day still running states the last 24 hours, tagged as such"
     );
     assert!(
         detail.contains("up run in the last 30 days"),
         "the third KPI states the sample it is built on"
     );
     assert!(
-        detail.contains("<span>average up run in 30 days</span>"),
-        "the third KPI names what it averages"
+        detail.contains("avg up run in 30 days · max "),
+        "the third KPI names what it averages and states the longest run too"
     );
     assert!(
         detail.contains("<td class=\"num\">30m</td>"),

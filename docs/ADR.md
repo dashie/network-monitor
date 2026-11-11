@@ -29,7 +29,7 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0015 | Export every event so one file serves export and import | accepted | 2026-11-09 | One row per event with label and interface; round trip is lossless |
 | ADR-0016 | Build the container image with a dev profile and a cached `target` | accepted | 2026-11-10 | `release-dev` profile plus a BuildKit cache mount; `PROFILE=release` publishes |
 | ADR-0017 | Localise the instants in the browser and offer the window as links | accepted | 2026-11-10 | UTC in the markup, `Intl` in the browser; `/?window=6h` for 24/12/6/4/2/1 h |
-| ADR-0018 | Report the average `up` run with its spread and the availability | accepted | 2026-11-10 | Mean ± σ of the runs, clipped by the window; `unknown` excluded from availability |
+| ADR-0018 | Report the average `up` run with its spread and the availability | accepted | 2026-11-10 | Mean ± σ of the runs, clipped by the window; `unknown` excluded from availability; the day still running states the last 24 hours |
 | ADR-0019 | Open the timeline on the last hour | accepted | 2026-11-10 | Default span 1 h; links read 1, 2, 4, 6, 12, 24 h from left to right |
 
 ## Records
@@ -591,9 +591,13 @@ A run that the window opens or closes in the middle of **counts as it appears**:
 
 The sample size travels with the figure: the lane tooltip and the detail header state how many runs the mean is built on, and an average of one run states no spread at all rather than `± 0s`.
 
+The longest `up` run of the same window travels with the mean, in a `MAX` column on the lane and under the mean of every table row. A window that holds one stable run and a storm of brief ones has a mean that describes neither — an operator who saw `17h` in `UP FOR` read `16m±2h06` as a contradiction — and the longest run is the one figure that says the link was not uniformly bad without replacing the mean the operator asked for.
+
 Availability is the share of the **probed** time spent `up`. `unknown` — before the first probe of a target, or after a gap — is left out of numerator and denominator instead of counting as down, because it is time nobody measured (`BR-4` says a local failure is never a down state; the same reasoning applies to a page that would otherwise report a day-old target as 5 % available).
 
 The day buckets of the detail page are split at the UTC day boundary, so a run that crosses midnight contributes a piece to each day it touches.
+
+The first row of that table is the current UTC day, and a day so far is not a day: in its first hours the mean of its pieces is the mean of one short run, which says nothing about the link. That row therefore states the average `up` run of the **last 24 hours**, a rolling window, tagged `last 24 h` and styled apart, while its disconnections and its down time stay the running totals of the day: those are counts, and a partial count is still the count so far. One name covers the figure on both pages, `AVG UP`, so a reader does not look for two statistics that are one.
 
 ### Consequences
 
@@ -602,6 +606,8 @@ The day buckets of the detail page are split at the UTC day boundary, so a run t
 - The mean is pulled up by a long final run and pulled down by a short first one; the count in the tooltip is what tells the reader how much to trust it.
 - The detail page needs the segments, not only the aggregated day buckets, so the route runs `Store::timeline` for the 30-day window and picks the target. One more read per request, no schema change.
 - A per-day average and the average of the same period are not the arithmetic combination of one another: the period uses the runs, the days use the pieces. Stated in `BR-10` so nobody reads one as the sum of the other.
+- The newest row of the detail table answers two different windows: the day so far for its counts, the last 24 hours for its average. The tag is what keeps that from being read as one window.
+- Mean and longest run are read together: `16m±2h06` with `max 17h33` says at once that the link flapped and then settled. Neither figure alone says it.
 
 ### Alternatives considered
 
