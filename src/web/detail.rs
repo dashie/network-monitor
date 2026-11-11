@@ -166,9 +166,14 @@ fn bars(days: &[DailyDrops]) -> String {
         let date = format_rfc3339(day.day_start_ms);
         let day_label = &date[5..10];
 
+        let height = if day.drops > 0 {
+            (day.drops as f64 / max as f64) * plot
+        } else {
+            0.0
+        };
+        let y_bar = TOP + plot - height;
+
         if day.drops > 0 {
-            let height = (day.drops as f64 / max as f64) * plot;
-            let y_bar = TOP + plot - height;
             let _ = write!(
                 svg,
                 "<rect x=\"{x:.1}\" y=\"{y_bar:.1}\" width=\"{bar_width:.1}\" \
@@ -176,16 +181,19 @@ fn bars(days: &[DailyDrops]) -> String {
                  data-format=\"day\" data-suffix=\": {}\">{day_label}: {}</title></rect>",
                 day.drops, day.drops
             );
-            // The count above the bar; a day without drops draws no bar and gets no label.
-            let _ = write!(
-                svg,
-                "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-size=\"10\" \
-                 fill=\"#c62828\">{}</text>",
-                x + bar_width / 2.0,
-                y_bar - 5.0,
-                day.drops
-            );
         }
+
+        // Every day states its count above where its bar would end, a quiet day included:
+        // a missing label reads as missing data, a muted zero as a measured nothing.
+        let colour = if day.drops > 0 { "#c62828" } else { "#666666" };
+        let _ = write!(
+            svg,
+            "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-size=\"10\" \
+             fill=\"{colour}\">{}</text>",
+            x + bar_width / 2.0,
+            y_bar - 5.0,
+            day.drops
+        );
         if index % 5 == 0 {
             let _ = write!(
                 svg,
@@ -385,7 +393,14 @@ mod tests {
     fn a_quiet_month_states_zero_disconnections() {
         let days = [day(0, 0, 0), day(1, 0, 0)];
         let rendered = target_page(&target(), &days, &[], NOW);
-        assert!(!rendered.contains("<rect "));
+        assert!(!rendered.contains("<rect "), "no day draws a bar");
+        assert_eq!(
+            rendered
+                .matches("text-anchor=\"middle\" font-size=\"10\" fill=\"#666666\">0</text>")
+                .count(),
+            2,
+            "every quiet day states its zero at the baseline, next to the axis zero"
+        );
         assert!(rendered.contains("0 disconnections"));
     }
 
@@ -549,8 +564,13 @@ mod tests {
         assert!(rendered.contains("fill=\"#c62828\">2</text>"));
         assert!(rendered.contains("fill=\"#c62828\">5</text>"));
         assert!(
+            rendered.contains("text-anchor=\"middle\" font-size=\"10\" fill=\"#666666\">0</text>"),
+            "a quiet day still states its zero, in a muted colour: no label would read \
+             as missing data"
+        );
+        assert!(
             !rendered.contains("fill=\"#c62828\">0</text>"),
-            "a quiet day draws no bar and needs no label"
+            "and never paints the zero like a count of drops"
         );
     }
 

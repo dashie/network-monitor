@@ -261,6 +261,8 @@ The timeline page adds two columns per lane — the number of disconnections and
 
 Selecting a lane opens `/target?target=…`, which resolves an address or a label to one target and renders one bar per day for the last 30 days from the `down` transitions, bucketed by UTC day with zero-filled days. The same buckets fill a table under the chart that repeats each day's disconnections and adds the total down time of the day, so the exact durations sit next to the bars that sum them.
 
+Every day carries its count, a day without drops included, drawn at the baseline in the muted colour: an unlabelled day is indistinguishable from a day the page failed to measure, and the chart has no other way to say "measured, nothing happened".
+
 ### Consequences
 
 - One process, one container, one restart policy for the common case; `serve` stays as a viewer that needs no `NET_RAW`.
