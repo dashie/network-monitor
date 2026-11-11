@@ -32,6 +32,7 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0018 | Report the average `up` run with its spread and the availability | accepted | 2026-11-10 | Mean ± σ of the runs, clipped by the window; `unknown` excluded from availability; the day still running states the last 24 hours |
 | ADR-0019 | Open the timeline on the last hour | accepted | 2026-11-10 | Default span 1 h; links read 1, 2, 4, 6, 12, 24 h from left to right |
 | ADR-0020 | Give every target its own replace window on import | accepted | 2026-11-11 | `--replace-window` deletes per target, inside the span that target's own rows cover |
+| ADR-0021 | Offer the detail page 30 to 360 days | accepted | 2026-11-11 | `?days=90d` selects the period, 30 days by default; a count label only where a column can carry it |
 
 ## Records
 
@@ -709,3 +710,53 @@ to it:
   deletion semantics to explain, and the global one has no user who wants it.
 - Delete per row around each imported event: rejected, it cannot express "this target's
   window begins here", so it leaves holes inside the window it claims to replace.
+
+## ADR-0021 — Offer the detail page 30 to 360 days
+
+**Status:** accepted · **Date:** 2026-11-11
+**Extends:** ADR-0019 (the timeline windows, whose links this reuses).
+
+### Context
+
+The detail page always drew 30 days. A history imported from another monitor covers
+months, and a reader asking "how bad was the summer" had no way to see it: the database
+held the answer and the page stopped at a month.
+
+### Decision
+
+The page keeps 30 days as its default and offers 30, 60, 90, 180, and 360 days as links,
+shortest first, the selected one marked — the same control, the same markup, and the same
+reading direction the timeline uses for its windows (ADR-0019).
+
+- **The period is in the URL**: `/target?target=…&days=90d`, so a bookmark and the 30 s
+  reload keep it. `days=90` and `days=90d` are both read; a value outside the five offered
+  falls back to 30 days instead of failing, like an unknown `window` on the timeline.
+- **The period travels through the query**: `daily_drops`, the timeline segments the run
+  statistics come from, and every figure of the header use the same span, so a card never
+  describes a different period from the chart under it.
+- **The chart labels the axis with about six dates** whatever the period, instead of one
+  every five days, which overlapped once the bars got thin.
+- **A daily count is drawn only where a column can carry it** (a slot of 24 px or more,
+  which is the 30-day view). Past about seven weeks the columns are a few pixels apart and
+  the numbers merged into a row of digits; the table below still states every day exactly,
+  which is where the reader looks at that zoom.
+
+### Consequences
+
+- The page answers a question that spans months without a new endpoint or a second page.
+- The header texts, the page title, and the tooltips name the chosen period, so a
+  screenshot can never be mistaken for the default month.
+- A 360-day view lists 360 table rows and draws 360 bars; the response grows with the
+  period and stays a few hundred kilobytes, all rendered on the server as before.
+- The zero-count rule of the 30-day view is not universal: at a longer period the reader
+  has the table instead of a wall of overlapping numbers.
+
+### Alternatives considered
+
+- A date-picker pair (`from`/`to`): rejected, the timeline already accepts free instants
+  and nobody used them; five links state the intention in one click.
+- Keep 30 days and add the whole history as a second page: rejected, two pages that differ
+  only in their span, and the reader loses the selector they already know from the
+  timeline.
+- Label every bar at every period and shrink the font: rejected, unreadable below a certain
+  width whatever the font size.

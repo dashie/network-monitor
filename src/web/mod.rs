@@ -249,7 +249,8 @@ fn handle(mut stream: TcpStream, database: &Path) {
             };
 
             let now = now_ms();
-            let from_ms = now - 30 * DAY_MS;
+            let period_days = params.days.unwrap_or(detail::DEFAULT_PERIOD_DAYS);
+            let from_ms = now - i64::from(period_days) * DAY_MS;
             let days = match store.daily_drops(&target.target, from_ms, now) {
                 Ok(days) => days,
                 Err(error) => {
@@ -273,7 +274,7 @@ fn handle(mut stream: TcpStream, database: &Path) {
                 }
             };
 
-            let body = detail::target_page(&target, &days, &segments, now);
+            let body = detail::target_page(&target, &days, &segments, now, period_days);
             respond(
                 &mut stream,
                 200,
@@ -452,6 +453,7 @@ struct Params {
     to: Option<i64>,
     window: Option<u8>,
     target: Option<String>,
+    days: Option<u32>,
 }
 
 fn parse_query(query: &str) -> Params {
@@ -466,6 +468,7 @@ fn parse_query(query: &str) -> Params {
             "to" => params.to = value.parse().ok(),
             "window" => params.window = parse_hours(value),
             "target" => params.target = Some(decode(value)),
+            "days" => params.days = detail::parse_period(value),
             _ => {}
         }
     }
@@ -617,6 +620,16 @@ mod tests {
 
         let broken = parse_query("from=abc");
         assert_eq!(broken.from, None);
+    }
+
+    #[test]
+    fn the_period_value_names_one_of_the_offered_spans() {
+        assert_eq!(parse_query("days=30d").days, Some(30));
+        assert_eq!(parse_query("days=360d").days, Some(360));
+        assert_eq!(parse_query("days=90").days, Some(90));
+        assert_eq!(parse_query("days=45d").days, None, "not offered");
+        assert_eq!(parse_query("days=abc").days, None);
+        assert_eq!(parse_query("target=1.1.1.1&days=180d").days, Some(180));
     }
 
     #[test]

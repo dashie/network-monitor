@@ -380,6 +380,46 @@ fn every_row_shows_its_statistics_and_links_to_its_detail_page() {
 }
 
 #[test]
+fn the_detail_page_offers_the_periods_and_keeps_thirty_days_as_the_default() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, page) = server.get("/target?target=1.1.1.1");
+    assert_eq!(status, 200);
+    assert!(page.contains("last 30 days"));
+    for days in [30, 60, 90, 180, 360] {
+        assert!(
+            page.contains(&format!("href=\"/target?target=1.1.1.1&days={days}d\"")),
+            "the {days}-day period is offered"
+        );
+    }
+    assert!(
+        page.contains("days=30d\" aria-current=\"page\""),
+        "thirty days is the period marked as current"
+    );
+    assert!(
+        page.matches("<tr><td>").count() >= 30,
+        "thirty days is the period shown"
+    );
+
+    let (status, longer) = server.get("/target?target=1.1.1.1&days=90d");
+    assert_eq!(status, 200);
+    assert!(longer.contains("last 90 days"));
+    assert!(longer.contains("days=90d\" aria-current=\"page\""));
+    assert!(
+        longer.matches("<tr><td>").count() >= 90,
+        "the chosen period is the one drawn and listed"
+    );
+
+    let (status, unknown) = server.get("/target?target=1.1.1.1&days=45d");
+    assert_eq!(status, 200);
+    assert!(
+        unknown.contains("last 30 days"),
+        "an unknown period falls back to the default instead of failing"
+    );
+}
+
+#[test]
 fn a_target_can_be_opened_by_its_label() {
     let (_directory, database) = seeded_database();
     let server = start(&database);

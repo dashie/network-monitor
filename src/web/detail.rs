@@ -22,6 +22,20 @@ const TOP: f64 = 26.0;
 const BOTTOM: f64 = 34.0;
 const DAY_MS: i64 = 86_400_000;
 
+/// The periods the page offers, in days, shortest first: the same reading direction the
+/// timeline uses for its windows.
+pub const PERIODS: [u32; 5] = [30, 60, 90, 180, 360];
+
+/// The period shown when the query names none.
+pub const DEFAULT_PERIOD_DAYS: u32 = 30;
+
+/// `90d` or `90` selects one of the offered periods; anything else is ignored, so a
+/// hand-edited query falls back to the default instead of failing.
+pub fn parse_period(value: &str) -> Option<u32> {
+    let days: u32 = value.strip_suffix('d').unwrap_or(value).parse().ok()?;
+    PERIODS.contains(&days).then_some(days)
+}
+
 /// The whole page for one target. `segments` is the same target over the same 30 days:
 /// the run boundaries are not in the aggregated day buckets, so the per-day averages of
 /// the `up` runs are computed from the segments.
@@ -30,6 +44,7 @@ pub fn target_page(
     days: &[DailyDrops],
     segments: &[TimelineSegment],
     now_ms: i64,
+    period_days: u32,
 ) -> String {
     let name = target
         .label
@@ -39,6 +54,7 @@ pub fn target_page(
         Some(name) => format!(" on {}", escape(name)),
         None => String::new(),
     };
+    let period = format!("{period_days} days");
     let total: u32 = days.iter().map(|day| day.drops).sum();
     let down_ms: i64 = days.iter().map(|day| day.down_ms).sum();
     let runs = runs_stats(segments);
@@ -66,11 +82,12 @@ pub fn target_page(
          {since}\
          </div>\n\
          <p class=\"hint\">{address}{interface} · times in your time zone</p>\n\
+         {periods}\n\
          <div class=\"stats\">\
-         <div class=\"stat\"><b>{total} disconnections</b><span>last 30 days</span></div>\
-         <div class=\"stat\"><b>{down_ms}</b><span>down time in the last 30 days</span></div>\
+         <div class=\"stat\"><b>{total} disconnections</b><span>last {period}</span></div>\
+         <div class=\"stat\"><b>{down_ms}</b><span>down time in the last {period}</span></div>\
          <div class=\"stat\" title=\"{avg_up_hint}\"><b>{avg_up}</b>\
-         <span>avg up run in 30 days · max {longest}</span></div>\
+         <span>avg up run in {period} · max {longest}</span></div>\
          </div>\n\
          <h2>Disconnections per day</h2>\n\
          {bars}\n\
@@ -84,16 +101,36 @@ pub fn target_page(
         down_ms = format_span(down_ms),
         avg_up = format_runs(runs),
         longest = longest,
+        period = period,
+        periods = period_links(&target.target, period_days),
         avg_up_hint = match runs.count {
-            0 => "no up run in the last 30 days".to_string(),
-            1 => "1 up run in the last 30 days: no spread to state".to_string(),
-            count => format!("mean of {count} up runs in the last 30 days"),
+            0 => format!("no up run in the last {period}"),
+            1 => format!("1 up run in the last {period}: no spread to state"),
+            count => format!("mean of {count} up runs in the last {period}"),
         },
         bars = bars(days),
         table = days_table(days, segments, now_ms),
     );
 
-    layout(&format!("{name} — last 30 days"), &body)
+    layout(&format!("{name} — last {period}"), &body)
+}
+
+/// The links that change the period of the page, the selected one marked.
+fn period_links(target: &str, period_days: u32) -> String {
+    let mut output = String::from("<nav class=\"windows\" aria-label=\"Period\">");
+    for days in PERIODS {
+        let current = if days == period_days {
+            " aria-current=\"page\""
+        } else {
+            ""
+        };
+        let _ = write!(
+            output,
+            "<a href=\"/target?target={target}&days={days}d\"{current}>{days}d</a>"
+        );
+    }
+    output.push_str("</nav>");
+    output
 }
 
 fn layout(title: &str, body: &str) -> String {
@@ -133,6 +170,11 @@ fn bars(days: &[DailyDrops]) -> String {
         track / days.len() as f64
     };
     let bar_width = (slot * 0.72).max(1.0);
+    let label_step = (days.len() / 6).max(1);
+    // A count needs room above its bar. Past about seven weeks the columns are a few
+    // pixels apart and the numbers would overlap into an unreadable row of digits; the
+    // table below keeps stating every day exactly.
+    let show_counts = slot >= 24.0;
 
     let mut svg = String::new();
     let _ = write!(
@@ -185,16 +227,20 @@ fn bars(days: &[DailyDrops]) -> String {
 
         // Every day states its count above where its bar would end, a quiet day included:
         // a missing label reads as missing data, a muted zero as a measured nothing.
-        let colour = if day.drops > 0 { "#c62828" } else { "#666666" };
-        let _ = write!(
-            svg,
-            "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-size=\"10\" \
-             fill=\"{colour}\">{}</text>",
-            x + bar_width / 2.0,
-            y_bar - 5.0,
-            day.drops
-        );
-        if index % 5 == 0 {
+        if show_counts {
+            let colour = if day.drops > 0 { "#c62828" } else { "#666666" };
+            let _ = write!(
+                svg,
+                "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-size=\"10\" \
+                 fill=\"{colour}\">{}</text>",
+                x + bar_width / 2.0,
+                y_bar - 5.0,
+                day.drops
+            );
+        }
+        // A longer period keeps about six dated labels on the axis instead of one per
+        // five days, which would overlap once the bars get thin.
+        if index % label_step == 0 {
             let _ = write!(
                 svg,
                 "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-size=\"10\" \
@@ -333,7 +379,7 @@ mod tests {
     #[test]
     fn the_page_draws_one_bar_per_day_with_drops() {
         let days = [day(0, 2, 90_000), day(1, 0, 0), day(2, 5, 600_000)];
-        let rendered = target_page(&target(), &days, &[], NOW);
+        let rendered = target_page(&target(), &days, &[], NOW, DEFAULT_PERIOD_DAYS);
         assert_eq!(rendered.matches("<rect ").count(), 2);
         assert!(rendered.contains("data-format=\"day\" data-suffix=\": 2\">01-01: 2</title>"));
         assert!(rendered.contains("data-suffix=\": 5\">01-03: 5</title>"));
@@ -345,7 +391,7 @@ mod tests {
     #[test]
     fn the_table_lists_every_day_newest_first_with_its_down_time() {
         let days = [day(0, 2, 90_000), day(1, 0, 0), day(2, 5, 600_000)];
-        let rendered = target_page(&target(), &days, &[], NOW);
+        let rendered = target_page(&target(), &days, &[], NOW, DEFAULT_PERIOD_DAYS);
         assert_eq!(rendered.matches("<tr><td>").count(), 3);
         let first = rendered
             .find("<time datetime=\"1970-01-03")
@@ -373,7 +419,13 @@ mod tests {
 
     #[test]
     fn the_table_uses_the_style_shared_with_the_timeline_page() {
-        let rendered = target_page(&target(), &[day(0, 1, 60_000)], &[], NOW);
+        let rendered = target_page(
+            &target(),
+            &[day(0, 1, 60_000)],
+            &[],
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+        );
         assert!(
             rendered.contains("<table>"),
             "no class: the table takes the width of main, like the chart above it"
@@ -392,7 +444,7 @@ mod tests {
     #[test]
     fn a_quiet_month_states_zero_disconnections() {
         let days = [day(0, 0, 0), day(1, 0, 0)];
-        let rendered = target_page(&target(), &days, &[], NOW);
+        let rendered = target_page(&target(), &days, &[], NOW, DEFAULT_PERIOD_DAYS);
         assert!(!rendered.contains("<rect "), "no day draws a bar");
         assert_eq!(
             rendered
@@ -406,7 +458,13 @@ mod tests {
 
     #[test]
     fn a_busiest_day_of_one_labels_the_axis_without_repeating_a_value() {
-        let rendered = target_page(&target(), &[day(0, 1, 1_000)], &[], NOW);
+        let rendered = target_page(
+            &target(),
+            &[day(0, 1, 1_000)],
+            &[],
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+        );
         assert_eq!(
             rendered
                 .matches("text-anchor=\"end\" font-size=\"10\" fill=\"#666666\">1</text>")
@@ -418,8 +476,89 @@ mod tests {
     }
 
     #[test]
+    fn the_period_is_one_of_the_offered_spans() {
+        for days in PERIODS {
+            assert_eq!(parse_period(&format!("{days}d")), Some(days));
+            assert_eq!(parse_period(&days.to_string()), Some(days));
+        }
+        assert_eq!(parse_period("45d"), None, "not offered");
+        assert_eq!(parse_period("30dd"), None);
+        assert_eq!(parse_period(""), None);
+        assert_eq!(parse_period("abc"), None);
+    }
+
+    #[test]
+    fn the_page_offers_every_period_and_marks_the_one_shown() {
+        let rendered = target_page(&target(), &[day(0, 1, 60_000)], &[], NOW, 30);
+        for days in PERIODS {
+            assert!(
+                rendered.contains(&format!("href=\"/target?target=1.1.1.1&days={days}d\"")),
+                "{days} is offered"
+            );
+        }
+        assert!(rendered
+            .contains("<a href=\"/target?target=1.1.1.1&days=30d\" aria-current=\"page\">30d</a>"));
+        assert_eq!(
+            rendered.matches("aria-current=\"page\"").count(),
+            2,
+            "the breadcrumb and the selected period"
+        );
+    }
+
+    #[test]
+    fn a_longer_period_restates_every_figure_it_covers() {
+        let days: Vec<DailyDrops> = (0..90).map(|index| day(index, 1, 60_000)).collect();
+        let rendered = target_page(&target(), &days, &[], NOW, 90);
+        assert!(rendered.contains("last 90 days"));
+        assert!(rendered.contains("90 disconnections"));
+        assert!(rendered.contains("down time in the last 90 days"));
+        assert!(rendered.contains("avg up run in 90 days"));
+        assert!(
+            rendered.contains("last 90 days</title>"),
+            "the title follows"
+        );
+        assert!(rendered
+            .contains("<a href=\"/target?target=1.1.1.1&days=90d\" aria-current=\"page\">90d</a>"));
+        assert_eq!(
+            rendered.matches("<tr><td>").count(),
+            90,
+            "one row per day of the chosen period"
+        );
+    }
+
+    #[test]
+    fn a_year_of_days_keeps_the_axis_readable() {
+        let days: Vec<DailyDrops> = (0..360).map(|index| day(index, 1, 60_000)).collect();
+        let rendered = target_page(&target(), &days, &[], NOW, 360);
+        let labels = rendered.matches("data-format=\"day\">").count();
+        assert!(
+            (6..=7).contains(&labels),
+            "about six dated labels, not one per five days: {labels}"
+        );
+        assert_eq!(rendered.matches("<rect ").count(), 360);
+        assert!(
+            !rendered.contains("text-anchor=\"middle\" font-size=\"10\" fill=\"#c62828\">1</text>"),
+            "the counts are dropped when the columns are too close to carry them"
+        );
+    }
+
+    #[test]
+    fn the_counts_keep_their_place_while_the_columns_have_room() {
+        let days = [day(0, 2, 90_000), day(1, 0, 0), day(2, 5, 600_000)];
+        let rendered = target_page(&target(), &days, &[], NOW, 30);
+        assert!(rendered.contains("fill=\"#c62828\">2</text>"));
+        assert!(rendered.contains("fill=\"#666666\">0</text>"));
+    }
+
+    #[test]
     fn the_way_back_sits_at_the_top_of_the_page() {
-        let rendered = target_page(&target(), &[day(0, 1, 1_000)], &[], NOW);
+        let rendered = target_page(
+            &target(),
+            &[day(0, 1, 1_000)],
+            &[],
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+        );
         let crumb = rendered
             .find("href=\"/\"")
             .expect("the breadcrumb links to the timeline");
@@ -434,7 +573,7 @@ mod tests {
     #[test]
     fn the_page_states_the_state_and_the_total_down_time() {
         let days = [day(0, 2, 90_000), day(1, 0, 0), day(2, 5, 600_000)];
-        let rendered = target_page(&target(), &days, &[], NOW);
+        let rendered = target_page(&target(), &days, &[], NOW, DEFAULT_PERIOD_DAYS);
         assert!(rendered.contains("<span class=\"badge up\">up</span>"));
         assert!(rendered.contains("<b>7 disconnections</b>"));
         assert!(
@@ -447,7 +586,7 @@ mod tests {
     fn the_target_label_is_escaped() {
         let mut hostile = target();
         hostile.label = Some("<script>alert(1)</script>".to_string());
-        let rendered = target_page(&hostile, &[day(0, 1, 1_000)], &[], NOW);
+        let rendered = target_page(&hostile, &[day(0, 1, 1_000)], &[], NOW, DEFAULT_PERIOD_DAYS);
         assert!(!rendered.contains("<script>alert(1)</script>"));
         assert!(rendered.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
     }
@@ -474,7 +613,13 @@ mod tests {
 
     #[test]
     fn the_header_states_the_average_up_run_of_the_period() {
-        let rendered = target_page(&target(), &[day(0, 1, 300_000)], &runs(), NOW);
+        let rendered = target_page(
+            &target(),
+            &[day(0, 1, 300_000)],
+            &runs(),
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+        );
         assert!(
             rendered.contains("<b>1h15±15m</b>"),
             "1 h and 1h30 average into 1h15 with a spread of 15 min"
@@ -493,7 +638,13 @@ mod tests {
             from_ms: 0,
             to_ms: 60_000,
         }];
-        let rendered = target_page(&target(), &[day(0, 1, 60_000)], &down, NOW);
+        let rendered = target_page(
+            &target(),
+            &[day(0, 1, 60_000)],
+            &down,
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+        );
         assert!(rendered.contains("<b>—</b>"));
         assert!(rendered.contains("no up run in the last 30 days"));
     }
@@ -507,7 +658,7 @@ mod tests {
             to_ms: 51 * 3_600_000,
         }];
         let days = [day(1, 0, 0), day(2, 0, 0)];
-        let rendered = target_page(&target(), &days, &crossing, NOW);
+        let rendered = target_page(&target(), &days, &crossing, NOW, DEFAULT_PERIOD_DAYS);
         assert!(
             rendered.contains(
                 "<td class=\"num\" title=\"1 up run that day\">3h00\
@@ -528,7 +679,13 @@ mod tests {
     fn the_longest_run_sits_next_to_the_mean_it_outweighs() {
         // One hour and one hour and a half: the mean is neither, and the longest run is
         // what says the link was not uniformly bad.
-        let rendered = target_page(&target(), &[day(0, 1, 300_000)], &runs(), NOW);
+        let rendered = target_page(
+            &target(),
+            &[day(0, 1, 300_000)],
+            &runs(),
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+        );
         assert!(
             rendered.contains("1h15±15m<br><span class=\"sub\">max 1h30</span>"),
             "the 24-hour cell states the longest run of the same window"
@@ -544,7 +701,13 @@ mod tests {
             from_ms: -5_000_000,
             to_ms: NOW,
         }];
-        let rendered = target_page(&target(), &[day(0, 0, 0)], &running, NOW);
+        let rendered = target_page(
+            &target(),
+            &[day(0, 0, 0)],
+            &running,
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+        );
         assert!(rendered.contains(
             "<td class=\"num current\" title=\"average up run over the last 24 hours: \
              1 up run in the last 24 hours\"><span class=\"tag\">last 24 h</span>\
@@ -560,7 +723,7 @@ mod tests {
     #[test]
     fn each_bar_states_its_own_count() {
         let days = [day(0, 2, 90_000), day(1, 0, 0), day(2, 5, 600_000)];
-        let rendered = target_page(&target(), &days, &[], NOW);
+        let rendered = target_page(&target(), &days, &[], NOW, DEFAULT_PERIOD_DAYS);
         assert!(rendered.contains("fill=\"#c62828\">2</text>"));
         assert!(rendered.contains("fill=\"#c62828\">5</text>"));
         assert!(
@@ -576,7 +739,13 @@ mod tests {
 
     #[test]
     fn the_badge_says_how_long_the_target_has_been_up() {
-        let rendered = target_page(&target(), &[day(0, 1, 60_000)], &[], NOW);
+        let rendered = target_page(
+            &target(),
+            &[day(0, 1, 60_000)],
+            &[],
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+        );
         assert!(rendered.contains("<span class=\"since\">for 16m</span>"));
     }
 
@@ -584,13 +753,19 @@ mod tests {
     fn a_target_that_is_not_up_states_no_streak() {
         let mut down = target();
         down.state = TargetState::Down;
-        let rendered = target_page(&down, &[day(0, 1, 60_000)], &[], NOW);
+        let rendered = target_page(&down, &[day(0, 1, 60_000)], &[], NOW, DEFAULT_PERIOD_DAYS);
         assert!(!rendered.contains("class=\"since\""));
     }
 
     #[test]
     fn every_instant_is_machine_readable_and_localised_by_the_browser() {
-        let rendered = target_page(&target(), &[day(0, 1, 60_000)], &[], NOW);
+        let rendered = target_page(
+            &target(),
+            &[day(0, 1, 60_000)],
+            &[],
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+        );
         assert!(rendered.contains(
             "<time datetime=\"1970-01-01T00:00:00.000Z\" data-format=\"date\">1970-01-01</time>"
         ));
