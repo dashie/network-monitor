@@ -1,0 +1,9 @@
+id,monitor_name,status,time,message,ping
+101273,"DNS ping",0,"2026-09-01 10:00:00.000","PING 1.1.1.1 (1.1.1.1) 56(84) bytes of data.  --- 1.1.1.1 ping statistics --- 4 packets transmitted, 0 received, 100% packet loss, time 3071ms  ",
+101277,"DNS ping",1,"2026-09-01 10:00:20.000","",6.56
+101280,"Gateway ping",0,"2026-09-01 10:05:00.000","PING 192.168.1.1 (192.168.1.1) 56(84) bytes of data.  From 192.168.2.1 icmp_seq=1 Destination Net Unreachable  --- 192.168.1.1 ping statistics --- 4 packets transmitted, 0 received, 100% packet loss, time 3050ms  ",
+101282,"Gateway ping",1,"2026-09-01 10:05:20.000","",1.12
+101300,"DNS ping",3,"2026-09-01 10:10:00.000","Maintenance: router firmware upgrade",""
+101310,"DNS ping",0,"2026-09-02 08:00:00.000","PING 8.8.8.8 (8.8.8.8) 56(84) bytes of data.  --- 8.8.8.8 ping statistics --- 4 packets transmitted, 0 received, 100% packet loss, time 3084ms  ",
+101312,"DNS ping",1,"2026-09-02 08:00:20.000","",7.4
+101314,"DNS ping",1,"2026-09-02 08:00:40.000","",7.2

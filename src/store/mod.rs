@@ -468,11 +468,17 @@ impl Store {
         Ok(inserted)
     }
 
-    /// Delete every event of every target inside `[from_ms, to_ms]`, inclusive.
-    pub fn delete_events_between(&self, from_ms: i64, to_ms: i64) -> Result<usize, StoreError> {
+    /// Delete every event of one target inside `[from_ms, to_ms]`, inclusive.
+    pub fn delete_events_for_target_between(
+        &self,
+        target: &str,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<usize, StoreError> {
         let deleted = self.connection.execute(
-            "DELETE FROM events WHERE occurred_at_ms BETWEEN ?1 AND ?2",
-            params![from_ms, to_ms],
+            "DELETE FROM events
+              WHERE target = ?1 AND occurred_at_ms BETWEEN ?2 AND ?3",
+            params![target, from_ms, to_ms],
         )?;
         Ok(deleted)
     }

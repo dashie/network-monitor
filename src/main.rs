@@ -99,8 +99,9 @@ fn run() -> Result<ExitCode, AppError> {
             };
             if let Some((from, to)) = report.window {
                 println!(
-                    "replaced {} events between {} and {}, then imported {} events for {} \
-                     target(s) from {} ({} rows skipped{dropped}, {} format)",
+                    "replaced {} events inside the window of each target ({} to {}), then \
+                     imported {} events for {} target(s) from {} ({} rows skipped{dropped}, {} \
+                     format)",
                     report.deleted,
                     format_rfc3339(from),
                     format_rfc3339(to),

@@ -31,6 +31,7 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0017 | Localise the instants in the browser and offer the window as links | accepted | 2026-11-10 | UTC in the markup, `Intl` in the browser; `/?window=6h` for 24/12/6/4/2/1 h |
 | ADR-0018 | Report the average `up` run with its spread and the availability | accepted | 2026-11-10 | Mean ± σ of the runs, clipped by the window; `unknown` excluded from availability; the day still running states the last 24 hours |
 | ADR-0019 | Open the timeline on the last hour | accepted | 2026-11-10 | Default span 1 h; links read 1, 2, 4, 6, 12, 24 h from left to right |
+| ADR-0020 | Give every target its own replace window on import | accepted | 2026-11-11 | `--replace-window` deletes per target, inside the span that target's own rows cover |
 
 ## Records
 
@@ -413,7 +414,7 @@ The client is denied by construction: no TLS, so `https` is refused with a messa
 
 ## ADR-0014 — Replace the window the archive covers
 
-**Status:** accepted · **Date:** 2026-11-09
+**Status:** accepted, window scope superseded by ADR-0020 · **Date:** 2026-11-09
 **Extends:** ADR-0013 (the import itself).
 
 ### Context
@@ -643,3 +644,68 @@ The page opens on the last hour, and the links read left to right from the narro
 
 - Keep 24 hours as the default: rejected, it is the span a reader has to undo most often.
 - Derive the default from the probe interval: rejected, it guesses from a number that says nothing about how the page is read, and hides the choice instead of exposing it.
+
+## ADR-0020 — Give every target its own replace window on import
+
+**Status:** accepted · **Date:** 2026-11-11
+**Supersedes:** the window scope of ADR-0014. Everything else in that record — two
+passes, the spool, the rebuilt projection, the truthful seam — stays as decided.
+
+### Context
+
+ADR-0014 defined the replace window as one span for the whole database: the earliest start
+and the latest end of the archive, with every event of every target inside it deleted. It
+rejected a per-target deletion because an archive describes the whole period it spans, and
+mixing a rewritten period with events the archive never mentioned was said to be worse
+than losing them.
+
+A real migration showed the cost. A history imported from Uptime Kuma covered 3 July to
+11 November for the gateway, whose monitor kept writing until the end, and stopped on
+7 November for the DNS monitor, which had been paused. Replacing the window deleted four
+days of `1.1.1.1` events that the database had recorded itself and that the archive did
+not describe at all: not a stale version of the archive's rows, but rows the archive had
+never seen. They survived only in a backup taken before the import.
+
+The assumption behind ADR-0014 — one archive, one period, every target measured across all
+of it — does not hold when the archive is assembled from several monitors, each with its
+own life.
+
+### Decision
+
+The window is computed per target, from that target's own rows, and the deletion is scoped
+to it:
+
+- **Coverage is a map**, `target -> (first instant, last instant)` of that target's rows.
+  A target absent from the archive is not in the map and nothing of it is deleted.
+- **The deletion is one statement per target**, `DELETE … WHERE target = ? AND occurred_at
+  BETWEEN ? AND ?`, so an archive that ends earlier for one monitor cannot reach the
+  events of another.
+- **The report still prints one line**, with the span that holds every window: the operator
+  reads `replaced 2 events inside the window of each target (… to …)`, and `query` remains
+  the place to see per-target detail.
+- **Everything else is untouched**: two passes over the same bytes, the spool for stdin and
+  URLs, the rebuilt projection, the normalisation of `previous_state`, and the refusal of
+  an empty archive.
+
+### Consequences
+
+- Re-applying a corrected archive still makes the period equal to the archive for every
+  target it contains, and now leaves the other targets alone even when their events fall
+  inside a wider span.
+- The invariant an operator can rely on: `--replace-window` only ever deletes rows of the
+  targets the file mentions, and only between the first and the last instant that file
+  mentions for each of them.
+- A target whose monitor stopped before the others keeps its own newer history, which is
+  the case that motivated the change.
+- The archive is no longer authoritative for the whole span it brackets: the gaps inside a
+  target's window are still gaps, and a row of that target inside its window is still
+  replaced, so the "archive wins inside the window" property is kept per target.
+
+### Alternatives considered
+
+- Keep the global window and document the hazard: rejected, it was documented and it still
+  destroyed data — a documented way to lose rows is a defect, not a feature.
+- Add a second flag (`--replace-target`) and leave the old behaviour: rejected, it keeps two
+  deletion semantics to explain, and the global one has no user who wants it.
+- Delete per row around each imported event: rejected, it cannot express "this target's
+  window begins here", so it leaves holes inside the window it claims to replace.

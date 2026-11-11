@@ -52,10 +52,12 @@ services:
     # which does not exist in the image.
     command:
       - monitor
+      # Labels travel with the target: every transition rewrites the target row, so a
+      # label given only to an imported history is lost at the first live drop.
       - --target
-      - 1.1.1.1,interface=eth1
+      - 1.1.1.1,interface=eth1,label=cloudflare-dns
       - --target
-      - 192.168.1.1
+      - 192.168.1.1,label=gateway
       - --database
       - /var/lib/network-monitor/events.db
       - --listen

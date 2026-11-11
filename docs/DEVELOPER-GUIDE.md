@@ -372,9 +372,10 @@ Only `http://` URLs are accepted: the binary carries no TLS stack. Download an `
 archive with `curl` and import the file.
 
 A merge adds to what is there; `--replace-window` replaces what the archive covers. The
-window is the earliest start and the latest end in the file, and everything of every
-target inside it is deleted before the archive is written; the history before and after
-stays.
+window belongs to the target: for every target the file mentions, everything between that
+target's first and last instant in the file is deleted before the archive is written, and
+the history before and after stays. A target the file does not mention keeps all of its
+events, even the ones inside the span the file brackets (ADR-0020).
 
 ```bash
 # re-apply a corrected archive over the same days
@@ -386,12 +387,35 @@ The archive is read twice in that mode, so stdin and an URL are copied once into
 exported URL is regenerated on every request); the copy is removed when the command
 ends. An empty archive has no window, so the command refuses and deletes nothing.
 
-Run the import with the monitor **stopped**: stop the service, import, start it again.
-The monitor decides a transition from the state it loaded at startup, so a history
-written under a running monitor leaves it with a stale view, and an imported row newer
-than the live one can flip the current state on the page until the next probe. The page
-itself (`serve`, or `monitor --listen`) can stay up: readers never block the writer, and
-the next 30 s refresh shows the imported data.
+A history coming from Uptime Kuma needs a conversion before it reaches `import`: the
+runbook is [UPTIME-KUMA-IMPORT.md](./UPTIME-KUMA-IMPORT.md).
+
+#### Back up before you import
+
+**Back up the database before every import.** `--replace-window` deletes rows and cannot
+be undone, and even a plain merge rewrites `previous_state` along the whole chain, so the
+copy is the only way back to the history as it was. Take it with the monitor stopped: a
+clean stop checkpoints the WAL into the main file, so the single `.db` is complete; after
+an unclean stop copy `events.db-wal` as well, or the backup is missing the last writes.
+
+```bash
+docker -c qubo stop network-monitor
+mkdir -p backups
+docker -c qubo cp network-monitor:/var/lib/network-monitor/events.db \
+  "backups/events-$(date +%Y%m%d-%H%M%S).db"
+```
+
+Keep the file until the imported data has been checked on the page, and remember that a
+`docker cp` of a running container is not a backup: it can miss the WAL and it races with
+the writer.
+
+#### Run the import with the monitor stopped
+
+Stop the service, import, start it again. The monitor decides a transition from the state
+it loaded at startup, so a history written under a running monitor leaves it with a stale
+view, and an imported row newer than the live one can flip the current state on the page
+until the next probe. The page itself (`serve`, or `monitor --listen`) can stay up:
+readers never block the writer, and the next 30 s refresh shows the imported data.
 
 Two writers do work — WAL plus a 5 s `busy_timeout` — and a 600 000-event import next to
 a writer committing every 20 ms produced no lock error and a worst commit of 9 ms on a

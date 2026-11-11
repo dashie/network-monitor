@@ -401,7 +401,7 @@ fn replacing_a_window_keeps_the_history_outside_it() {
 }
 
 #[test]
-fn replacing_a_window_drops_the_targets_it_emptied() {
+fn replacing_a_window_leaves_the_targets_outside_the_archive_alone() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let target = directory.path().join("events.db");
     let mut store = Store::open_rw(&target).expect("the database opens");
@@ -434,21 +434,79 @@ fn replacing_a_window_drops_the_targets_it_emptied() {
     )
     .expect("the import succeeds");
 
-    let store = Store::open_ro(&target).expect("the database opens");
-    assert!(
+    assert_eq!(
+        events_of(&target),
+        vec![
+            ("1.1.1.1".to_string(), "down".to_string(), 100_000),
+            ("1.1.1.1".to_string(), "up".to_string(), 160_000),
+            ("9.9.9.9".to_string(), "down".to_string(), 100_000),
+            ("9.9.9.9".to_string(), "up".to_string(), 160_000),
+        ],
+        "the archive rewrites the history of 9.9.9.9 and says nothing about 1.1.1.1"
+    );
+}
+
+#[test]
+fn replacing_a_window_gives_every_target_its_own_window() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let target = directory.path().join("events.db");
+    let mut store = Store::open_rw(&target).expect("the database opens");
+    for event in [
+        // The target the archive rewrites over a long span.
+        transition("1.1.1.1", TargetState::Unknown, TargetState::Up, 90_000),
+        transition("1.1.1.1", TargetState::Up, TargetState::Down, 150_000),
+        // The target whose part of the archive stops early: its events after 00:02:00
+        // are outside the archive and must survive.
+        transition("8.8.8.8", TargetState::Unknown, TargetState::Down, 100_000),
+        transition("8.8.8.8", TargetState::Down, TargetState::Up, 130_000),
+        transition("8.8.8.8", TargetState::Up, TargetState::Down, 180_000),
+    ] {
         store
-            .find_target("1.1.1.1")
-            .expect("the target is read")
-            .is_none(),
-        "a target left without events is removed"
+            .record_transition(&event)
+            .expect("the event is written");
+    }
+    drop(store);
+
+    let file = directory.path().join("window.csv");
+    std::fs::write(
+        &file,
+        format!(
+            "{HEADER}\
+             1.1.1.1,probe,eth0,up,1970-01-01T00:01:40.000Z,9000\n\
+             1.1.1.1,probe,eth0,down,1970-01-01T00:03:20.000Z,\n\
+             8.8.8.8,probe,eth0,down,1970-01-01T00:01:40.000Z,\n"
+        ),
+    )
+    .expect("the CSV is written");
+
+    let report = import::run(
+        &target,
+        file.to_str().unwrap(),
+        import::Options {
+            replace_window: true,
+        },
+    )
+    .expect("the import succeeds");
+
+    assert_eq!(
+        report.window,
+        Some((100_000, 200_000)),
+        "the line still names the span that holds every window"
     );
     assert_eq!(
-        store
-            .find_target("9.9.9.9")
-            .expect("the target is read")
-            .expect("the imported target exists")
-            .state,
-        TargetState::Up
+        report.deleted, 2,
+        "the down of 1.1.1.1 and the first down of 8.8.8.8, each inside its own window"
+    );
+    assert_eq!(
+        events_of(&target),
+        vec![
+            ("1.1.1.1".to_string(), "down".to_string(), 200_000),
+            ("1.1.1.1".to_string(), "up".to_string(), 90_000),
+            ("8.8.8.8".to_string(), "down".to_string(), 100_000),
+            ("8.8.8.8".to_string(), "down".to_string(), 180_000),
+            ("8.8.8.8".to_string(), "up".to_string(), 130_000),
+        ],
+        "8.8.8.8 keeps what its own part of the archive never covered"
     );
 }
 

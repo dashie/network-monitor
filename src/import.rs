@@ -8,7 +8,7 @@
 //! The rows may arrive in any order: the chain is rebuilt from the timestamps at the
 //! end, and an event that repeats the state before it is dropped (BR-1).
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -57,7 +57,8 @@ pub struct Report {
     pub gzipped: bool,
     /// Events deleted before writing, when the window was replaced.
     pub deleted: u32,
-    /// The window the archive covers, when the window was replaced.
+    /// The span every replaced target had its own window inside, when the window was
+    /// replaced: the earliest start and the latest end of the archive.
     pub window: Option<(i64, i64)>,
     /// Events dropped because they repeated the state before them.
     pub dropped: u32,
@@ -111,16 +112,20 @@ pub fn run(database: &Path, source_text: &str, options: Options) -> Result<Repor
     let source = parse_source(source_text);
     let mut spool = Spool::default();
 
-    // Replacing needs the window before the first write: read the archive once, delete
-    // what it covers, then apply it in a second pass over the same bytes.
+    // Replacing needs the windows before the first write: read the archive once, delete
+    // what each target's own window covers, then apply it in a second pass over the same
+    // bytes.
     if options.replace_window {
         let reopenable = spool.reopenable(database, &source)?;
-        let window = coverage(&reopenable)?;
+        let windows = coverage(&reopenable)?;
 
         let mut store = Store::open_rw(database)?;
         let mut report = Report::new(source_text, false);
-        report.deleted = store.delete_events_between(window.0, window.1)? as u32;
-        report.window = Some(window);
+        for (target, (from_ms, to_ms)) in &windows {
+            report.deleted +=
+                store.delete_events_for_target_between(target, *from_ms, *to_ms)? as u32;
+        }
+        report.window = envelope(&windows);
 
         let (reader, gzipped) = open(&reopenable)?;
         report.gzipped = gzipped;
@@ -171,11 +176,15 @@ impl Drop for Spool {
     }
 }
 
-/// The window an archive covers: the earliest start and the latest end it mentions.
-fn coverage(source: &Source) -> Result<(i64, i64), ImportError> {
+/// The window each target of the archive covers: its earliest start and its latest end.
+///
+/// The window belongs to the target and not to the file. A monitor stops collecting
+/// before another, and an archive holding both would otherwise end every target's window
+/// at the newest row of the busiest one, deleting events a target's own part of the
+/// archive never described.
+fn coverage(source: &Source) -> Result<BTreeMap<String, (i64, i64)>, ImportError> {
     let (reader, _) = open(source)?;
-    let mut first: Option<i64> = None;
-    let mut last: Option<i64> = None;
+    let mut windows: BTreeMap<String, (i64, i64)> = BTreeMap::new();
 
     for line in reader.lines() {
         let line = line?;
@@ -190,16 +199,27 @@ fn coverage(source: &Source) -> Result<(i64, i64), ImportError> {
             Some(row) => row,
             None => continue,
         };
-        first = Some(first.map_or(row.occurred_at_ms, |earliest| {
-            earliest.min(row.occurred_at_ms)
-        }));
-        last = Some(last.map_or(row.occurred_at_ms, |latest| latest.max(row.occurred_at_ms)));
+        windows
+            .entry(row.target)
+            .and_modify(|(first, last)| {
+                *first = (*first).min(row.occurred_at_ms);
+                *last = (*last).max(row.occurred_at_ms);
+            })
+            .or_insert((row.occurred_at_ms, row.occurred_at_ms));
     }
 
-    match (first, last) {
-        (Some(first), Some(last)) => Ok((first, last)),
-        _ => Err(ImportError::EmptyArchive),
+    if windows.is_empty() {
+        return Err(ImportError::EmptyArchive);
     }
+    Ok(windows)
+}
+
+/// The span that holds every target's window, for the line the command prints.
+fn envelope(windows: &BTreeMap<String, (i64, i64)>) -> Option<(i64, i64)> {
+    windows
+        .values()
+        .copied()
+        .reduce(|(first, last), (from_ms, to_ms)| (first.min(from_ms), last.max(to_ms)))
 }
 
 /// Write every row of the archive, in batches, and update the counters.

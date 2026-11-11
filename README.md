@@ -33,7 +33,8 @@ sudo ./target/release/network-monitor monitor --config ./network-monitor.toml \
 # Serve the page alone, without probing or NET_RAW
 ./target/release/network-monitor serve --database ./network-monitor.db --listen 127.0.0.1:8642
 
-# Restore the history from the file that page downloaded
+# Restore the history from the file that page downloaded; back up the database first
+# (docs/DEVELOPER-GUIDE.md#back-up-before-you-import)
 ./target/release/network-monitor import ./disconnections-20261109.csv.gz \
   --database ./network-monitor.db
 
@@ -74,6 +75,7 @@ Not done yet: the Windows raw-socket path is written but not exercised on a Wind
 | [docs/ADR.md](docs/ADR.md) | Architecture decisions and their rationale |
 | [docs/GLOSSARY.md](docs/GLOSSARY.md) | One precise definition per domain term |
 | [docs/DEVELOPER-GUIDE.md](docs/DEVELOPER-GUIDE.md) | Build, run, test, extend, and the Git standards |
+| [docs/UPTIME-KUMA-IMPORT.md](docs/UPTIME-KUMA-IMPORT.md) | Runbook: import an Uptime Kuma history into a database |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Branching, review, definition of done |
 | [AGENTS.md](AGENTS.md) | Rules for human and AI contributors |
 
