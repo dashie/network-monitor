@@ -58,6 +58,13 @@ services:
       - 1.1.1.1,interface=eth1,label=cloudflare-dns
       - --target
       - 192.168.1.1,label=gateway
+      # One probe per second per target: a drop is noticed within the 2 s timeout that
+      # `network-monitor` uses by default, instead of within five seconds. The interval is
+      # the pause after a probe, so an answering target is probed every ~1 s and a silent
+      # one every ~3 s (2 s timeout + 1 s pause). Only transitions are written, so the
+      # database grows with incidents, not with probes.
+      - --interval-ms
+      - "1000"
       - --database
       - /var/lib/network-monitor/events.db
       - --listen

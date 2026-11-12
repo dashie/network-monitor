@@ -134,7 +134,7 @@ C4Container
 
 - **Input:** a target address and an optional interface name.
 - **Output:** `Verdict::Up { rtt }`, `Verdict::Down`, or `ProbeError::Local { reason }`.
-- **Guarantees:** one echo request per call; the wait is bounded by `timeout_ms`; a reply from a different address or with a different identifier is discarded; a local failure (socket, permission, interface) is never reported as `Down`.
+- **Guarantees:** one echo request per call; the wait is bounded by `timeout_ms` for the whole probe, and every wait is shortened to what is left of that budget, so packets from other hosts and from the session's other targets — a raw ICMP socket receives them all — can delay the verdict by the gap between two packets but never postpone it; a reply from a different address or with a different identifier is discarded; a local failure (socket, permission, interface) is never reported as `Down`.
 
 ### `store`
 

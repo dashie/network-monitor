@@ -7,7 +7,7 @@
 
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::{Probe, ProbeError, Verdict};
 
@@ -101,14 +101,55 @@ pub(crate) fn is_expected_reply(message: &[u8], identifier: u16, sequence: u16) 
     reply_identifier == identifier && reply_sequence == sequence
 }
 
+/// Wait for the reply to the request just sent, with one budget for the whole probe.
+///
+/// A raw ICMP socket receives **every** echo reply of the host, not only the one this
+/// probe waits for: the other targets of this process answer into the same socket family,
+/// and any other ping on the machine lands here too. `receive` is therefore called once
+/// per packet and answers `None` for a packet that is not a candidate and for a wait that
+/// expired. Each wait is shortened to what is left of `timeout`, so foreign traffic can
+/// delay the verdict by the gap between two packets and can never postpone it: a probe
+/// against a dead target still concludes in `timeout`, however busy the host is.
+fn await_reply<F>(
+    identifier: u16,
+    sequence: u16,
+    timeout: Duration,
+    mut receive: F,
+) -> Result<Verdict, ProbeError>
+where
+    F: FnMut(Duration, &mut [u8]) -> Result<Option<usize>, ProbeError>,
+{
+    let started = Instant::now();
+    let mut buffer = [0u8; 1500];
+
+    loop {
+        let wait = match timeout.checked_sub(started.elapsed()) {
+            Some(wait) if !wait.is_zero() => wait,
+            _ => return Ok(Verdict::Down),
+        };
+
+        let Some(received) = receive(wait, &mut buffer)? else {
+            continue;
+        };
+
+        if let Some(message) = icmp_message(&buffer[..received]) {
+            if is_expected_reply(message, identifier, sequence) {
+                return Ok(Verdict::Up {
+                    rtt: started.elapsed(),
+                });
+            }
+        }
+    }
+}
+
 #[cfg(unix)]
 mod platform {
     use std::io;
     use std::mem;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use super::super::{ProbeError, Verdict};
-    use super::{build_echo_request, icmp_message, is_expected_reply};
+    use super::{await_reply, build_echo_request};
 
     /// Closes the socket on every return path.
     struct Socket(libc::c_int);
@@ -137,8 +178,6 @@ mod platform {
         }
         let socket = Socket(raw);
 
-        set_receive_timeout(socket.0, timeout)?;
-
         if let Some(name) = interface {
             crate::probe::interface::bind(socket.0, name).map_err(ProbeError::local)?;
         }
@@ -162,61 +201,56 @@ mod platform {
             )));
         }
 
-        let started = Instant::now();
-        let mut buffer = [0u8; 1500];
-        loop {
-            let mut from: libc::sockaddr_storage = unsafe { mem::zeroed() };
-            let mut from_length = mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-            let received = unsafe {
-                libc::recvfrom(
-                    socket.0,
-                    buffer.as_mut_ptr() as *mut libc::c_void,
-                    buffer.len(),
-                    0,
-                    &mut from as *mut libc::sockaddr_storage as *mut libc::sockaddr,
-                    &mut from_length,
-                )
+        await_reply(identifier, sequence, timeout, |wait, buffer| {
+            receive_one(socket.0, target, wait, buffer)
+        })
+    }
+
+    /// One wait for one packet: `None` when it was not ours or the wait expired.
+    fn receive_one(
+        socket: libc::c_int,
+        target: std::net::Ipv4Addr,
+        wait: std::time::Duration,
+        buffer: &mut [u8],
+    ) -> Result<Option<usize>, ProbeError> {
+        set_receive_timeout(socket, wait)?;
+
+        let mut from: libc::sockaddr_storage = unsafe { mem::zeroed() };
+        let mut from_length = mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+        let received = unsafe {
+            libc::recvfrom(
+                socket,
+                buffer.as_mut_ptr() as *mut libc::c_void,
+                buffer.len(),
+                0,
+                &mut from as *mut libc::sockaddr_storage as *mut libc::sockaddr,
+                &mut from_length,
+            )
+        };
+
+        if received < 0 {
+            let error = io::Error::last_os_error();
+            return match error.kind() {
+                io::ErrorKind::WouldBlock
+                | io::ErrorKind::TimedOut
+                | io::ErrorKind::Interrupted => Ok(None),
+                _ => Err(ProbeError::local(format!(
+                    "cannot receive the echo reply: {error}"
+                ))),
             };
-
-            if received < 0 {
-                let error = io::Error::last_os_error();
-                match error.kind() {
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => {
-                        return Ok(Verdict::Down)
-                    }
-                    io::ErrorKind::Interrupted => {
-                        if started.elapsed() >= timeout {
-                            return Ok(Verdict::Down);
-                        }
-                        continue;
-                    }
-                    _ => {
-                        return Err(ProbeError::local(format!(
-                            "cannot receive the echo reply: {error}"
-                        )))
-                    }
-                }
-            }
-
-            let received = received as usize;
-            if !source_matches(&from, target) {
-                continue;
-            }
-            if let Some(message) = icmp_message(&buffer[..received]) {
-                if is_expected_reply(message, identifier, sequence) {
-                    return Ok(Verdict::Up {
-                        rtt: started.elapsed(),
-                    });
-                }
-            }
-
-            if started.elapsed() >= timeout {
-                return Ok(Verdict::Down);
-            }
         }
+
+        let received = received as usize;
+        if !source_matches(&from, target) {
+            return Ok(None);
+        }
+        Ok(Some(received))
     }
 
     fn set_receive_timeout(fd: libc::c_int, timeout: Duration) -> Result<(), ProbeError> {
+        // A zeroed `timeval` means "wait forever" on POSIX, so a remainder under a
+        // microsecond is rounded up instead of disabling the timeout.
+        let timeout = timeout.max(Duration::from_millis(1));
         let value = libc::timeval {
             tv_sec: timeout.as_secs() as _,
             tv_usec: timeout.subsec_micros() as _,
@@ -259,10 +293,10 @@ mod platform {
 mod platform {
     use std::net::Ipv4Addr;
     use std::sync::Once;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use super::super::{ProbeError, Verdict};
-    use super::{build_echo_request, icmp_message, is_expected_reply};
+    use super::{await_reply, build_echo_request};
 
     const AF_INET: i32 = 2;
     const SOCK_RAW: i32 = 3;
@@ -333,20 +367,6 @@ mod platform {
         }
         let socket = Socket(raw);
 
-        let milliseconds = timeout.as_millis().min(u32::MAX as u128) as u32;
-        let result = unsafe {
-            setsockopt(
-                socket.0,
-                SOL_SOCKET,
-                SO_RCVTIMEO,
-                &milliseconds as *const u32 as *const u8,
-                4,
-            )
-        };
-        if result != 0 {
-            return Err(ProbeError::local("cannot set the receive timeout"));
-        }
-
         if let Some(name) = interface {
             crate::probe::interface::bind(socket.0, name).map_err(ProbeError::local)?;
         }
@@ -370,48 +390,61 @@ mod platform {
             )));
         }
 
-        let started = Instant::now();
-        let mut buffer = [0u8; 1500];
-        loop {
-            let mut from = [0u8; 16];
-            let mut from_length: i32 = from.len() as i32;
-            let received = unsafe {
-                recvfrom(
-                    socket.0,
-                    buffer.as_mut_ptr(),
-                    buffer.len() as i32,
-                    0,
-                    from.as_mut_ptr(),
-                    &mut from_length,
-                )
-            };
+        await_reply(identifier, sequence, timeout, |wait, buffer| {
+            receive_one(socket.0, target, wait, buffer)
+        })
+    }
 
-            if received < 0 {
-                let code = unsafe { WSAGetLastError() };
-                if code == WSAETIMEDOUT || code == WSAEWOULDBLOCK {
-                    return Ok(Verdict::Down);
-                }
-                return Err(ProbeError::local(format!(
-                    "cannot receive the echo reply (WSA error {code})"
-                )));
-            }
-
-            let received = received as usize;
-            if from[4..8] != target.octets() {
-                continue;
-            }
-            if let Some(message) = icmp_message(&buffer[..received]) {
-                if is_expected_reply(message, identifier, sequence) {
-                    return Ok(Verdict::Up {
-                        rtt: started.elapsed(),
-                    });
-                }
-            }
-
-            if started.elapsed() >= timeout {
-                return Ok(Verdict::Down);
-            }
+    /// One wait for one packet: `None` when it was not ours or the wait expired.
+    fn receive_one(
+        socket: usize,
+        target: Ipv4Addr,
+        wait: Duration,
+        buffer: &mut [u8],
+    ) -> Result<Option<usize>, ProbeError> {
+        let milliseconds = wait.as_millis().clamp(1, u32::MAX as u128) as u32;
+        let result = unsafe {
+            setsockopt(
+                socket,
+                SOL_SOCKET,
+                SO_RCVTIMEO,
+                &milliseconds as *const u32 as *const u8,
+                4,
+            )
+        };
+        if result != 0 {
+            return Err(ProbeError::local("cannot set the receive timeout"));
         }
+
+        let mut from = [0u8; 16];
+        let mut from_length: i32 = from.len() as i32;
+        let received = unsafe {
+            recvfrom(
+                socket,
+                buffer.as_mut_ptr(),
+                buffer.len() as i32,
+                0,
+                from.as_mut_ptr(),
+                &mut from_length,
+            )
+        };
+
+        if received < 0 {
+            let code = unsafe { WSAGetLastError() };
+            return if code == WSAETIMEDOUT || code == WSAEWOULDBLOCK {
+                Ok(None)
+            } else {
+                Err(ProbeError::local(format!(
+                    "cannot receive the echo reply (WSA error {code})"
+                )))
+            };
+        }
+
+        let received = received as usize;
+        if from[4..8] != target.octets() {
+            return Ok(None);
+        }
+        Ok(Some(received))
     }
 
     /// `sockaddr_in` as raw bytes: family, port, address, padding.
@@ -500,6 +533,78 @@ mod tests {
         assert!(is_expected_reply(&reply, 42, 9));
         assert!(!is_expected_reply(&reply, 42, 10));
         assert!(!is_expected_reply(&reply, 43, 9));
+    }
+
+    /// An echo reply for the given identifier and sequence, as the socket would deliver it.
+    fn reply(identifier: u16, sequence: u16) -> Vec<u8> {
+        let mut packet = build_echo_request(identifier, sequence);
+        packet[0] = 0;
+        packet
+    }
+
+    #[test]
+    fn traffic_from_other_hosts_cannot_postpone_the_verdict() {
+        // The bug this guards: a raw socket receives the replies of every target of this
+        // process, and a `continue` that skipped the deadline let a dead target stay
+        // "pending" for as long as foreign packets kept arriving.
+        let timeout = Duration::from_millis(40);
+        let mut waits: Vec<Duration> = Vec::new();
+        let started = Instant::now();
+
+        let verdict = await_reply(42, 9, timeout, |wait, _buffer| {
+            waits.push(wait);
+            Ok(None)
+        });
+
+        assert_eq!(verdict, Ok(Verdict::Down));
+        assert!(
+            started.elapsed() < timeout + Duration::from_millis(500),
+            "the probe concludes on its own budget, not on the traffic around it"
+        );
+        assert!(waits.len() > 1, "the wait is attempted again");
+        assert!(
+            waits.last() < waits.first(),
+            "each wait shrinks with the budget instead of restarting it: {waits:?}"
+        );
+    }
+
+    #[test]
+    fn the_reply_to_our_request_ends_the_wait_at_once() {
+        let verdict = await_reply(42, 9, Duration::from_secs(5), |_wait, buffer| {
+            let packet = reply(42, 9);
+            buffer[..packet.len()].copy_from_slice(&packet);
+            Ok(Some(packet.len()))
+        });
+        assert!(
+            matches!(verdict, Ok(Verdict::Up { .. })),
+            "the reply is taken on the first packet"
+        );
+    }
+
+    #[test]
+    fn a_reply_to_another_request_is_not_ours() {
+        let timeout = Duration::from_millis(30);
+        let verdict = await_reply(42, 9, timeout, |_wait, buffer| {
+            let packet = reply(42, 10);
+            buffer[..packet.len()].copy_from_slice(&packet);
+            Ok(Some(packet.len()))
+        });
+        assert_eq!(
+            verdict,
+            Ok(Verdict::Down),
+            "another sequence is ignored and the budget still ends the probe"
+        );
+    }
+
+    #[test]
+    fn a_socket_failure_is_reported_instead_of_looping() {
+        let verdict = await_reply(42, 9, Duration::from_secs(1), |_wait, _buffer| {
+            Err(ProbeError::local("the socket went away"))
+        });
+        assert!(
+            verdict.is_err(),
+            "an error ends the probe, it does not retry"
+        );
     }
 
     #[test]
