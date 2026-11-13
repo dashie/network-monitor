@@ -13,7 +13,7 @@ use super::stats::{self, RunStats};
 
 const WIDTH: f64 = 1000.0;
 const LABEL_WIDTH: f64 = 190.0;
-const STATS_WIDTH: f64 = 330.0;
+const STATS_WIDTH: f64 = 248.0;
 const ROW_HEIGHT: f64 = 24.0;
 const ROW_GAP: f64 = 6.0;
 const TOP_PAD: f64 = 6.0;
@@ -190,13 +190,11 @@ const TICK_STEPS_MS: [i64; 10] = [
 
 /// Right edge of every statistics column of a lane, relative to the start of the block,
 /// with its header and what the column means.
-const COLUMNS: [(f64, &str, &str); 6] = [
-    (26.0, "DROPS", "disconnections in the window"),
-    (86.0, "DOWN", "time spent down in the window"),
-    (160.0, "AVG UP", "average up run, with its spread"),
-    (208.0, "MAX", "longest up run in the window"),
-    (258.0, "UP FOR", "how long it has been up without a drop"),
-    (318.0, "UP %", "up share of the time the target was probed"),
+const COLUMNS: [(f64, &str, &str); 4] = [
+    (48.0, "DROPS", "disconnections in the window"),
+    (122.0, "AVG UP", "average up run, with its spread"),
+    (172.0, "MAX", "longest up run in the window"),
+    (232.0, "UP FOR", "how long it has been up without a drop"),
 ];
 
 /// The time window shown by the chart.
@@ -429,7 +427,7 @@ fn chart(timelines: &[TargetTimeline], up_since: &HashMap<String, i64>, window: 
             .label
             .clone()
             .unwrap_or_else(|| timeline.target.clone());
-        let stats = window_stats(&timeline.segments, window.from_ms);
+        let drops = window_drops(&timeline.segments, window.from_ms);
 
         let _ = write!(
             output,
@@ -469,8 +467,7 @@ fn chart(timelines: &[TargetTimeline], up_since: &HashMap<String, i64>, window: 
 
         let runs = runs_stats(&timeline.segments);
         let values = [
-            (stats.drops.to_string(), String::new()),
-            (format_span(stats.down_ms), String::new()),
+            (drops.to_string(), String::new()),
             (format_runs(runs), run_count_hint(runs)),
             (
                 match stats::longest_run(&timeline.segments) {
@@ -484,10 +481,6 @@ fn chart(timelines: &[TargetTimeline], up_since: &HashMap<String, i64>, window: 
                     Some(up_for_ms) => format_span(*up_for_ms),
                     None => "—".to_string(),
                 },
-                String::new(),
-            ),
-            (
-                format_share(availability(&timeline.segments)),
                 String::new(),
             ),
         ];
@@ -513,31 +506,14 @@ fn chart(timelines: &[TargetTimeline], up_since: &HashMap<String, i64>, window: 
     output
 }
 
-/// Disconnections and total down time of one lane, counted over the shown window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WindowStats {
-    pub drops: u32,
-    pub down_ms: i64,
-}
-
-/// Statistics of a lane. A down segment that starts after the window opened is a
-/// disconnection; a down segment that was already open when the window opened is not,
-/// because it began before the period the numbers describe.
-pub fn window_stats(segments: &[TimelineSegment], from_ms: i64) -> WindowStats {
-    let mut stats = WindowStats {
-        drops: 0,
-        down_ms: 0,
-    };
-    for segment in segments {
-        if segment.state != TargetState::Down {
-            continue;
-        }
-        stats.down_ms += (segment.to_ms - segment.from_ms).max(0);
-        if segment.from_ms > from_ms {
-            stats.drops += 1;
-        }
-    }
-    stats
+/// Disconnections of one lane over the shown window. A down segment that starts after
+/// the window opened is a disconnection; a down segment that was already open when the
+/// window opened is not, because it began before the period the number describes.
+pub fn window_drops(segments: &[TimelineSegment], from_ms: i64) -> u32 {
+    segments
+        .iter()
+        .filter(|segment| segment.state == TargetState::Down && segment.from_ms > from_ms)
+        .count() as u32
 }
 
 /// A compact duration: `45s`, `12m`, `3h07`, `2d04h`.
@@ -572,11 +548,6 @@ pub fn up_for(state: TargetState, last_change_at_ms: i64, now_ms: i64) -> Option
     (state == TargetState::Up).then(|| (now_ms - last_change_at_ms).max(0))
 }
 
-/// Share of the probed time spent `up`, in permille; `None` when nothing was probed.
-pub fn availability(segments: &[TimelineSegment]) -> Option<i64> {
-    stats::up_permille(segments)
-}
-
 /// `1h12±45m`, `1h12` when a single run gives no spread to state, or `—` when the
 /// window holds no `up` run at all.
 pub fn format_runs(runs: RunStats) -> String {
@@ -588,14 +559,6 @@ pub fn format_runs(runs: RunStats) -> String {
             format_span(runs.mean_ms),
             format_span(runs.sigma_ms)
         ),
-    }
-}
-
-/// `99.8%`, from a share in permille; `—` when there is no probed time to share.
-pub fn format_share(permille: Option<i64>) -> String {
-    match permille {
-        Some(permille) => format!("{}.{}%", permille / 10, permille % 10),
-        None => "—".to_string(),
     }
 }
 
@@ -728,14 +691,18 @@ mod tests {
     }
 
     #[test]
-    fn the_lane_shows_its_drops_and_down_time_and_links_to_the_detail_page() {
+    fn the_lane_shows_its_drops_and_links_to_the_detail_page() {
         let window = Window {
             from_ms: 0,
             to_ms: 7_200_000,
         };
         let rendered = chart(&[timeline()], &no_streaks(), window);
         assert!(rendered.contains("DROPS"));
-        assert!(rendered.contains("DOWN"));
+        assert!(!rendered.contains("DOWN"), "the down-time column is gone");
+        assert!(
+            !rendered.contains("UP %"),
+            "the availability column is gone"
+        );
         assert!(rendered.contains("1h00"));
         assert!(rendered.contains("<a href=\"/target?target=1.1.1.1\">"));
     }
@@ -901,28 +868,24 @@ mod tests {
             },
         ];
 
-        let open_at_window_start = window_stats(&segments, 0);
-        assert_eq!(open_at_window_start.drops, 1);
-        assert_eq!(open_at_window_start.down_ms, 2_500);
+        let open_at_window_start = window_drops(&segments, 0);
+        assert_eq!(open_at_window_start, 1);
 
-        // The segments already cover the window, so the down time is the same; only
-        // the segment that began before the window opened stops counting as a drop.
-        let late_window = window_stats(&segments, 2_000);
-        assert_eq!(late_window.drops, 0);
-        assert_eq!(late_window.down_ms, 2_500);
+        // The segment that began before the window opened stops counting as a drop.
+        let late_window = window_drops(&segments, 2_000);
+        assert_eq!(late_window, 0);
     }
 
     #[test]
-    fn a_lane_states_its_availability_and_its_average_up_run() {
+    fn a_lane_states_its_average_up_run() {
         let window = Window {
             from_ms: 0,
             to_ms: 7_200_000,
         };
         let rendered = page(&[timeline()], &[], &no_streaks(), window);
-        assert!(rendered.contains("UP %"), "the availability column");
         assert!(rendered.contains("AVG UP"), "the average column");
         assert!(rendered.contains("MAX"), "the longest-run column");
-        let order = ["DROPS", "DOWN", "AVG UP", "MAX", "UP FOR", "UP %"].map(|label| {
+        let order = ["DROPS", "AVG UP", "MAX", "UP FOR"].map(|label| {
             rendered
                 .find(label)
                 .unwrap_or_else(|| panic!("{label} is a column"))
@@ -931,7 +894,6 @@ mod tests {
             order.windows(2).all(|pair| pair[0] < pair[1]),
             "the columns read left to right as requested"
         );
-        assert!(rendered.contains(">50.0%<"), "half of the window was up");
         assert!(
             rendered.contains(">1h00<"),
             "the only up run lasted an hour, and is also the longest one"
@@ -1025,14 +987,6 @@ mod tests {
         };
         assert_eq!(format_runs(single), "1h00");
         assert_eq!(format_runs(RunStats::default()), "—");
-    }
-
-    #[test]
-    fn a_share_is_a_percentage_with_one_decimal() {
-        assert_eq!(format_share(Some(1_000)), "100.0%");
-        assert_eq!(format_share(Some(998)), "99.8%");
-        assert_eq!(format_share(Some(0)), "0.0%");
-        assert_eq!(format_share(None), "—", "nothing was probed");
     }
 
     #[test]

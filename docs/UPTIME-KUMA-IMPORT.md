@@ -281,9 +281,9 @@ cat normalize.csv | docker -c qubo run --rm -i \
 docker -c qubo start network-monitor
 ```
 
-The marker is drawn grey like any `unknown` band, and `up_permille` leaves it out of the
-availability instead of counting it as down. In this installation it moved the 30-day
-down time from `4d01h` to `2d14h`, all of it difference in unmeasured hours.
+The marker is drawn grey like any `unknown` band, so the unmeasured hours stop counting
+as down instead of being carried forward. In this installation it moved the 30-day down
+time of the target from `4d01h` to `2d14h`, all of it difference in unmeasured hours.
 
 This is a repair, not a documented feature: nothing in the binary writes an `unknown`
 event. If it becomes routine, the honest fix is to let `import` accept an `unknown` state

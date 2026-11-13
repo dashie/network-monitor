@@ -108,30 +108,6 @@ pub fn summarize(runs: &[i64]) -> RunStats {
     }
 }
 
-/// Share of the *probed* time spent `up`, in permille, rounded.
-///
-/// `unknown` is time nobody measured — a target first seen an hour ago says nothing
-/// about the twenty-nine days before it — so it is left out of both the numerator and
-/// the denominator instead of counting as unavailability. `None` when the window holds
-/// no probed time at all.
-pub fn up_permille(segments: &[TimelineSegment]) -> Option<i64> {
-    let mut up = 0;
-    let mut down = 0;
-    for segment in segments {
-        let length = (segment.to_ms - segment.from_ms).max(0);
-        match segment.state {
-            TargetState::Up => up += length,
-            TargetState::Down => down += length,
-            TargetState::Unknown => {}
-        }
-    }
-    let known = up + down;
-    if known <= 0 {
-        return None;
-    }
-    Some(((up * 1_000) + known / 2) / known)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,33 +217,5 @@ mod tests {
         assert_eq!(days.get(&0), Some(&vec![5_000]));
         assert_eq!(days.get(&10_000), Some(&vec![10_000]));
         assert_eq!(days.get(&20_000), Some(&vec![5_000]));
-    }
-
-    #[test]
-    fn availability_is_the_up_share_of_the_probed_time() {
-        let segments = [
-            segment(TargetState::Up, 0, 9),
-            segment(TargetState::Down, 9, 10),
-        ];
-        assert_eq!(up_permille(&segments), Some(900));
-        assert_eq!(up_permille(&[]), None, "nothing was probed");
-    }
-
-    #[test]
-    fn never_measured_time_is_not_an_outage() {
-        let segments = [
-            segment(TargetState::Unknown, 0, 29),
-            segment(TargetState::Up, 29, 30),
-        ];
-        assert_eq!(
-            up_permille(&segments),
-            Some(1_000),
-            "the target was up the whole time it was probed"
-        );
-        assert_eq!(
-            up_permille(&[segment(TargetState::Unknown, 0, 10)]),
-            None,
-            "no state was ever measured"
-        );
     }
 }

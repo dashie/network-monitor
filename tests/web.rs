@@ -308,11 +308,8 @@ fn every_row_shows_its_statistics_and_links_to_its_detail_page() {
     let (status, page) = server.get("/");
     assert_eq!(status, 200);
     assert!(page.contains("DROPS"), "the drop column has a header");
-    assert!(page.contains("DOWN"), "the down-time column has a header");
-    assert!(
-        page.contains("UP %"),
-        "the availability column has a header"
-    );
+    assert!(!page.contains(">DOWN<"), "the down-time column is gone");
+    assert!(!page.contains("UP %"), "the availability column is gone");
     assert!(
         page.contains("AVG UP"),
         "the average up run column has a header"

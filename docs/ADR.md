@@ -20,7 +20,7 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0006 | Ship one binary with `monitor` and `query` subcommands | accepted | 2026-11-08 | Single artifact; query opens the database read-only |
 | ADR-0007 | Reload the configuration file while monitoring runs | accepted | 2026-11-08 | Poll the file every second and apply a valid change without a restart |
 | ADR-0008 | Serve a read-only web page from the binary | accepted | 2026-11-09 | Minimal HTTP and server-side SVG; no framework and no client library |
-| ADR-0009 | Serve the page from the monitoring process | accepted | 2026-11-09 | `monitor --listen` runs the same `web` component; one process records and shows |
+| ADR-0009 | Serve the page from the monitoring process | accepted; the down-time column is withdrawn by ADR-0022 | 2026-11-09 | `monitor --listen` runs the same `web` component; one process records and shows |
 | ADR-0010 | Render the timeline without client-side interaction | accepted | 2026-11-09 | Fixed window, 30 s meta refresh, no zoom; last 10 disconnections listed |
 | ADR-0011 | Stream the history export as a hand-written ZIP | superseded by ADR-0012 | 2026-11-09 | Chunked response, deflate on the fly, paged reads, `flate2` only |
 | ADR-0012 | Stream the export as a gzipped CSV instead of a ZIP | accepted | 2026-11-09 | gzip is a single stream: no container, no size known in advance |
@@ -29,10 +29,11 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0015 | Export every event so one file serves export and import | accepted | 2026-11-09 | One row per event with label and interface; round trip is lossless |
 | ADR-0016 | Build the container image with a dev profile and a cached `target` | accepted | 2026-11-10 | `release-dev` profile plus a BuildKit cache mount; `PROFILE=release` publishes |
 | ADR-0017 | Localise the instants in the browser and offer the window as links | accepted | 2026-11-10 | UTC in the markup, `Intl` in the browser; `/?window=6h` for 24/12/6/4/2/1 h |
-| ADR-0018 | Report the average `up` run with its spread and the availability | accepted | 2026-11-10 | Mean ± σ of the runs, clipped by the window; `unknown` excluded from availability; the day still running states the last 24 hours |
+| ADR-0018 | Report the average `up` run with its spread and the availability | accepted; the availability figure is withdrawn by ADR-0022 | 2026-11-10 | Mean ± σ of the runs, clipped by the window; `unknown` excluded from availability; the day still running states the last 24 hours |
 | ADR-0019 | Open the timeline on the last hour | accepted | 2026-11-10 | Default span 1 h; links read 1, 2, 4, 6, 12, 24 h from left to right |
 | ADR-0020 | Give every target its own replace window on import | accepted | 2026-11-11 | `--replace-window` deletes per target, inside the span that target's own rows cover |
 | ADR-0021 | Offer the detail page 30 to 360 days | accepted | 2026-11-11 | `?days=90d` selects the period, 30 days by default; a count label only where a column can carry it |
+| ADR-0022 | Drop the down-time and availability columns from the timeline | accepted | 2026-11-13 | A lane states `DROPS`, `AVG UP`, `MAX`, `UP FOR`; the freed width goes to the bands |
 
 ## Records
 
@@ -760,3 +761,61 @@ reading direction the timeline uses for its windows (ADR-0019).
   timeline.
 - Label every bar at every period and shrink the font: rejected, unreadable below a certain
   width whatever the font size.
+
+## ADR-0022 — Drop the down-time and availability columns from the timeline
+
+**Status:** accepted · **Date:** 2026-11-13
+**Supersedes:** the down-time column of ADR-0009 and the availability figure of ADR-0018.
+The average `up` run with its spread, `MAX`, and `UP FOR` stay as decided there.
+
+### Context
+
+A lane carried six numbers: `DROPS`, `DOWN`, `AVG UP`, `MAX`, `UP FOR`, `UP %`. Two of
+them restated what the lane already draws. The red bands above the numbers are the down
+time of the window, so `DOWN` measured a reader's eye against a stroke; the availability
+percentage compressed the same bands into one figure that the detail page never repeats
+and that an operator cannot act on from the timeline, because the day where the link
+failed is one click away.
+
+Six columns also cost the chart its width: the statistics block took 330 of the 1000 px
+of the drawing, and the bands — the reason the page exists — got the remainder.
+
+### Decision
+
+A lane states four figures: the disconnections of the window, the average `up` run with
+its spread, the longest `up` run of the window, and how long the target has been `up`
+without a drop. The down-time column and the availability column are gone.
+
+The code follows the columns out: `WindowStats` becomes `window_drops`, which counts the
+disconnections the window contains, and `up_permille` and `format_share` disappear with
+their tests. Nothing else in the binary read them.
+
+The statistics block narrows to the four remaining columns and the freed width goes to
+the bands, whose track grows from 480 to 562 px. The first column moves right with the
+new boundary, so its header no longer sits under the last tick of the axis.
+
+Down time is still stated per day and for the whole period on the detail page, which is
+where a reader compares days and decides what to fix.
+
+### Consequences
+
+- The lane answers "how bad was it" by the bands and the drop count, "how long does it
+  stay up" by the mean and the longest run, and "is it up right now, and since when" by
+  the streak, in four numbers instead of six.
+- A reader who wants the down time of a target on the timeline opens the lane; the figure
+  is there for every day of the period, which the timeline figure was not.
+- The bands are about a fifth wider for the same page width.
+- No schema change, no export change, no new query: every removed figure came from the
+  segments the page already had.
+- `Availability` leaves the glossary, and `BR-10` keeps only the rule that a run clipped
+  by the window counts as it appears.
+
+### Alternatives considered
+
+- Keep the availability and drop `MAX`: rejected, the longest run is the figure that says
+  a link was not uniformly bad, and it is the one the operator asked for after reading a
+  mean of brief runs as a contradiction.
+- Keep six columns and shrink the font: rejected, it trades readability of every column
+  for two that repeat the drawing.
+- Remove down time from the detail page too: rejected, the per-day table is where the
+  figure belongs; the timeline was the wrong place for it, not the product.

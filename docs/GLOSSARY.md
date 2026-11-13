@@ -23,7 +23,6 @@ appears in a requirement, in a component name, or in a public interface.
 | **State transition** | A change of a target's verdict between two consecutive probe cycles. |
 | **Target** | One IP address under supervision, with an optional interface and an optional label. |
 | **Target specification** | The command-line form of a target: `IP[,interface=NAME][,label=NAME]`. |
-| **Availability** | The share of the probed time of a window spent `up`; `unknown` time is not probed and is left out. |
 | **Archive** | The gzipped CSV of every event, written by the page and read by `import`; one format, two directions. |
 | **Current `up` streak** | The time since the transition that turned a target `up`; it does not exist while the target is `down` or `unknown`, and it reaches back before the shown window when the target has been up that long. |
 | **Down episode** | One `down` transition and, if it happened, the transition back to `up`; its duration is the distance between the two, or from the transition to now while the target is still down. |

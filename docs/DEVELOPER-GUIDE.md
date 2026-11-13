@@ -69,7 +69,7 @@ network-monitor/
 │       ├── mod.rs        HTTP loop, routes, window parsing
 │       ├── page.rs       timeline page: HTML, SVG, shared stylesheet and scripts
 │       ├── detail.rs     detail page of one target: per-day chart and table
-│       ├── stats.rs      up runs, mean and spread, availability
+│       ├── stats.rs      up runs, mean and spread
 │       └── export.rs     the streamed gzipped CSV
 ├── tests/
 │   ├── config_precedence.rs  every key, file and flag, in both directions
