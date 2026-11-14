@@ -14,12 +14,6 @@ if (chart !== null) {
   }, true);
 }
 
-// The way back returns where the reader came from, so the window of the list is kept.
-const back = document.querySelector('.back-button');
-if (back !== null) {
-  back.addEventListener('click', () => history.back());
-}
-
 // Opens the standard message of a fault under its own row, one fault at a time. The button
 // carries `aria-expanded` and the message lives in a real row, so the table stays a table
 // for a screen reader; a browser without JavaScript keeps the `title`.

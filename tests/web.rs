@@ -497,8 +497,8 @@ fn every_row_shows_its_statistics_and_links_to_its_detail_page() {
         "the target is down, so there is no running up stretch to state"
     );
     assert!(
-        detail.contains("class=\"back-button\""),
-        "a way back to the timeline"
+        detail.contains("<a class=\"back-button\" href=\"/\">"),
+        "a way back to the timeline, whatever page the reader came from"
     );
     assert!(
         detail.find("class=\"back-button\"").unwrap() < detail.find("<svg").unwrap(),
@@ -584,7 +584,7 @@ fn the_page_context_and_its_selector_share_one_line() {
     let (status, detail) = server.get("/target?target=1.1.1.1");
     assert_eq!(status, 200);
     assert!(detail.contains("<div class=\"toolbar\">"));
-    assert!(detail.contains("<button class=\"back-button\">"));
+    assert!(detail.contains("<a class=\"back-button\" href=\"/\">"));
     assert!(
         !detail.contains("class=\"hint\""),
         "the masthead states the target, so the toolbar needs no address of its own"

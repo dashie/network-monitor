@@ -583,6 +583,10 @@ mod tests {
         );
         assert_eq!(rendered.matches("class=\"back-button\"").count(), 1);
         assert!(
+            rendered.contains("<a class=\"back-button\" href=\"/\">"),
+            "the way back is a link to the timeline, not a step into the history"
+        );
+        assert!(
             !rendered.contains("breadcrumb"),
             "breadcrumb should be removed"
         );

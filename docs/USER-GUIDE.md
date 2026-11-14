@@ -348,7 +348,8 @@ toolbar under it carries the control that changes what is shown.
 - `/target?target=<key>&days=30d` — one target for 30, 60, 90, 180, or 360 days: a bar per day,
   the last 10 faults of that target in the same table as the timeline page, and a per-day table.
   The masthead states the target at its right end: its label and address, then its status
-  (up/down + duration). A back button in the toolbar returns to the list page.
+  (up/down + duration). A back button in the toolbar always returns to the list page,
+  whatever page you came from.
 - `Download History` — the whole history as a gzipped CSV, from `/export/faults.csv.gz`. The
   address the page used before this version, `/export/disconnections.csv.gz`, still answers and
   redirects to it.
