@@ -9,11 +9,13 @@
 # The page is served by the monitor process itself, so one container records and
 # shows: see `--listen` in the command below.
 #
-# Targets are given on the command line rather than in a mounted file: with a
-# remote context a bind mount is resolved on the daemon's filesystem, not on the
-# machine running compose. To externalise the configuration later, mount it
-# read-only over /etc/network-monitor/config.toml and pass `--config` instead of
-# every `--target`.
+# The configuration is not a file on the host: it is the `content` of the
+# `monitor-config` config at the bottom of this file, mounted over the default one.
+# The content travels with the project — also when compose talks to a remote daemon —
+# so the image stays the generic one and no bind mount has to exist on the NAS. Edit
+# that block to change what is probed. Inline `content` needs Compose 2.23.3 or newer;
+# on an older Compose point `file:` at a checked-in TOML instead (both are copied to
+# the daemon).
 
 services:
   network-monitor:
@@ -47,28 +49,43 @@ services:
       # history survives `compose down` because the volume is named.
       - network-monitor-data:/var/lib/network-monitor
 
-    # Targets come from the command line and replace the configuration file, which
-    # is never read: without `--config` the monitor looks for ./network-monitor.toml,
-    # which does not exist in the image.
+    configs:
+      - source: monitor-config
+        target: /etc/network-monitor/config.toml
+
+    # The configuration comes from the mount above; `--listen` has no key in the file.
     command:
       - monitor
-      # Labels travel with the target: every transition rewrites the target row, so a
-      # label given only to an imported history is lost at the first live drop.
-      - --target
-      - 1.1.1.1,interface=eth1,label=cloudflare-dns
-      - --target
-      - 192.168.1.1,label=gateway
-      # One probe per second per target: a drop is noticed within the 2 s timeout that
-      # `network-monitor` uses by default, instead of within five seconds. The interval is
-      # the pause after a probe, so an answering target is probed every ~1 s and a silent
-      # one every ~3 s (2 s timeout + 1 s pause). Only transitions are written, so the
-      # database grows with incidents, not with probes.
-      - --interval-ms
-      - "1000"
-      - --database
-      - /var/lib/network-monitor/events.db
+      - --config
+      - /etc/network-monitor/config.toml
       - --listen
       - 0.0.0.0:8642
+
+configs:
+  monitor-config:
+    # One probe per second per target: a drop is noticed within the 2 s timeout that
+    # `network-monitor` uses by default, instead of within five seconds. The interval is
+    # the pause after a probe, so an answering target is probed every ~1 s and a silent
+    # one every ~3 s (2 s timeout + 1 s pause). Only transitions are written, so the
+    # database grows with incidents, not with probes.
+    #
+    # `database` must stay on the mounted volume, and labels travel with the target:
+    # every transition rewrites the target row, so a label given only to an imported
+    # history is lost at the first live drop.
+    content: |
+      interval_ms = 1000
+      timeout_ms = 2000
+      database = "/var/lib/network-monitor/events.db"
+      retention_days = 0
+
+      [[targets]]
+      ip = "1.1.1.1"
+      interface = "eth1"
+      label = "cloudflare-dns"
+
+      [[targets]]
+      ip = "192.168.1.1"
+      label = "gateway"
 
 volumes:
   # Explicit name: without it Compose prefixes the volume with the project name and

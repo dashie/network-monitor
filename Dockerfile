@@ -23,8 +23,16 @@ COPY --from=build /usr/local/bin/network-monitor /network-monitor
 
 # Default configuration: a bare `docker run` starts and probes the container's own
 # loopback, which proves the raw socket and the database work. Mount a file over this
-# path to monitor real targets.
-COPY docker/config.toml /etc/network-monitor/config.toml
+# path to monitor real targets, or bake your own file into the image — it travels with
+# the image, so no mount is needed wherever the image is loaded:
+#
+#   docker build --build-arg CONFIG=network-monitor.toml -t network-monitor:dev .
+#
+# The file must be inside the build context, and its `database` must point at the
+# mounted volume (`/var/lib/network-monitor/events.db`), otherwise the history stays in
+# the container layer.
+ARG CONFIG=docker/config.toml
+COPY ${CONFIG} /etc/network-monitor/config.toml
 
 # Raw ICMP sockets need NET_RAW and nothing else. Run the container as the default
 # user while dropping every other capability:

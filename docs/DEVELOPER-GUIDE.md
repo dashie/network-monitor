@@ -192,10 +192,10 @@ ssh admin@nas 'gzip -dc /share/Container/network-monitor-dev.tar.gz | docker loa
 ### Through compose, from the machine that holds the sources
 
 [docker-compose.yml](../docker-compose.yml) is the deployment: it builds the image,
-sets the capabilities, keeps host networking and the page port, and lists the targets
-on the command line. Nothing has to exist on the daemon before the first run — no
-configuration file, no volume, no image — so one command updates the NAS from the
-laptop, over the context:
+sets the capabilities, keeps host networking and the page port, and carries the whole
+configuration in its `configs` block. Nothing has to exist on the daemon before the
+first run — no configuration file, no volume, no image — so one command updates the NAS
+from the laptop, over the context:
 
 ```bash
 docker -c qubo compose up -d --build   # build on the NAS, recreate, start
@@ -204,8 +204,20 @@ docker -c qubo compose down            # stop and remove; the volume stays
 ```
 
 The build context is streamed to the daemon and only the changed layers are rebuilt,
-so a one-line source change costs seconds. Edit the `--target` entries in the `command`
-block to change what is probed. The history lives in the `network-monitor-data` volume
+so a one-line source change costs seconds.
+
+The configuration is the `content` of the `monitor-config` config, mounted over
+`/etc/network-monitor/config.toml`: compose copies it into the container when it starts
+it, so the content travels with the project and needs no file on the NAS. Edit that
+block to change the targets, the interval, the timeout, or the retention, then
+`compose up -d` — changed content recreates the container. Inline `content` needs
+Compose 2.23.3 or newer; on an older Compose, point `file:` at a TOML inside the project
+instead, which compose copies to the daemon the same way. `--listen` has no key in the
+file, which is why the command still passes it, and `--config` names the mounted path.
+
+On a NAS that holds no sources, drop `build:` and keep `image:` pointing at the image
+you loaded or pulled: the `configs` block is what carries the configuration, so the same
+YAML runs an image built anywhere. The history lives in the `network-monitor-data` volume
 and survives `down` and `up`.
 
 #### Rebuilding a project that is already running
@@ -229,11 +241,47 @@ container alone: it already matches the definition. That is the intended behavio
 previous section — `build`, `rm -f`, `run` — with stop, remove and create left to
 Compose.
 
-To externalise the configuration later, mount the file read-only over
-`/etc/network-monitor/config.toml` and pass `--config` instead of the `--target`
-entries; the file must then exist on the daemon host, because a bind mount is resolved
-there, not on the machine running compose. Host networking is Linux only, so the file
-is meant for the NAS, not for Docker Desktop on macOS.
+A file on the host is never needed. If you prefer to keep the configuration outside the
+compose file, mount it read-only over `/etc/network-monitor/config.toml` instead of the
+`configs` entry; a bind mount is resolved on the daemon host, not on the machine running
+compose, so that file has to exist on the NAS. Host networking is Linux only, so this
+project is meant for the NAS, not for Docker Desktop on macOS.
+
+### Baking the configuration into the image
+
+The compose route above is the one to prefer: the image stays generic. Baking is for the
+flows that carry an image and nothing else — a saved tar, a registry push, a container
+started without compose.
+
+The image carries one configuration at `/etc/network-monitor/config.toml`, and the
+`CONFIG` build argument chooses which file inside the build context becomes it. Bake
+your own file in and no bind mount is needed anywhere the image is loaded: the
+configuration travels inside the image, through a registry, a saved tar, or a build
+that runs on the NAS from a streamed context.
+
+```bash
+docker build --build-arg CONFIG=network-monitor.toml -t network-monitor:dev .
+docker -c qubo build --build-arg CONFIG=network-monitor.toml -t network-monitor:dev .
+```
+
+In compose, set the same argument and start the monitor from the baked path instead of
+the `--target` entries — flags override the file, so leaving both would silence the
+targets it lists:
+
+```yaml
+    build:
+      context: .
+      args:
+        CONFIG: network-monitor.toml
+    command: [monitor, "--config", "/etc/network-monitor/config.toml"]
+```
+
+Three conditions make a baked file work: it must sit inside the build context (the
+repository files are not excluded by [.dockerignore](../.dockerignore)), its `database`
+must point at the mounted volume (`/var/lib/network-monitor/events.db`), and its
+`[[targets]]` carry the interfaces by name. The configuration is then frozen in the
+image: editing it means rebuilding and redistributing the image, while the history in
+the volume is untouched.
 
 ### Without compose
 
