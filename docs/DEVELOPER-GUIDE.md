@@ -48,11 +48,18 @@ network-monitor/
 │   ├── config.rs         defaults, TOML loading, precedence, validation
 │   ├── logging.rs        line-based diagnostics on stderr
 │   ├── reload.rs         configuration file watcher
-│   ├── shutdown.rs       stop handle and signal handler
+│   ├── shutdown.rs       stop handle, signal handler, shutdown-aware pause
+│   ├── tls.rs            one TLS configuration shared by the HTTP probe and the notifier
 │   ├── time.rs           epoch milliseconds and RFC 3339 rendering
 │   ├── monitor/
 │   │   ├── mod.rs        interval loop per target, shutdown handling
 │   │   └── state.rs      transition decision from the previous state and the verdict
+│   ├── notify/
+│   │   ├── mod.rs        Notifier contract, queue hand-off, delivery thread, retries
+│   │   ├── policy.rs     per-target stabilisation: when a state is reported
+│   │   ├── queue.rs      bounded queue that drops the oldest message when full
+│   │   ├── telegram.rs   the HTTPS sendMessage client and its response classification
+│   │   └── fake.rs       deterministic sender and notifier for tests
 │   ├── probe/
 │   │   ├── mod.rs        Probe contract, Endpoint, Method, StatusMatch, Prober
 │   │   ├── icmp.rs       raw ICMP echo request and reply matching
@@ -82,6 +89,7 @@ network-monitor/
 │   ├── cli.rs                exit codes and query output
 │   ├── web.rs                page, faults table, detail page, no writes
 │   ├── import.rs             export round trip, plain CSV, stdin, URL, duplicates
+│   ├── notify.rs             notifier with a fake sender: down, window, flap, retry
 │   └── icmp_privileged.rs    real raw-socket probe, ignored unless root
 ├── assets/icon/          application icon: SVG master, its PNG renders, the favicon
 ├── docs/                 product, architecture, decisions, glossary, developer guide
@@ -531,6 +539,7 @@ interface and one container per interface, leaving `interface` unset: each conta
 cargo test
 cargo test --test monitor_e2e
 cargo test --test reload
+cargo test --test notify
 cargo test --test store
 cargo test --test web
 ```
@@ -560,7 +569,7 @@ cargo clippy --all-targets -- -D warnings
 ### Adding a configuration option
 
 1. Add the field to `Config` with its default expressed in `Default`.
-2. Add the matching `clap` argument in `cli.rs`; there is no option without a flag (INV-2).
+2. Add the matching `clap` argument in `cli.rs`; there is no option without a flag (INV-2). The one deliberate exception is a secret: the `[telegram]` section of `FR-25` is read from the file only, and every rendering of its bot token reads `<redacted>` in `Debug`, `to_toml`, and every error string (ADR-0027). Never add a flag, an environment variable, or a log line for a secret.
 3. Apply the merge in `config.rs`, which is the only place that knows the precedence order.
 4. Decide whether the value applies to a running monitor: if it does, apply it in `Supervisor::apply` and cover it in `tests/reload.rs`; if it needs a restart, warn there instead.
 5. Document the key in `network-monitor.toml`, in the README example, and in [PRODUCT.md](./PRODUCT.md) when it changes behaviour.
@@ -620,6 +629,7 @@ alternatives and the effect on the static build (ADR-0024 is the example).
 1. Put the test next to the module for unit-level checks and in `tests/` for cross-module contracts.
 2. Never open a raw socket in a test: use `probe::fake`, and a temporary database from `tempfile`.
 3. Keep the test deterministic: inject the clock or assert on monotonic ordering instead of wall time.
+4. Test the notifier without the network: `notify::start_with` takes a `notify::fake::FakeSender`, which replays scripted outcomes and records every text it was given, and `notify::fake::FakeNotifier` records what a monitor handed it. The policy needs no clock either, because it reads the `Instant` carried by the `Notification`.
 
 <!-- skill:block:devguide-design-rules section="## Extending the project" -->
 ### Design rules

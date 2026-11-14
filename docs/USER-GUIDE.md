@@ -222,6 +222,76 @@ configuration error; the same host checked by two methods, or on two ports, is t
 A URL with the default port states it once — `https://example.com:443/` is the same key as
 `https://example.com/`.
 
+### Telegram notifications
+
+The tool can post one message per incident to a Telegram chat. The feature is opt-in: without
+the section nothing is sent and the process opens no connection other than its probes.
+
+`[telegram]` is a single global section of the file, and it is the one documented exception to
+the rule that every key has a command-line flag: the bot token is a secret, so it is read from
+the file only.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `bot_token` | — | Required. The token Telegram issued for the bot |
+| `chat_id` | — | Required. The chat or channel the messages go to, e.g. `-1001234567890` |
+| `stabilize_seconds` | `60` | How long `up` must hold before a recovery is reported; `0` reports it at once |
+
+```toml
+[telegram]
+bot_token = "123456789:replace-me"
+chat_id = "-1001234567890"
+stabilize_seconds = 60
+```
+
+Setting it up, from an empty Telegram account:
+
+1. Talk to **@BotFather**, send `/newbot`, choose a name and a user name, and copy the token it
+   answers with. Treat that token like a password.
+2. Add the bot to the channel or group that should receive the messages, and make it an
+   **administrator**: a bot cannot post to a channel otherwise.
+3. Find the `chat_id`: post a message in the channel and open
+   `https://api.telegram.org/bot<token>/getUpdates` in a browser. For a channel post the id is
+   in `channel_post.chat.id` and starts with `-100`; a private chat has a positive id. An empty
+   answer means the bot has not seen a message yet.
+4. Write the section into the configuration file, `chmod 600` it, and restart the monitor.
+5. Check the channel: the first probe of every target reports its observed state, so a target
+   that answers produces one `UP` message, held by the stabilisation window.
+
+What is sent, and when:
+
+- A target stops answering: one `DOWN` message at once, with the cause as a code and a sentence.
+- A target answers again: one `UP` message only after `up` has held continuously for
+  `stabilize_seconds`. A target that drops again inside that window produces no message at all,
+  because the operator was already told it is down.
+- After an `UP` message, the next drop is a new `DOWN`. A repeated `DOWN` in the same incident is
+  silent, so a flapping link cannot flood the chat even when the interval is a few seconds.
+- A restart reports the first observed state under the same rules; the tool keeps no
+  notification state between runs.
+
+The message is plain text with a fixed layout — state, label and key, cause, UTC instant:
+
+```text
+DOWN cloudflare-dns (icmp://1.1.1.1)
+Cause: ICMP.NO_REPLY — no reply within 2000 ms
+2025-11-24T16:00:00.000Z
+```
+
+An `UP` message is the first and the last line; a target without a label shows only its key;
+only a `DOWN` carries a cause.
+
+A failed delivery is attempted five times, waiting 1, 2, 4, and 8 seconds, and then dropped
+with one `WARN` line naming the reason. A `400` or `401` answer is not retried, because the
+token or the chat cannot be fixed by waiting. Notification never delays a probe and never changes
+what is recorded: the database remains the history, the channel is a copy of it.
+
+A changed `[telegram]` section is reported on stderr and applied at the next start, exactly like
+a changed `database` path. The bot token never appears in `--show-config` (which prints
+`<redacted>`), in a log line, or in an error message.
+
+The failure modes of the Bot API — the answer Telegram returns, and whether it is retried —
+are listed in [Troubleshooting](#troubleshooting), later in this guide.
+
 ## Command line
 
 | Flag | Meaning |
@@ -377,6 +447,9 @@ snapshot, a backup, or a volume mounted read-only.
 | A `dns` target without `resolver` flaps | The system resolver is unreachable and the platform reports it as a missing name. Use `dns://name@server`. |
 | An `http` target is always `down` while `curl` works | The status is outside `expect_status` (a 3xx below the default? a 401?), or a TLS-inspecting proxy is at work and its root is not in the binary. |
 | The page shows two lanes for one host | The database carries both a bare address and its `icmp://` key (an older binary wrote after the rewrite). Import a backup or merge the rows. |
+| The Telegram channel stays silent | Check, in this order: the section is present and parses (`--show-config` prints it with `<redacted>`); the bot is an **administrator** of the channel, not merely a member; `chat_id` copies `channel_post.chat.id` and starts with `-100`; the log shows no `WARN notification attempt …` line. A `400 Bad Request: chat not found` is a wrong `chat_id`; `401 Unauthorized` a revoked token; `429` too many messages at once. |
+| A `WARN notification attempt 1/5 failed` line repeats five times | The channel is unreachable or rejecting the call. The reason on the line names the answer of the Bot API without the token; `--log-level debug` adds nothing, because a failed send is always a warning. The event history is unaffected — read it with `query events`. |
+| No `UP` message arrives after an outage while the page shows the target up | The recovery is still inside the stable `up` window (`stabilize_seconds`, 60 s by default). Wait for the window to close; a drop inside it cancels the message by design. |
 
 ## Limits and deliberate choices
 

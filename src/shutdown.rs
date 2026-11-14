@@ -6,6 +6,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// A stop switch. Cloning it shares the same state with every clone.
 #[derive(Clone, Debug, Default)]
@@ -37,6 +38,20 @@ pub fn signalled() -> bool {
 /// True when a signal or an explicit request asked the process to stop.
 pub fn stopped(shutdown: &Shutdown) -> bool {
     shutdown.requested() || signalled()
+}
+
+/// Sleep, but wake up promptly when a shutdown is requested.
+pub fn pause(duration: Duration, shutdown: &Shutdown) {
+    const STEP: Duration = Duration::from_millis(100);
+    let mut remaining = duration;
+    while !remaining.is_zero() {
+        if stopped(shutdown) {
+            return;
+        }
+        let slice = remaining.min(STEP);
+        std::thread::sleep(slice);
+        remaining -= slice;
+    }
 }
 
 /// Install the handlers that translate an interrupt into a clean stop (FR-11).

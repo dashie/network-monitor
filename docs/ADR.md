@@ -38,6 +38,7 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0024 | Use rustls, a hand-written DNS codec and socket2 instead of an async stack | accepted | 2026-11-14 | `ring` provider with embedded roots, one UDP question decoded here, `socket2` for interface-bound TCP |
 | ADR-0025 | Give every failure a code and a message, record the cause of a fault, and call the rows faults | accepted | 2026-11-14 | `probe::failure` holds the closed set of codes and one template each; schema version 2 adds `cause` and `cause_message`; the CSV grows two trailing columns and `/export/faults.csv.gz` replaces `/export/disconnections.csv.gz`, which answers `308` |
 | ADR-0026 | Expose the host personal skills read-only instead of copying them | accepted | 2026-11-14 | One read-only bind of `~/.copilot/skills` onto the same path; nothing else from the host home |
+| ADR-0027 | Notify state changes over Telegram, with a stabilisation window and a dedicated delivery thread | accepted | 2026-11-14 | Global `[telegram]` section read from the file only, token redacted everywhere; one message per incident; bounded queue and five attempts off the probe path |
 
 ## Records
 
@@ -1008,3 +1009,96 @@ home directory" guarantee of the isolation model.
   source instead of failing, and the symptom is silently missing skills.
   `${localEnv:HOME}` is resolved on the client, so an unset `HOME` produces the same
   symptom. The runbook checks the source before starting the container.
+
+## ADR-0027 — Notify state changes over Telegram, with a stabilisation window and a dedicated delivery thread
+
+**Status:** accepted · **Date:** 2026-11-14
+
+### Context
+
+The tool records exactly the moment a target changes state, and the operator learns
+about it only by opening the page or querying the database. The signal is already
+precise; what is missing is a push. The alternatives were an external script polling
+the SQLite file and a full uptime platform, and the project exists to avoid both.
+
+A naive push is worse than none. With an interval of a few seconds an unstable link
+produces one message per probe, and the operator mutes the channel — losing the
+outage that mattered. What is wanted is one message per incident, and a recovery
+statement only when the recovery is real.
+
+Two constraints shape the decision. The token of a Telegram bot is a credential, so
+it must never be printed and it must never be typed on a command line that ends up in
+a shell history or a process list. And a notification must never be able to delay a
+probe or change the record: `INV-1`, `INV-5` and `INV-7` stay what they are.
+
+### Decision
+
+1. One optional, global `[telegram]` section: `bot_token`, `chat_id`, and
+   `stabilize_seconds` (default 60, `0` reports a recovery at once). Without the
+   section the binary behaves exactly as before and opens no connection beyond its
+   probes. Recording, the schema, the query command and the page are untouched.
+2. The section is read from the file only, with no flag and no environment variable.
+   This is a deliberate, documented exception to `FR-2` and to `ADR-0005`, taken
+   because the token is a secret. `Config` and the client redact it in `Debug`,
+   `--show-config` prints `<redacted>`, and no error string ever contains the request
+   path, so a `WARN` line is safe to paste into an issue.
+3. A recorded `down` is reported immediately, with the target, the instant, and the
+   code and message of the cause — the pair `ADR-0025` introduced. A recorded `up` is
+   held by a per-target policy and reported only after `up` has held continuously for
+   the window; a `down` inside the window cancels it and reports nothing, because the
+   operator was already told the target was down. After a notified `up`, the next
+   `down` is a new incident.
+4. Telegram, not a webhook and not a shell hook: one fixed host over TLS with the roots
+   compiled into the binary (`ADR-0024`), no inbound port, no user-supplied URL, no
+   command executed from the configuration. Delivery is a `POST` of a
+   `x-www-form-urlencoded` body to `api.telegram.org`.
+5. The decision runs on the delivery thread, not in the probe loop. Workers hand a
+   `Notification` to a bounded queue of 32 messages that drops the oldest instead of
+   blocking; the thread applies the policy and sends. A `up` therefore closes its
+   window even when the target is probed once every five minutes. One message is
+   attempted five times, waiting 1, 2, 4 and 8 seconds, then dropped with one `WARN`;
+   a non-retryable answer stops at once.
+6. The notifier state is not persisted. A restart reports the first observed state
+   under the same rules, which the operator asked for; there is no outbox and no
+   catch-up of messages missed while the process was down.
+7. A reload never restarts the notifier: a changed `[telegram]` section is reported
+   and takes effect from the next start, exactly like a changed database path. The
+   per-target windows therefore survive a reload.
+
+### Consequences
+
+- The process gains one optional outbound dependency. `INV-12` states the limit: a
+  notification is never a condition of recording, and a delivery failure never changes
+  a stored event. The monitor calls the notifier only after `record_transition`
+  returned, and the notifier has no access to the store.
+- The message is plain text with a fixed layout — state, label and key, cause,
+  RFC 3339 instant — so no template configuration is needed and the reader can grep a
+  channel by code.
+- Per-target settings, quiet hours, and an alternative transport are not supported by
+  design: the database stays the integration point for everything else.
+- A lost message is not remembered. The state machine records the attempt, so the
+  "one `down` per incident" rule holds across a failed delivery, and repairing a
+  channel means reading the history.
+- The token lives in clear text in the file the operator controls; the runbook asks
+  for mode `0600` and gives the BotFather revocation as the recovery.
+
+### Alternatives considered
+
+- **Blocking the probe loop on the send.** Rejected: one slow or unavailable endpoint
+  would delay every probe of that target and break the interval contract.
+- **A generic webhook or a command hook.** Rejected: a URL or a command from the
+  configuration is an arbitrary outbound request or an arbitrary execution, and both
+  need a surface this project refuses to have. Telegram gives one fixed host and a
+  credential the operator can revoke.
+- **Mail (SMTP).** Rejected: a second protocol, authentication, and a delivered-versus-
+  accepted ambiguity for no gain over a chat.
+- **Persisting the notification state, or an outbox in the database.** Rejected: a
+  second source of truth, a schema change, and a queue that grows while the channel is
+  broken.
+- **`stabilize_seconds` as a command-line flag.** Rejected together with the rest of
+  the section: one key of a secret-bearing section on the command line is a leak, and
+  a section that is half overridable is worse than one that is not.
+- **A second endpoint for retries with a longer backoff.** Rejected: five attempts
+  cover the load-shedding answer of the Bot API, and a sixth variant of the retry loop
+  would be complexity without a requirement.
+

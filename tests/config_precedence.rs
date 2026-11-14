@@ -23,6 +23,7 @@ fn file_config() -> FileConfig {
             label: Some("from-file".to_string()),
             ..FileTarget::default()
         }]),
+        ..FileConfig::default()
     }
 }
 

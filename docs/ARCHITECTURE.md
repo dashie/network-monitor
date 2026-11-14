@@ -25,6 +25,7 @@ Top quality goals, in order:
 - **Filesystem.** The SQLite file must live on a local filesystem; WAL on SMB or NFS shares is not supported and is documented as such.
 - **Synchronous design.** No async runtime, no daemon framework, no plugin system. Threads are used per target, and that is the whole concurrency model.
 - **No listening socket.** The process opens no port; the only integration surface is the SQLite file and the query command.
+- **One optional egress.** Outbound traffic is the probes plus, only when the `[telegram]` section of the configuration exists, one HTTPS connection to `api.telegram.org`. There is no proxy, no second host, and no way to disable certificate verification; without the section the process makes no connection other than its probes.
 - **Language of the repository.** English only, for every artefact.
 
 ## 3. Context and scope
@@ -40,12 +41,14 @@ C4Context
     System_Ext(os, "Operating system", "Provides raw ICMP sockets, the routing table, and interface binding")
     System_Ext(runtime, "Container runtime", "Runs the image on a NAS or server, granting NET_RAW")
     System_Ext(consumer, "Query consumer", "Reads the event database through the query command or any SQLite client")
+    System_Ext(telegram, "Telegram Bot API", "Receives one message per incident when the channel is enabled")
 
     Rel(operator, monitor, "Runs and configures", "CLI + TOML")
     Rel(operator, consumer, "Runs queries", "CLI")
     Rel(runtime, monitor, "Launches", "Docker")
     Rel(monitor, os, "Opens raw sockets, binds an interface", "syscalls")
     Rel(monitor, hosts, "Sends echo requests, receives replies", "ICMP")
+    Rel(monitor, telegram, "Posts a state change, only with a [telegram] section", "HTTPS")
     Rel(monitor, consumer, "Exposes the event database", "SQLite WAL")
 ```
 
@@ -56,6 +59,7 @@ C4Context
 | Operating system | Raw socket capability, routing table, interface list, clock | Socket creation and bind calls, packets |
 | Container runtime | Process launch, `NET_RAW` capability, mounted configuration and volume | Exit status, log stream |
 | Query consumer | Read-only SQL or `query` invocations | Rows and reports |
+| Telegram Bot API | The result of one `sendMessage` call: `ok` or an error description | One HTTPS request per reported state change, and only when the channel is enabled |
 
 Trust boundaries: the database file is written only by the `monitor` process and read by anyone with filesystem access to it; the raw socket capability is the only privileged operation. No external service is trusted and none is required.
 
@@ -69,6 +73,7 @@ Trust boundaries: the database file is written only by the `monitor` process and
 - **Thread per target, shared store.** Each target runs its own interval loop; transitions are serialized through one SQLite writer connection, guarded by a mutex.
 - **WAL for concurrent reads.** `journal_mode = WAL` with `synchronous = NORMAL` and a 5 s `busy_timeout` lets the query process read while the monitor writes.
 - **Supervised reload.** The supervisor owns the set of workers and compares the configuration file content once per second. A valid change restarts the workers with the new target list, interval, and timeout, keeps the database it already opened, and logs one `INFO` line.
+- **Optional push channel off the probe path.** `notify` owns the decision and the delivery of a message. A worker hands it a recorded transition and moves on; a dedicated thread applies the per-target policy — `down` at once, `up` only after a stable `up` window — and delivers over Telegram with a bounded retry. The monitor knows only the `Notifier` contract, so recording never waits for a send and a failed send never changes a stored event.
 - **Read-only page generated server-side.** `web` answers `/` with HTML and SVG built in Rust from the same timeline query the CLI uses, and `/target` with one bar per day and the same days in a table for a single target. One small HTTP/1.1 loop, no framework, no client-side chart library and no client-side chart state: the browser reloads the page every 30 s and asks for nothing else. The same code serves while the monitor runs (`monitor --listen`) and without probing (`serve`), so a page and the recording share one process when both are wanted.
 
 <!-- skill:block:arch-principles section="## 4. Solution strategy" -->
@@ -117,7 +122,8 @@ C4Container
 | `probe::icmp`, `probe::tcp`, `probe::dns`, `probe::http` | One transport each: an echo request, a TCP connect, a DNS question, an HTTP request | `IcmpProbe`, `TcpProbe`, `DnsProbe`, `HttpProbe` |
 | `probe::failure` | The vocabulary of a failure: the closed set of codes, the details a message may insert, and the template of each code | `Code`, `Details`, `Failure` |
 | `probe::interface` | Validate an interface name and bind a socket to it | `validate`, `bind_socket` per platform |
-| `monitor` | Supervise one interval loop per target, decide whether a transition occurred, reload the configuration file, dispatch transitions to the store | `run(config, prober, store, shutdown, reload)` |
+| `monitor` | Supervise one interval loop per target, decide whether a transition occurred, reload the configuration file, dispatch transitions to the store | `run(config, prober, store, shutdown, reload)`, `run_with_notifier(…)` |
+| `notify` | Decide which state changes are reported, hold the stable `up` window, and deliver the messages off the probe path | `Notifier`, `Notification`, `Engine`, `start`, `start_with`, `deliver` |
 | `reload` | Compare the configuration file with the last accepted content and report a change | `Watcher`, `Change`, `POLL_INTERVAL` |
 | `web` | Serve the read-only timeline, the per-target detail page, and a health check | `bind`, `serve`, `page`, `target_page` |
 | `store` | Own the schema, migrations, the event write transaction, retention, and the read queries | `Store`, `Event`, `TargetState`, `Fault`, `ExportedEvent`, `StoreError` |
@@ -155,6 +161,12 @@ C4Container
 - **Input:** the effective configuration, a `Probe` implementation, a `Store`, a `Shutdown` handle, and optionally the path to re-read.
 - **Output:** database writes, log lines, and a process exit status.
 - **Guarantees:** at most one in-flight probe per target; a transition is written at most once per cycle; shutdown on `SIGINT` or `SIGTERM` happens between two cycles, never inside a transaction; a reload is applied only when the new file parses and resolves to at least one target, and the database path in use never changes at runtime.
+
+### `notify`
+
+- **Input:** a `Notification` for every recorded transition, and the resolved `[telegram]` settings when the section exists.
+- **Output:** one Telegram message per reported state change, or a `WARN` line when a message is lost.
+- **Guarantees:** the decision is per target and lives in `notify::policy`, free of I/O: `down` is reported at once unless the last reported state was already `down`, `up` is reported only after `stabilize_seconds` of continuous `up`, and a `down` inside that window cancels it. Delivery runs on its own thread behind a bounded queue of 32 messages that drops the oldest instead of blocking a probe; one message is attempted five times, waiting 1, 2, 4, and 8 seconds, and a non-retryable answer or a shutdown stops the retries at once. A notification is never a condition of recording (INV-12), and the bot token never reaches a log line, an error message, or `--show-config`. The section is read when the delivery thread starts; a reload that changes it is reported and ignored until the next start.
 
 ### `reload`
 
@@ -277,15 +289,15 @@ Line-based output on stderr, never stdout: stdout carries only query results, so
 
 ### Security
 
-The only privileged operation is opening the raw socket; the container keeps only `NET_RAW` and drops everything else. The database is created with mode `0600`. The configuration may contain addresses and interface names but no secret. Probes are generated by this process, so no input from the network is parsed as a command.
+The only privileged operation is opening the raw socket; the container keeps only `NET_RAW` and drops everything else. The database is created with mode `0600`. The configuration may contain addresses, interface names, and — only when the operator enables the Telegram channel — one secret, the bot token, which is read from the file alone, printed as `<redacted>` by `--show-config`, and kept out of every log line and error message. Probes are generated by this process, so no input from the network is parsed as a command; a Telegram answer is bounded at 8 KiB and only pattern-matched for its result.
 
 `web` is the only component that listens, and only when `--listen` is given. It answers `GET` and `HEAD` on a fixed set of paths — the timeline, the detail page, the streamed export, the health check, and the icon — escapes every dynamic value, sets `nosniff` and `no-store`, and never writes. It has **no authentication**: the default bind of `serve` is `127.0.0.1`, the monitor binds nothing unless asked, and exposing the page on a LAN is a deliberate operator decision that must be paired with a firewall rule. The export path is a bulk read of the whole history, so a firewall rule protects the contents of the database as much as the page itself.
 
 ### Configuration
 
-Three layers merged in a fixed order: built-in defaults, TOML file, command line. The result is validated once and printed by `--show-config`. Keys are stable; a removed key is a breaking change recorded in [ADR.md](./ADR.md). The annotated example lives in [README.md](../README.md#quick-start).
+Three layers merged in a fixed order: built-in defaults, TOML file, command line. The result is validated once and printed by `--show-config`. Keys are stable; a removed key is a breaking change recorded in [ADR.md](./ADR.md). The annotated example lives in [README.md](../README.md#quick-start). The `[telegram]` section is the one documented exception to the command-line layer: its token is a secret, so it is read from the file only (ADR-0027).
 
-While monitoring runs, the file is polled once per second and a valid change is applied to the interval, timeout, target list, and retention, keeping the command line overrides on top (INV-2). An unreadable, unparseable, or target-less file is rejected with a warning and the running configuration stays active (INV-9). A changed `database` is reported and takes effect only at the next start.
+While monitoring runs, the file is polled once per second and a valid change is applied to the interval, timeout, target list, and retention, keeping the command line overrides on top (INV-2). An unreadable, unparseable, or target-less file is rejected with a warning and the running configuration stays active (INV-9). A changed `database` path, and a changed `[telegram]` section, are reported and take effect only at the next start.
 
 ### Data ownership
 
@@ -345,3 +357,4 @@ enforced or verified.
 - `INV-9`: A configuration file that cannot be read, does not parse, or resolves to no targets never changes the running configuration and never stops monitoring. Enforced by the supervisor, verified by `tests/reload.rs`.
 - `INV-10`: The web page never writes: every request opens the database read-only and issues only `SELECT` statements, a database one version behind being read with `NULL` in place of the columns it lacks. Enforced by the `store` read-only open, which never migrates, rewrites, or repairs, verified by `tests/web.rs` and by the store tests that a read-only open leaves the schema and the history as they are.
 - `INV-11`: A process opens at most one listener, and only when `--listen` is given; `monitor --listen` binds it before the first probe and stops it with the monitor. Enforced by the single call to `web::bind`, verified by the CLI and web tests.
+- `INV-12`: A notification is never a condition of recording, and a delivery failure never changes a stored event. Enforced by the monitor notifying only after `record_transition` returned, and by the notifier having no access to the store, verified by `tests/monitor_e2e.rs` (one notification per recorded transition, none for a local probe error) and by `tests/notify.rs` (a failed send leaves the sequence intact).

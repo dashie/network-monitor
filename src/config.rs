@@ -23,6 +23,10 @@ pub const DEFAULT_INTERVAL_MS: u64 = 5_000;
 pub const DEFAULT_TIMEOUT_MS: u64 = 2_000;
 pub const DEFAULT_DATABASE: &str = "network-monitor.db";
 pub const DEFAULT_RETENTION_DAYS: u64 = 0;
+pub const DEFAULT_STABILIZE_SECONDS: u64 = 60;
+
+/// What every rendering of the bot token shows instead of the secret.
+pub const REDACTED_TOKEN: &str = "<redacted>";
 
 /// The ways a target can be checked.
 const METHODS: [&str; 4] = ["icmp", "tcp", "dns", "http"];
@@ -36,7 +40,24 @@ pub struct FileConfig {
     pub timeout_ms: Option<u64>,
     pub database: Option<String>,
     pub retention_days: Option<u64>,
+    pub telegram: Option<FileTelegram>,
     pub targets: Option<Vec<FileTarget>>,
+}
+
+/// The `[telegram]` section as written on disk.
+///
+/// The section is the only source of these settings: there is no flag and no
+/// environment variable, because the bot token is a secret (ADR-0026).
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FileTelegram {
+    /// The secret of the bot; it travels in the request path, so it may not contain
+    /// whitespace or a path separator.
+    pub bot_token: Option<String>,
+    /// The chat or channel the messages are posted to.
+    pub chat_id: Option<String>,
+    /// How long `up` must hold before a recovery is reported; `0` reports it at once.
+    pub stabilize_seconds: Option<u64>,
 }
 
 /// One `[[targets]]` entry of the configuration file.
@@ -362,7 +383,28 @@ pub struct Config {
     pub timeout: Duration,
     pub database: PathBuf,
     pub retention_days: u64,
+    pub telegram: Option<Telegram>,
     pub targets: Vec<Target>,
+}
+
+/// The effective notification settings: where to post, and how long `up` must hold.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Telegram {
+    pub bot_token: String,
+    pub chat_id: String,
+    pub stabilize: Duration,
+}
+
+/// The token is a secret: it must never reach a log line through a derived `Debug`.
+impl std::fmt::Debug for Telegram {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Telegram")
+            .field("bot_token", &REDACTED_TOKEN)
+            .field("chat_id", &self.chat_id)
+            .field("stabilize", &self.stabilize)
+            .finish()
+    }
 }
 
 /// Command-line values that override the file. `None` means "not given".
@@ -487,12 +529,14 @@ impl Config {
             .map(|(index, spec)| Target::resolve(spec, index, timeout, interval))
             .collect::<Result<Vec<_>, _>>()?;
         ensure_unique(&targets)?;
+        let telegram = resolve_telegram(file.telegram)?;
 
         Ok(Config {
             interval,
             timeout,
             database,
             retention_days,
+            telegram,
             targets,
         })
     }
@@ -518,7 +562,16 @@ impl Config {
             timeout_ms: u64,
             database: String,
             retention_days: u64,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            telegram: Option<SerializableTelegram>,
             targets: Vec<SerializableTarget>,
+        }
+
+        #[derive(Serialize, Default)]
+        struct SerializableTelegram {
+            bot_token: String,
+            chat_id: String,
+            stabilize_seconds: u64,
         }
 
         #[derive(Serialize, Default)]
@@ -599,6 +652,11 @@ impl Config {
             timeout_ms: self.timeout.as_millis() as u64,
             database: self.database.to_string_lossy().into_owned(),
             retention_days: self.retention_days,
+            telegram: self.telegram.as_ref().map(|telegram| SerializableTelegram {
+                bot_token: REDACTED_TOKEN.to_string(),
+                chat_id: telegram.chat_id.clone(),
+                stabilize_seconds: telegram.stabilize.as_secs(),
+            }),
             targets,
         };
 
@@ -741,6 +799,32 @@ fn ensure_unique(targets: &[Target]) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// Turn the raw section into the effective settings, or `None` when it is absent.
+fn resolve_telegram(file: Option<FileTelegram>) -> Result<Option<Telegram>, ConfigError> {
+    let Some(file) = file else {
+        return Ok(None);
+    };
+
+    // The token travels in the request path, so a separator would change the request.
+    let bot_token = required(file.bot_token.as_deref(), "telegram.bot_token")?;
+    if bot_token
+        .chars()
+        .any(|character| character.is_whitespace() || matches!(character, '/' | '?' | '#'))
+    {
+        return Err(invalid(
+            "telegram.bot_token",
+            "must not contain whitespace, '/', '?' or '#'",
+        ));
+    }
+    let chat_id = required(file.chat_id.as_deref(), "telegram.chat_id")?;
+
+    Ok(Some(Telegram {
+        bot_token: bot_token.to_string(),
+        chat_id: chat_id.to_string(),
+        stabilize: Duration::from_secs(file.stabilize_seconds.unwrap_or(DEFAULT_STABILIZE_SECONDS)),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -755,6 +839,21 @@ mod tests {
             targets: Some(targets),
             ..FileConfig::default()
         }
+    }
+
+    fn file_with_telegram(telegram: FileTelegram) -> FileConfig {
+        FileConfig {
+            telegram: Some(telegram),
+            ..FileConfig::default()
+        }
+    }
+
+    fn with_telegram(token: &str, chat_id: &str, stabilize_seconds: Option<u64>) -> FileConfig {
+        file_with_telegram(FileTelegram {
+            bot_token: Some(token.to_string()),
+            chat_id: Some(chat_id.to_string()),
+            stabilize_seconds,
+        })
     }
 
     fn icmp(ip: &str) -> FileTarget {
@@ -1063,6 +1162,98 @@ mod tests {
         assert_eq!(again.targets[0].timeout, Duration::from_millis(1_500));
         assert_eq!(again.targets[1].endpoint, config.targets[1].endpoint);
         assert_eq!(again.targets[2].endpoint, config.targets[2].endpoint);
+    }
+
+    #[test]
+    fn the_rendered_configuration_redacts_the_token() {
+        let config = resolve(Some(with_telegram("123456:secret", "-100200", None)));
+
+        let text = config.to_toml();
+        assert!(!text.contains("secret"), "the token leaked: {text}");
+        assert!(text.contains(REDACTED_TOKEN), "unexpected: {text}");
+        assert!(text.contains("chat_id = \"-100200\""), "unexpected: {text}");
+
+        // The round trip keeps everything except the secret, which reads the placeholder.
+        let parsed = parse(&text, Path::new("roundtrip.toml")).unwrap();
+        assert_eq!(
+            parsed.telegram.as_ref().unwrap().bot_token.as_deref(),
+            Some(REDACTED_TOKEN)
+        );
+        assert_eq!(
+            parsed.telegram.as_ref().unwrap().chat_id.as_deref(),
+            Some("-100200")
+        );
+    }
+
+    #[test]
+    fn a_telegram_section_is_resolved() {
+        let config = resolve(Some(with_telegram("123456:abc-def", "-100200", Some(15))));
+        let telegram = config.telegram.expect("the section is present");
+        assert_eq!(telegram.bot_token, "123456:abc-def");
+        assert_eq!(telegram.chat_id, "-100200");
+        assert_eq!(telegram.stabilize, Duration::from_secs(15));
+    }
+
+    #[test]
+    fn a_telegram_section_defaults_to_a_minute_and_accepts_zero() {
+        let default = resolve(Some(with_telegram("123456:abc-def", "-100200", None)));
+        assert_eq!(
+            default.telegram.unwrap().stabilize,
+            Duration::from_secs(DEFAULT_STABILIZE_SECONDS)
+        );
+
+        let immediate = resolve(Some(with_telegram("123456:abc-def", "-100200", Some(0))));
+        assert_eq!(immediate.telegram.unwrap().stabilize, Duration::ZERO);
+    }
+
+    #[test]
+    fn an_absent_telegram_section_configures_nothing() {
+        assert!(resolve(None).telegram.is_none());
+    }
+
+    #[test]
+    fn a_telegram_section_missing_a_key_is_named() {
+        let no_token = Config::resolve(
+            Some(file_with_telegram(FileTelegram {
+                chat_id: Some("-100200".to_string()),
+                ..FileTelegram::default()
+            })),
+            overrides(),
+        )
+        .unwrap_err();
+        assert!(no_token.to_string().contains("telegram.bot_token"));
+
+        let no_chat = Config::resolve(
+            Some(file_with_telegram(FileTelegram {
+                bot_token: Some("123456:abc-def".to_string()),
+                ..FileTelegram::default()
+            })),
+            overrides(),
+        )
+        .unwrap_err();
+        assert!(no_chat.to_string().contains("telegram.chat_id"));
+    }
+
+    #[test]
+    fn a_token_with_a_path_separator_is_refused() {
+        for token in ["123/456", "123?456", "123#456", "123 456"] {
+            let error = Config::resolve(Some(with_telegram(token, "-100200", None)), overrides())
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("telegram.bot_token"),
+                "{token}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_debug_form_of_the_section_hides_the_token() {
+        let telegram = resolve(Some(with_telegram("123456:secret", "-100200", None)))
+            .telegram
+            .unwrap();
+        let rendered = format!("{telegram:?}");
+        assert!(!rendered.contains("secret"), "the token leaked: {rendered}");
+        assert!(rendered.contains(REDACTED_TOKEN), "unexpected: {rendered}");
     }
 
     #[test]

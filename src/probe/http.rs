@@ -5,11 +5,11 @@
 
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustls::pki_types::ServerName;
-use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
+use rustls::{ClientConnection, StreamOwned};
 
 use super::{Code, Details, Endpoint, Failure, Probe, ProbeError, Scheme, Verdict};
 
@@ -372,7 +372,15 @@ fn tls(
     tcp: TcpStream,
     venue: Venue<'_>,
 ) -> Result<StreamOwned<ClientConnection, TcpStream>, Unreachable> {
-    let config = tls_config()?;
+    let config = crate::tls::config().map_err(|reason| {
+        Unreachable::Local(ProbeError::of(
+            Code::HttpTlsInit,
+            &Details {
+                reason: Some(&reason),
+                ..Details::default()
+            },
+        ))
+    })?;
     let server_name = ServerName::try_from(venue.host.to_string()).map_err(|_| {
         Unreachable::Local(ProbeError::of(
             Code::HttpTlsInit,
@@ -399,31 +407,6 @@ fn tls(
             .map_err(|error| handshake(&error, venue))?;
     }
     Ok(StreamOwned::new(connection, tcp))
-}
-
-/// The TLS configuration, built once: verification against the embedded roots, HTTP/1.1 only.
-fn tls_config() -> Result<&'static Arc<ClientConfig>, Unreachable> {
-    static CONFIG: OnceLock<Result<Arc<ClientConfig>, String>> = OnceLock::new();
-    CONFIG
-        .get_or_init(|| {
-            let mut roots = RootCertStore::empty();
-            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-            let mut config = ClientConfig::builder()
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-            config.alpn_protocols = vec![b"http/1.1".to_vec()];
-            Ok(Arc::new(config))
-        })
-        .as_ref()
-        .map_err(|reason| {
-            Unreachable::Local(ProbeError::of(
-                Code::HttpTlsInit,
-                &Details {
-                    reason: Some(reason),
-                    ..Details::default()
-                },
-            ))
-        })
 }
 
 /// A refusal, a timeout, or a reset is the answer of the endpoint; the rest is ours.

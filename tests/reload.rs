@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 use network_monitor::config::{self, Config, Overrides};
 use network_monitor::monitor::{self, Reload};
+use network_monitor::notify::fake::FakeNotifier;
+use network_monitor::notify::Notifier;
 use network_monitor::probe::fake::{up, FakeProbe};
 use network_monitor::probe::Probe;
 use network_monitor::shutdown::Shutdown;
@@ -78,6 +80,63 @@ fn start_with_probe(config_path: &Path, database: &Path) -> (Running, Arc<FakePr
         },
         probe,
     )
+}
+
+/// The same start over `run_with_notifier`, so a test can inspect what was notified.
+fn start_with_notifier(config_path: &Path, database: &Path) -> (Running, Arc<FakeNotifier>) {
+    let loaded = config::load(Some(config_path)).unwrap().unwrap();
+    let settings = Config::resolve(Some(loaded.config), Overrides::default()).unwrap();
+    let reload = Reload {
+        path: config_path.to_path_buf(),
+        overrides: Overrides::default(),
+    };
+    let prober: Arc<dyn Probe> = Arc::new(FakeProbe::always(up()));
+    let store = Arc::new(Mutex::new(Store::open_rw(database).unwrap()));
+    let notifier = Arc::new(FakeNotifier::new());
+    let sink: Arc<dyn Notifier> = notifier.clone();
+    let stop = Shutdown::new();
+    let running = stop.clone();
+
+    let handle = thread::spawn(move || {
+        monitor::run_with_notifier(&settings, prober, store, &running, Some(reload), sink)
+    });
+
+    (
+        Running {
+            stop,
+            handle: Some(handle),
+        },
+        notifier,
+    )
+}
+
+fn write_config_with_telegram(
+    config_path: &Path,
+    database: &Path,
+    token: &str,
+    chat_id: &str,
+    targets: &[&str],
+) {
+    let mut text = format!(
+        "interval_ms = 30\ntimeout_ms = 500\ndatabase = \"{}\"\nretention_days = 0\n\n\
+         [telegram]\nbot_token = \"{token}\"\nchat_id = \"{chat_id}\"\n",
+        database.display()
+    );
+    for target in targets {
+        text.push_str(&format!("\n[[targets]]\nip = \"{target}\"\n"));
+    }
+    std::fs::write(config_path, text).expect("the test writes the configuration file");
+}
+
+fn wait_for_notifications(notifier: &FakeNotifier, expected: usize, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while notifier.len() < expected {
+        assert!(
+            Instant::now() < deadline,
+            "expected {expected} notification(s) within {timeout:?}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 fn wait_for_probe(probe: &FakeProbe, key: &str, timeout: Duration, within: Duration) {
@@ -208,6 +267,47 @@ fn a_changed_database_path_is_reported_and_not_applied() {
     );
     let store = Store::open_ro(&database).unwrap();
     assert_eq!(store.states().unwrap().len(), 1);
+}
+
+/// A changed `[telegram]` section is refused by the running monitor.
+///
+/// The section is read once, when the delivery thread starts, so a live change is
+/// reported and the running settings are kept — exactly like a changed database path.
+#[test]
+fn a_changed_telegram_section_is_reported_and_not_applied() {
+    let (_directory, config_path, database) = temp_paths();
+    write_config_with_telegram(
+        &config_path,
+        &database,
+        "111:first",
+        "-1001",
+        &["127.0.0.1"],
+    );
+
+    let (running, notifier) = start_with_notifier(&config_path, &database);
+    wait_for_notifications(&notifier, 1, Duration::from_secs(5));
+
+    write_config_with_telegram(
+        &config_path,
+        &database,
+        "222:second",
+        "-2002",
+        &["127.0.0.1"],
+    );
+    thread::sleep(Duration::from_millis(1_500));
+    assert!(!running.is_finished(), "the monitor keeps running");
+
+    // A target added afterwards still notifies through the notifier the monitor started
+    // with: the section is never re-applied by a reload.
+    write_config_with_telegram(
+        &config_path,
+        &database,
+        "222:second",
+        "-2002",
+        &["127.0.0.1", "127.0.0.2"],
+    );
+    wait_for_notifications(&notifier, 2, Duration::from_secs(15));
+    running.stop();
 }
 
 /// A reload replaces the method and the timeout of a target without a restart.

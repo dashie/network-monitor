@@ -6,12 +6,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
 use crate::config::{Config, Overrides, Target};
 use crate::logging;
+use crate::notify::{self, NoopNotifier, Notification, Notifier};
 use crate::probe::Probe;
 use crate::reload::{self, Change, Watcher};
 use crate::shutdown::{self, Shutdown};
@@ -50,6 +51,7 @@ struct Supervisor {
     overrides: Overrides,
     prober: Arc<dyn Probe>,
     store: Arc<Mutex<Store>>,
+    notifier: Arc<dyn Notifier>,
     retention_days: Arc<AtomicU64>,
     workers: Vec<Worker>,
 }
@@ -66,6 +68,7 @@ impl Supervisor {
             let target = target.clone();
             let prober = Arc::clone(&self.prober);
             let store = Arc::clone(&self.store);
+            let notifier = Arc::clone(&self.notifier);
             let stop = Shutdown::new();
             let worker_stop = stop.clone();
             let previous = initial_states
@@ -73,8 +76,9 @@ impl Supervisor {
                 .copied()
                 .unwrap_or(TargetState::Unknown);
 
-            let handle =
-                thread::spawn(move || monitor_target(target, prober, store, previous, worker_stop));
+            let handle = thread::spawn(move || {
+                monitor_target(target, prober, store, notifier, previous, worker_stop)
+            });
             self.workers.push(Worker { stop, handle });
         }
         Ok(())
@@ -183,6 +187,14 @@ impl Supervisor {
             next.database = self.config.database.clone();
         }
 
+        if next.telegram != self.config.telegram {
+            logging::warn(
+                None,
+                "telegram settings changed; restart the monitor to use them",
+            );
+            next.telegram = self.config.telegram.clone();
+        }
+
         self.stop_workers();
         self.config = next;
         self.retention_days
@@ -204,12 +216,40 @@ impl Supervisor {
 }
 
 /// Probe every target until shutdown, persisting transitions.
+///
+/// Without a `[telegram]` section no delivery thread is started and the process makes
+/// no outbound connection beyond the probes.
 pub fn run(
     config: &Config,
     prober: Arc<dyn Probe>,
     store: Arc<Mutex<Store>>,
     shutdown: &Shutdown,
     reload: Option<Reload>,
+) -> Result<(), RunError> {
+    let handle = config
+        .telegram
+        .as_ref()
+        .map(|settings| notify::start(settings, shutdown));
+    let notifier: Arc<dyn Notifier> = match &handle {
+        Some(handle) => Arc::clone(&handle.notifier),
+        None => Arc::new(NoopNotifier),
+    };
+
+    let result = run_with_notifier(config, prober, store, shutdown, reload, notifier);
+    if let Some(handle) = handle {
+        handle.shutdown();
+    }
+    result
+}
+
+/// Probe every target until shutdown, handing each recorded transition to `notifier`.
+pub fn run_with_notifier(
+    config: &Config,
+    prober: Arc<dyn Probe>,
+    store: Arc<Mutex<Store>>,
+    shutdown: &Shutdown,
+    reload: Option<Reload>,
+    notifier: Arc<dyn Notifier>,
 ) -> Result<(), RunError> {
     config.require_targets().map_err(|_| RunError::NoTargets)?;
 
@@ -240,6 +280,7 @@ pub fn run(
             .unwrap_or_default(),
         prober,
         store,
+        notifier,
         retention_days,
         workers: Vec::new(),
     };
@@ -265,7 +306,7 @@ pub fn run(
                 }
             }
         }
-        pause(reload::POLL_INTERVAL, shutdown);
+        shutdown::pause(reload::POLL_INTERVAL, shutdown);
     }
 
     supervisor.stop_workers();
@@ -282,6 +323,7 @@ fn monitor_target(
     target: Target,
     prober: Arc<dyn Probe>,
     store: Arc<Mutex<Store>>,
+    notifier: Arc<dyn Notifier>,
     mut previous: TargetState,
     shutdown: Shutdown,
 ) -> Result<(), RunError> {
@@ -318,11 +360,22 @@ fn monitor_target(
                 store.record_transition(&event)?;
             }
 
+            // The event is committed: only now may the operator hear about it (INV-11).
+            notifier.notify(Notification {
+                target: target.display(),
+                key: event.target.clone(),
+                state: event.state,
+                cause: cause.map(|failure| failure.to_string()),
+                occurred_at_ms: event.occurred_at_ms,
+                at: Instant::now(),
+            });
+            logging::debug(Some(&name), "notification queued");
+
             previous = transition.to;
             logging::info(Some(&name), &describe(&transition));
         }
 
-        pause(target.interval, &shutdown);
+        shutdown::pause(target.interval, &shutdown);
     }
 
     Ok(())
@@ -363,22 +416,8 @@ fn retention_worker(
                 Err(error) => logging::error(None, &format!("retention failed: {error}")),
             }
         }
-        pause(Duration::from_secs(3_600), &shutdown);
+        shutdown::pause(Duration::from_secs(3_600), &shutdown);
     }
 
     Ok(())
-}
-
-/// Sleep, but wake up promptly when a shutdown is requested.
-fn pause(duration: Duration, shutdown: &Shutdown) {
-    const STEP: Duration = Duration::from_millis(100);
-    let mut remaining = duration;
-    while !remaining.is_zero() {
-        if shutdown::stopped(shutdown) {
-            return;
-        }
-        let slice = remaining.min(STEP);
-        thread::sleep(slice);
-        remaining -= slice;
-    }
 }

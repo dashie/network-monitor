@@ -14,6 +14,10 @@ appears in a requirement, in a component name, or in a public interface.
 | **Interval** | The delay between two consecutive probe cycles of the same target. |
 | **Local error** | A failure of the host to perform a probe — missing privilege, missing interface, socket error, unresolvable name, malformed answer — as opposed to a target that does not answer. The DNS system resolver is the one case where the platform hides the difference; see [FR-21](./PRODUCT.md). |
 | **Monitor** | The long-running subcommand that probes targets and persists transitions. |
+| **Bot token** | The secret Telegram issues for a bot, which authorises `sendMessage` and travels in the request path. It is read from the configuration file only, never from a flag or an environment variable, and every rendering of it — `Debug`, `--show-config`, a log line, an error message — reads `<redacted>`. |
+| **Chat ID** | The identifier of the Telegram chat or channel a message is posted to; `chat_id` in the `[telegram]` section. |
+| **Notification** | One message the tool sends to the configured Telegram chat, stating a target, the state it reached, the cause when it is a `down`, and the instant. It is created from a recorded state transition and never before it. |
+| **Stable `up` window** | The interval `stabilize_seconds` during which `up` must hold continuously before a recovery is reported. A `down` inside the window cancels the report; `0` reports the recovery at once. |
 | **Probe** | One reachability check of a target, in the transport its method names: an ICMP echo request, a TCP connection, a DNS question, or an HTTP request. |
 | **Probe cycle** | The evaluation of one target that produces one verdict. |
 | **Method** | The transport a target is checked with: `icmp`, `tcp`, `dns`, or `http`. It is part of the target's identity. |

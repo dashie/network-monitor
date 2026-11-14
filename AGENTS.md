@@ -64,6 +64,7 @@ Rules for these documents:
 |---|---|---|
 | [docs/USER-GUIDE.md](./docs/USER-GUIDE.md) | Install, configure, operate, and troubleshoot: the manual handed to a user | A user-visible behaviour, a configuration key, a command, or an operating step changes |
 | [docs/UPTIME-KUMA-IMPORT.md](./docs/UPTIME-KUMA-IMPORT.md) | Runbook for importing an Uptime Kuma history | The import format or the Kuma procedure changes |
+| [docs/TELEGRAM-NOTIFICATIONS.md](./docs/TELEGRAM-NOTIFICATIONS.md) | Runbook for enabling, verifying, and repairing the Telegram channel | The notification procedure, a key, or a failure mode changes |
 | [NOTES.md](./NOTES.md) | Deployment notes: compose and `docker run` against a Docker context | A deployment step changes |
 | [docs/AGENT-SANDBOX.md](./docs/AGENT-SANDBOX.md) | Threat model, isolation controls, autonomy flags, and recovery of the AI dev-container sandbox | A sandbox control, limit, or operating step changes |
 

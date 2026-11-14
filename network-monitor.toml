@@ -4,6 +4,17 @@
 # file (FR-2). The effective configuration after the merge is printed by
 # `network-monitor --show-config`.
 
+# Optional Telegram channel (FR-25): one message per incident, and a recovery only
+# after `up` has held for `stabilize_seconds`. This section is the one exception to
+# the rule above — the bot token is a secret, so it is read from this file only, and
+# every rendering of it reads `<redacted>`. Remove the section to disable it; the
+# runbook is docs/TELEGRAM-NOTIFICATIONS.md.
+#
+# [telegram]
+# bot_token = "123456789:replace-me"
+# chat_id = "-1001234567890"
+# stabilize_seconds = 60
+
 # Probe interval in milliseconds. Every target may state its own `interval_ms`.
 interval_ms = 5000
 

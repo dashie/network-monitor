@@ -31,6 +31,7 @@ Probes are bound to the configured interface with the semantics of `ping -I`, th
 ### In scope
 
 - A TOML configuration file with global defaults (`interval_ms`, `timeout_ms`, `database`, `retention_days`) and a list of targets (`ip`, optional `interface`, optional `label`).
+- An optional Telegram channel that tells the operator when a target changes state, with one message per incident and a stabilised recovery.
 - A command-line parameter for every configuration option, with the precedence `command line > configuration file > built-in default`.
 - ICMP echo probing of IPv4 targets, one echo request per target per interval, with an explicit timeout.
 - Binding a probe to a named network interface on macOS, Linux, and Windows, with the semantics of `ping -I <interface> <address>`; the default-route interface is used when no interface is configured.
@@ -43,7 +44,7 @@ Probes are bound to the configured interface with the semantics of `ping -I`, th
 ### Out of scope
 
 - Any programmatic API: the web page returns HTML for a browser; scripts use the database or the `query` command.
-- Alerting and notification (mail, webhook, Telegram, MQTT): the database is the integration point.
+- Notification transports other than Telegram (mail, webhook, MQTT, Slack, a command hook): the database stays the integration point for everything else.
 - Metrics export (Prometheus, OpenTelemetry) and dashboards.
 - Probe types other than ICMP echo: no TCP, UDP, HTTP, DNS, or traceroute probes.
 - IPv6 targets: the first milestone probes IPv4 only; ICMPv6 is tracked as a follow-up.
@@ -56,7 +57,7 @@ Each requirement is observable and independently verifiable. Implementation deta
 belong in [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 - `FR-1`: The tool reads a TOML configuration file. `--config <path>` must exist and parse; without the option, `./network-monitor.toml` is read when present and skipped otherwise, so a fully command-line invocation needs no file. A malformed file, or an explicit path that does not exist, is a startup error reported on stderr with a non-zero exit code.
-- `FR-2`: Every configuration option can be given on the command line and overrides the file; targets are supplied with the repeatable `--target [method:]address[,key=value]…` option — `1.1.1.1`, `tcp:1.1.1.1:443`, `dns:example.com@9.9.9.9`, `http:https://example.com/health` — where a bare address means `icmp` and the keys `interface`, `label`, `timeout_ms`, `interval_ms`, `record`, and `expect` follow the method. The flag replaces the target list of the file when present.
+- `FR-2`: Every configuration option can be given on the command line and overrides the file; targets are supplied with the repeatable `--target [method:]address[,key=value]…` option — `1.1.1.1`, `tcp:1.1.1.1:443`, `dns:example.com@9.9.9.9`, `http:https://example.com/health` — where a bare address means `icmp` and the keys `interface`, `label`, `timeout_ms`, `interval_ms`, `record`, and `expect` follow the method. The flag replaces the target list of the file when present. The `[telegram]` section of `FR-25` is the single deliberate exception: its bot token is a secret, so the section is read from the file only.
 - `FR-3`: The tool runs one probe of the target's method per configured interval and classifies the result as reachable or unreachable. For an `icmp` target the probe is one echo request: reachable means a matching reply arrived within `timeout_ms`. The interval is the pause after a probe, so a target answers every `rtt + interval` and a silent one every `timeout_ms + interval`; `timeout_ms` bounds the whole probe whatever other traffic the machine carries. An interval shorter than the timeout is accepted: it just means a silent target is probed less often than an answering one. `interval_ms` and `timeout_ms` may be given per target and override the global values.
 - `FR-4`: When an `icmp` or `tcp` target has an interface configured, the probe leaves through that interface with the semantics of `ping -I <interface> <address>`; when it has none, the default-route interface of the operating system is used. The interface is given by name on Linux and macOS (`eth1`, `en0`) and by numeric interface index on Windows. A `dns` or `http` target that names one is refused as invalid configuration: neither method can bind its transport to a device here.
 - `FR-5`: A state transition is recorded only when the verdict of a probe cycle differs from the last recorded verdict of that target. Repeated verdicts produce no database write.
@@ -83,6 +84,7 @@ belong in [ARCHITECTURE.md](./ARCHITECTURE.md).
 - `FR-22`: An `http` target names a URL (`http://` or `https://`). The probe sends one `GET` — no redirect, no body, no authentication — and reads the status line: a status inside the expectation is `up`, a status outside it is `down`, and a refusal, a timeout, or a TLS failure is `down`. The expectation defaults to `200`–`399` and accepts classes (`2xx`) and exact codes; a malformed answer or a head larger than 8 KiB is a local failure. HTTPS verifies the certificate chain against the embedded roots and cannot be told to skip verification. The cause of the verdict is stated as `HTTP.UNEXPECTED_STATUS` with the status and the expectation, `HTTP.TLS` for a handshake that failed, or one of the connection codes of `TCP`; a local failure carries `HTTP.RESOLVE`, `HTTP.TLS_INIT`, `HTTP.MALFORMED`, or `HTTP.HEAD_LIMIT`.
 - `FR-23`: The identity of a target is its canonical key: the method scheme plus what identifies the endpoint. It is what the database stores, what the page links to, and what `query` filters on. A history written before methods existed keeps its events: the first writable open rewrites each bare address to its `icmp://` key once, and the import reads either form.
 - `FR-24`: Every failure of a probe cycle states a code and a standard message. The code is a short uppercase token prefixed with the layer that reported the failure — `ICMP`, `TCP`, `DNS`, `HTTP`, or `PROBE` — so a log line and a table row can be filtered by it. The message is one sentence declared once in the code as a template, with the details of the occurrence inserted: the host and port, the name and the server asked, the status and the expectation, the timeout, or the text the platform returned. A detail the code did not supply reads `unknown`, so a reader never sees a placeholder. Both halves are English and neither is translated. Only a verdict is persisted; a local failure carries the same pair in the log and never becomes a state change (`BR-4`).
+- `FR-25`: When the configuration file carries a `[telegram]` section — `bot_token`, `chat_id`, and `stabilize_seconds` (default `60`, `0` reports at once) — the tool posts one message per incident to that chat. A recorded transition to `down` is reported at once, with the target, the instant, and the code and message of the cause. A transition to `up` is reported only after `up` has held continuously for `stabilize_seconds`; a transition back to `down` inside that window reports nothing. After an `up` message the next `down` is a new message, while a `down` that repeats an already-notified `down` is silent. The first verdict of a target after a start or a restart is reported under the same rules. A failed delivery is attempted five times, waiting 1, 2, 4, and 8 seconds, then dropped with one `WARN` line; notification never delays a probe and never changes what is recorded. The section is read from the file only (the exception of `FR-2`), and the bot token is printed as `<redacted>` by `--show-config` and never appears in a log line or an error message.
 
 ## Business rules
 
@@ -95,7 +97,7 @@ Rules that always hold, independent of implementation.
 - `BR-5`: A configured interface that does not exist at startup is a fatal configuration error, never a silent fallback to the default interface. Rationale: a silent fallback would measure a different path than the one configured.
 - `BR-6`: Timestamps are stored as UTC epoch milliseconds in integer columns; time zone and locale affect presentation only. Rationale: queries and retention stay exact and portable.
 - `BR-7`: The current state of a target and its last event are written in the same SQLite transaction, so a reader never observes a state that contradicts the latest event.
-- `BR-8`: The database is the integration point for other tools. The tool opens at most one listening socket, the read-only web page, and only when `--listen` is given: `serve` never probes, `monitor` probes and serves at the same time. Without `--listen` nothing listens and the only network traffic is the ICMP probe. Rationale: a page must never be able to alter the history, and a monitor that was not asked to serve must not expose a surface.
+- `BR-8`: The database is the integration point for other tools. The tool opens at most one listening socket, the read-only web page, and only when `--listen` is given: `serve` never probes, `monitor` probes and serves at the same time. Without `--listen` nothing listens, and the outbound traffic is the probes plus, only when the `[telegram]` section exists, the messages to the Bot API. Rationale: a page must never be able to alter the history, a monitor that was not asked to serve must not expose a surface, and a monitor without a channel must not reach the network beyond its probes.
 - `BR-9`: A database written by a newer schema version than the running binary is reported as an error and left untouched, never migrated downwards.
 - `BR-10`: Statistics of the `up` runs are computed from the segments the page draws, and a run that the window opens or closes in the middle of counts as it appears: the first and the last run of a window are lower bounds, never overestimates. Rationale: a figure a reader can check against the bands above it.
 
@@ -138,7 +140,7 @@ Rules that always hold, independent of implementation.
 - On Windows the interface is given as a numeric interface index; resolving an adapter name is not implemented in this version.
 - The QNAP deployment path is Docker through Container Station; a native QPKG is not planned.
 - The configuration file is re-read once per second while monitoring runs; a change is applied without a restart, and a changed database path still needs one.
-- Alerting is out of scope: the database is the integration point for other tools.
+- The only notification transport is the optional Telegram channel of `FR-25`; everything else consumes the database.
 - The tool name and the executable name are both `network-monitor`.
 - The web page binds `127.0.0.1` by default; exposing it on the LAN (`--listen 0.0.0.0:8642`) is an explicit operator choice and carries no authentication.
 
@@ -146,7 +148,7 @@ Rules that always hold, independent of implementation.
 
 - **IPv6 support** — which interface scoping rules apply to link-local addresses, and is ICMPv6 a separate probe type or the same one? Owner: maintainer.
 - **Flap damping** — should a configurable confirmation count (`down` after N consecutive failures) be added, or is one probe per cycle the contract? Owner: maintainer.
-- **Alerting hooks** — is a post-transition command hook acceptable as an escape hatch, or does it violate the no-dependency rule? Owner: maintainer.
+- **Alerting hooks** — is a post-transition command hook acceptable as an escape hatch, or does it violate the no-dependency rule? Owner: maintainer. *Resolved:* no hook. The one push channel is the Telegram transport of `FR-25`, chosen over a shell hook and over a webhook because an operator can enable it without exposing a surface or writing a script; every other consumer reads the database ([ADR-0027](./ADR.md)).
 - **Multiple addresses per target** — should a label group several addresses, or is one label one address? Owner: maintainer.
 - **Web authentication** — is a shared token or HTTP basic authentication worth the complexity for LAN exposure? Owner: maintainer.
 

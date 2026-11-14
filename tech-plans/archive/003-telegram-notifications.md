@@ -1,7 +1,7 @@
 ---
 title: Notify target state changes over Telegram with a stabilised up window
 date: 2026-11-14
-status: draft
+status: done
 type: feature
 impact: medium
 area: config, monitor, notify, documentation
@@ -395,17 +395,206 @@ prints the section with `<redacted>` and no real token.
 
 ## Implementation checklist
 
-- [ ] Step 1 — `[telegram]` configuration section with redaction
-- [ ] Step 2 — shared TLS configuration extracted
-- [ ] Step 3 — notification text and stabilisation policy
-- [ ] Step 4 — bounded queue and notifier thread
-- [ ] Step 5 — Telegram HTTPS client and retry policy
-- [ ] Step 6 — notifier wired into the monitor
-- [ ] Step 7 — documentation and example configuration
+- [x] Step 1 — `[telegram]` configuration section with redaction
+- [x] Step 2 — shared TLS configuration extracted
+- [x] Step 3 — notification text and stabilisation policy
+- [x] Step 4 — bounded queue and notifier thread
+- [x] Step 5 — Telegram HTTPS client and retry policy
+- [x] Step 6 — notifier wired into the monitor
+- [x] Step 7 — documentation and example configuration
 - [x] All open questions resolved
-- [ ] Quality suite passes (`cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`)
-- [ ] Documentation listed under Affected modules is updated
-- [ ] User guide (`docs/USER-GUIDE.md`) reflects the new behaviour and every configuration
+- [x] Quality suite passes (`cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`)
+- [x] Documentation listed under Affected modules is updated
+- [x] User guide (`docs/USER-GUIDE.md`) reflects the new behaviour and every configuration
       option (`bot_token`, `chat_id`, `stabilize_seconds`), or the plan records why it needs
       no change
-- [ ] `## Implementation Notes` added or updated in this plan
+- [x] `## Implementation Notes` added or updated in this plan
+
+## Implementation Notes
+
+### Decisions
+
+- **`deliver` counts and logs.** Five attempts, waits of 1, 2, 4, and 8 seconds, one `WARN`
+  per failed attempt, and one `WARN notification lost: <reason>` when it gives up — for a
+  non-retryable answer as well, so a `401` produces two lines and five retryable failures
+  produce six. A `WARN` is emitted at every level, so the operator always sees a lost
+  message.
+- **`Policy` measures the window from the first `up` of the episode.** A second `up`
+  observed while a window is already pending neither restarts nor shortens it; this is what
+  makes a 300 s interval still close the window on time.
+- **`Notification::text`** uses `crate::time::format_rfc3339`, i.e. millisecond precision
+  (`2025-11-24T16:00:00.000Z`), and omits the parenthesised key when the target has no
+  label, because then `target == key`.
+- **`Queue` holds its items and its closed flag in one mutex** behind one condition
+  variable; `pop_timeout` returns `None` on a closed queue, and the delivery loop uses
+  `is_closed` to tell a timeout from a close.
+- **`Handle` also owns the queue** (a private field) so `shutdown` can close it before
+  joining the thread; only `notifier` is public, as the plan's sketch showed.
+- **The Telegram client scrubs its own token from any error it returns**, on top of never
+  putting the request path into a message, so a future error string cannot leak it.
+- **Token validation** refuses whitespace, `/`, `?`, and `#`; `:` is allowed because every
+  real BotFather token contains one.
+
+### Deviations
+
+- **`ADR-0026` was already taken.** The repository carries an accepted `ADR-0026` for the
+  sandbox skill bind, dated the same day. The notification decision is recorded as
+  **`ADR-0027`** in `docs/ADR.md` (index row and record), and every reference points there.
+- **`INV-11` was already taken.** `docs/ARCHITECTURE.md` already defines `INV-11` (one
+  listener). The new invariant — "a notification is never a condition of recording, and a
+  delivery failure never changes a stored event" — is **`INV-12`**.
+- **`notify::start` was added in Step 5, not Step 4.** It builds the Telegram client, so it
+  cannot exist before `src/notify/telegram.rs`; Step 4 delivered `start_with`, the queue,
+  the retries, the fake and the thread loop, and Step 5 added `start` beside the client.
+- **`tests/notify.rs` has no "full queue" case.** Drop-oldest at capacity is proven
+  deterministically by `notify::queue::tests::a_full_queue_drops_the_oldest`; the public
+  `start_with` seam cannot stall the drain without a blocking fake, and a timing-based
+  integration test would be flaky. The queue test is the contract.
+- **`deliver` retry tests live in `src/notify/telegram.rs`** (the plan listed them there) and
+  the engine behaviour is covered by `tests/notify.rs`, so the module keeps one test
+  location per concern.
+- **Two existing test fixtures gained `..FileConfig::default()`**: `tests/config_precedence.rs`
+  and `tests/monitor_e2e.rs` built `FileConfig` exhaustively and had to name the new field.
+  No assertion or behaviour of those tests changed.
+
+### Discoveries
+
+- The monitor's `pause` had to move to `shutdown` before the delivery thread could reuse
+  it; it is now `shutdown::pause`, and the three call sites in `monitor` use it. No
+  behaviour changed.
+- `Config::telegram` is compared with `PartialEq` by the supervisor; `Telegram` therefore
+  derives `PartialEq`/`Eq` while keeping a hand-written `Debug` that redacts the token.
+- The manual verification of the plan (a real bot, a real channel, an invalid token) needs
+  network access and a credential, so it was not run in the sandbox. The offline tests
+  cover every branch the manual step would exercise: immediate `down`, deferred `up`, a
+  flap inside the window, retries, a non-retryable answer, and the absence of the token
+  from the rendered output.
+
+### Extensions
+
+- None beyond the plan.
+
+### Review round 1 fixes (2026-11-14)
+
+- **Findings 1 and 2** — the two references still on `ADR-0026` now read `ADR-0027`:
+  `docs/PRODUCT.md` (the resolved "Alerting hooks" open question) and `docs/ARCHITECTURE.md`
+  (`### Configuration`). A grep of the working tree leaves `ADR-0026` only in the record itself
+  and in the unrelated sandbox documents.
+- **Finding 3** — `docs/USER-GUIDE.md` no longer links `TELEGRAM-NOTIFICATIONS.md`; it points to
+  its own `Troubleshooting` section, so the guide stays distributable on its own. The runbook is
+  still referenced from `README.md` and `AGENTS.md`.
+- **Finding 5** — `deliver` now delegates to `notify::deliver_with(sender, text, shutdown,
+  waits)`, which takes the backoff as a parameter; the production `BACKOFF` constant keeps the
+  1, 2, 4 and 8 seconds. This allowed the new
+  `notify::telegram::tests::five_failed_attempts_lose_the_message` without a fifteen-second
+  wait, and it removed the three seconds the two existing retry tests spent sleeping.
+  `tests/notify.rs` still drives the real `deliver` path end to end, so the constant is covered.
+- **Finding 6** — the `.gitignore` entry is outside `## Affected modules` and the user approved
+  it explicitly in review round 1: it keeps the local `network-monitor-telegram.toml`, which
+  holds a real token, out of Git. Recorded here so the next round sees the decision.
+- **Finding 4** — no code change: the one-line fixture update in `tests/config_precedence.rs` is
+  a consequence of the new `FileConfig` field, already recorded under *Discoveries*.
+
+## Review Notes
+
+- **Round**: 1
+- **Review date**: 2026-11-14
+- **Verdict**: NEEDS WORK
+- **Suggested commit**: `feat(notify): add telegram notifications behind a stable up window`
+- **Quality gate**: tests ✓ (336 passed, 0 failed) | lint ✓ (0 warnings) | types ✓ (0 errors) —
+  `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test` (exit 0)
+
+### Findings
+
+| # | Severity | Area | Finding | Status |
+|---|---|---|---|---|
+| 1 | major | `docs/PRODUCT.md:151` | The resolved "Alerting hooks" open question cites `[ADR-0026](./ADR.md)`, which is the sandbox skills bind. The Telegram decision is `ADR-0027`. | open |
+| 2 | major | `docs/ARCHITECTURE.md:298` | The `### Configuration` concept states `(ADR-0026)` for the file-only secret; it is `ADR-0027`. Same renumbering miss as finding 1. | open |
+| 3 | major | `docs/USER-GUIDE.md:293` | The new subsection closes with a relative link to `TELEGRAM-NOTIFICATIONS.md`. The user guide declares itself distributable on its own and is otherwise link-free, so an internal link breaks its self-containment. | open |
+| 4 | minor | `tests/config_precedence.rs` | Outside `## Affected modules`: one line (`..FileConfig::default()`) forced by the new `FileConfig` field. Recorded in Implementation Notes; no assertion changed. | open |
+| 5 | minor | `src/notify/mod.rs` | No test exhausts the retry loop (five attempts, then `notification lost`). `a_retryable_failure_is_attempted_again` stops at three, `a_permanent_failure_is_not_retried` at one, so deleting the cap would keep the suite green. The plan's verification list did not ask for this case. | open |
+| 6 | minor | `.gitignore` | Outside `## Affected modules`: one ignored path, `network-monitor-telegram.toml`, so the local file with a real token cannot be committed. Approved by the user in this review round. | approved 2026-11-14 |
+
+### Gap analysis
+
+- **Goals: 5/5 achieved.**
+  - Opt-out: `monitor::run` builds a `NoopNotifier` when `config.telegram` is `None`; `config::tests::an_absent_telegram_section_configures_nothing`. Existing suites pass; two fixtures needed `..FileConfig::default()` (findings 4 and the Implementation Notes).
+  - `down` at once with target, cause and instant: `tests/notify.rs::a_disconnection_is_delivered_at_once`, `notify::policy::tests::a_disconnection_is_reported_at_once`, `tests/monitor_e2e.rs::each_recorded_transition_is_notified_once`.
+  - Deferred `up`, silent flap: `a_recovery_is_delivered_when_the_window_closes`, `a_flap_inside_the_window_sends_nothing`, `a_disconnection_inside_the_window_cancels_the_recovery`.
+  - New `down` after a notified `up`, silence on a repeated `down`: `a_disconnection_after_a_notified_recovery_is_reported_again`, `a_flap_reports_one_disconnection_per_incident`.
+  - First verdict after a restart: `the_first_verdict_reports_the_observed_state`.
+  - Retries: `a_retryable_failure_is_attempted_again`, `a_permanent_failure_is_not_retried`, `a_failed_delivery_is_retried_before_it_gives_up` (finding 5 is the uncovered exhaustion branch).
+  - Redaction: `the_rendered_configuration_redacts_the_token`, `the_debug_form_of_the_section_hides_the_token`, `a_reported_failure_never_carries_the_token`, `the_client_debug_form_hides_the_token`, plus `--show-config` inspected by hand (prints `bot_token = "<redacted>"`).
+- **Scope:** 27 staged files. 25 are named in `## Affected modules`; `tests/config_precedence.rs` is a documented deviation (finding 4) and `.gitignore` is approved by the user (finding 6). No unrelated work in the staged set; the worktree has no unstaged changes.
+- **Deviations:** `ADR-0026` → `ADR-0027` and `INV-11` → `INV-12` (both numbers were already taken by the sandbox work), `notify::start` delivered in Step 5, no full-queue integration test — all four are recorded in Implementation Notes and are legitimate. Findings 1 and 2 are the residue of the ADR renumbering: the record itself is right, two references still say `ADR-0026`.
+- **Additions:** none beyond the plan.
+- **Deferred:** the manual acceptance of the plan (a real bot, a real channel, a revoked token) needs network and a credential and is left to the operator; the offline suite covers the same branches.
+
+### Known limitations
+
+- The Telegram answer is read to end of stream and matched for `"ok":true`; a chunked body is not de-chunked and a `description` containing an escaped quote is truncated at the escape. Both only affect the text of a `WARN` line, never the recorded history.
+- A lost message is never re-sent, and the notification state does not survive a restart, by design (`FR-25`, ADR-0027).
+- `stabilize_seconds` has no upper bound.
+
+### Recommendations for future work
+
+- Add the exhaustion test of finding 5: five retryable failures, assert five attempts and one `notification lost` line.
+- A cheap documentation check would have caught findings 1 and 2: grep every `ADR-`/`INV-` reference against the index of `docs/ADR.md` and the invariant list in `docs/ARCHITECTURE.md`.
+
+## Review Notes
+
+- **Round**: 2
+- **Review date**: 2026-11-14
+- **Verdict**: PASS
+- **Suggested commit**: `feat(notify): add telegram notifications behind a stable up window`
+- **Quality gate**: tests ✓ (337 passed, 0 failed) | lint ✓ (0 warnings) | types ✓ (0 errors) —
+  `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test` (exit 0)
+
+### Findings
+
+| # | Severity | Area | Finding | Status |
+|---|---|---|---|---|
+| 1 | major | `docs/PRODUCT.md:151` | Cited `ADR-0026` (sandbox skills) instead of `ADR-0027` | fixed in round 2 — line now reads `[ADR-0027](./ADR.md)` |
+| 2 | major | `docs/ARCHITECTURE.md:298` | Same wrong record number in `### Configuration` | fixed in round 2 — `(ADR-0027)` |
+| 3 | major | `docs/USER-GUIDE.md:293` | Relative link to `TELEGRAM-NOTIFICATIONS.md` broke the guide's self-containment | fixed in round 2 — now `[Troubleshooting](#troubleshooting)`, an intra-document anchor; `grep '](\./'` finds no link in the guide |
+| 4 | minor | `tests/config_precedence.rs` | Outside `## Affected modules` | approved by the user in round 2 (one line, `..FileConfig::default()`, no assertion touched) |
+| 5 | minor | `src/notify/mod.rs` | The retry loop was never exhausted by a test | fixed in round 2 — `deliver` delegates to `deliver_with(…, waits)`, and `notify::telegram::tests::five_failed_attempts_lose_the_message` drives five retryable failures with an empty backoff |
+| 6 | minor | `.gitignore` | Outside `## Affected modules` | approved by the user in round 1 and recorded in Implementation Notes |
+
+No new findings in round 2. Residual `ADR-0026` mentions exist only in `docs/ADR.md` (the record
+itself) and `docs/AGENT-SANDBOX.md`, where that number is the correct one.
+
+### Gap analysis
+
+- **Goals: 5/5 achieved**, evidenced in round 1 and re-run green in round 2: opt-out through
+  `NoopNotifier`, immediate `down` with cause and instant, `up` held by the window, silence on a
+  flap and on a repeated `down`, first verdict after a restart, five attempts then `notification
+  lost`, and token redaction in `Debug`, `to_toml`, `--show-config` and every error string.
+- **Scope:** 27 files staged against `d5fe825`, 25 named in `## Affected modules`; the two
+  exceptions are approved by the user (findings 4 and 6). The fix round touched six files, all
+  listed or the plan itself; no untracked files, no unstaged work outside the change set.
+- **Deviations:** `ADR-0026` → `ADR-0027`, `INV-11` → `INV-12`, `notify::start` delivered in
+  Step 5, no full-queue integration test, and the `deliver_with` seam added in the fix round —
+  all recorded in Implementation Notes and legitimate.
+- **Additions:** none beyond the plan; the test seam is a refactor inside a module the plan owns,
+  made to satisfy finding 5 without a fifteen-second test.
+- **Deferred:** the manual acceptance against a real bot and a real channel needs a credential and
+  network access and stays with the operator; the offline suite covers the same branches.
+
+### Known limitations
+
+- A chunked answer is not de-chunked, and a `description` containing an escaped quote is truncated
+  at the escape. Both affect the text of a `WARN` line only.
+- A lost message is never re-sent, and the notification state does not survive a restart, by
+  design (`FR-25`).
+- `stabilize_seconds` has no upper bound.
+
+### Recommendations for future work
+
+- The test of finding 5 pins the attempt count through the `ATTEMPTS` constant; if the literal
+  five becomes a requirement of its own, assert `5` in one place and let the constant follow.
+- Add the documentation check suggested in round 1 to whatever script the project runs before a
+  release: every `ADR-` and `INV-` reference must resolve.
+
+
+

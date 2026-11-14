@@ -42,6 +42,11 @@ sudo ./target/release/network-monitor monitor --config ./network-monitor.toml \
 cargo test
 ```
 
+To hear about an outage without opening the page, add the optional `[telegram]` section:
+one message per incident to a Telegram chat, a recovery only once `up` has held for the
+stabilisation window, and the bot token redacted everywhere it is printed. Setup and
+failure modes are in [docs/TELEGRAM-NOTIFICATIONS.md](docs/TELEGRAM-NOTIFICATIONS.md).
+
 A minimal `network-monitor.toml`:
 
 ```toml
@@ -95,6 +100,7 @@ Not done yet: the Windows raw-socket path is written but not exercised on a Wind
 | [docs/GLOSSARY.md](docs/GLOSSARY.md) | One precise definition per domain term |
 | [docs/DEVELOPER-GUIDE.md](docs/DEVELOPER-GUIDE.md) | Build, run, test, extend, and the Git standards |
 | [docs/UPTIME-KUMA-IMPORT.md](docs/UPTIME-KUMA-IMPORT.md) | Runbook: import an Uptime Kuma history into a database |
+| [docs/TELEGRAM-NOTIFICATIONS.md](docs/TELEGRAM-NOTIFICATIONS.md) | Runbook: enable, verify, and repair the Telegram notification channel |
 | [docs/AGENT-SANDBOX.md](docs/AGENT-SANDBOX.md) | Dev-container sandbox for unattended AI agent runs: isolation, autonomy, recovery |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Branching, review, definition of done |
 | [AGENTS.md](AGENTS.md) | Rules for human and AI contributors |
