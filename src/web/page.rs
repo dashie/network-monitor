@@ -409,8 +409,9 @@ fn window_links(window: Window) -> String {
     output
 }
 
-/// The last disconnections, newest first, with how long each one lasted.
-fn downs_table(downs: &[DownEpisode], now_ms: i64) -> String {
+/// The last disconnections, newest first, with how long each one lasted. Shared with the
+/// detail page, which lists the same table for one target.
+pub(super) fn downs_table(downs: &[DownEpisode], now_ms: i64) -> String {
     let mut output = String::from(
         "<h2>Last 10 disconnections\
          <a class=\"download\" href=\"/export/disconnections.csv.gz\">Download History</a>\

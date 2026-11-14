@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use clap::Parser;
 use thiserror::Error;
 
-use network_monitor::cli::{Cli, Command};
+use network_monitor::cli::{Cli, Command, Compression};
 use network_monitor::config::{self, Config, ConfigError};
 use network_monitor::import::{self, ImportError};
 use network_monitor::logging::{self, Level};
@@ -63,6 +63,7 @@ fn run() -> Result<ExitCode, AppError> {
         overrides: overrides.clone(),
     });
     let settings = Config::resolve(loaded.map(|loaded| loaded.config), overrides)?;
+    let compression = cli.compression;
 
     if cli.show_config {
         print!("{}", settings.to_toml());
@@ -73,12 +74,12 @@ fn run() -> Result<ExitCode, AppError> {
         Some(Command::Monitor { listen }) => {
             settings.require_targets()?;
             validate_interfaces(&settings)?;
-            run_monitor(&settings, reload, listen)?;
+            run_monitor(&settings, reload, listen, compression)?;
         }
         Some(Command::Serve { listen }) => {
             let stop = shutdown::Shutdown::new();
             shutdown::install();
-            web::run(&settings.database, &listen, &stop)?;
+            web::run(&settings.database, &listen, &stop, compression)?;
         }
         Some(Command::Import {
             source,
@@ -150,6 +151,7 @@ fn run_monitor(
     settings: &Config,
     reload: Option<monitor::Reload>,
     listen: Option<String>,
+    compression: Compression,
 ) -> Result<(), AppError> {
     let prober: Arc<dyn Probe> = Arc::new(Prober::new());
     let store = Arc::new(Mutex::new(Store::open_rw(&settings.database)?));
@@ -165,7 +167,7 @@ fn run_monitor(
             let database = settings.database.clone();
             let web_stop = stop.clone();
             Some(std::thread::spawn(move || {
-                if let Err(error) = web::serve(listener, &database, &web_stop) {
+                if let Err(error) = web::serve(listener, &database, &web_stop, compression) {
                     logging::error(None, &format!("web interface failed: {error}"));
                 }
             }))

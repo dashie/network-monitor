@@ -1,18 +1,18 @@
-//! Detail page of one target: one bar per day for the last 30 days, then the same
-//! numbers in a table, day by day.
+//! Detail page of one target: one bar per day for the last 30 days, the last
+//! disconnections of the target, then the same numbers in a table, day by day.
 //!
 //! The numbers come from the disconnections stored in the database, bucketed by UTC
 //! day. No chart library and no client-side data handling, like the timeline.
 
 use std::fmt::Write as _;
 
-use crate::store::{DailyDrops, TargetStateRow, TimelineSegment};
+use crate::store::{DailyDrops, DownEpisode, TargetStateRow, TimelineSegment};
 use crate::time::format_rfc3339;
 
 use super::encode;
 use super::page::{
-    escape, footer, format_runs, format_span, runs_stats, up_for, ICON_LINKS, LOCALIZE_SCRIPT,
-    MARK, REFRESH_SECONDS, STYLE,
+    downs_table, escape, footer, format_runs, format_span, runs_stats, up_for, ICON_LINKS,
+    LOCALIZE_SCRIPT, MARK, REFRESH_SECONDS, STYLE,
 };
 use super::stats;
 
@@ -40,11 +40,13 @@ pub fn parse_period(value: &str) -> Option<u32> {
 
 /// The whole page for one target. `segments` is the same target over the same 30 days:
 /// the run boundaries are not in the aggregated day buckets, so the per-day averages of
-/// the `up` runs are computed from the segments.
+/// the `up` runs are computed from the segments. `recent` is the last disconnections of
+/// the target, newest first.
 pub fn target_page(
     target: &TargetStateRow,
     days: &[DailyDrops],
     segments: &[TimelineSegment],
+    recent: &[DownEpisode],
     now_ms: i64,
     period_days: u32,
 ) -> String {
@@ -99,6 +101,7 @@ pub fn target_page(
          </div>\n\
          <h2>Disconnections per day</h2>\n\
          {bars}\n\
+         {recent}\n\
          {table}",
         name = escape(&name),
         address = escape(&target.target),
@@ -117,6 +120,7 @@ pub fn target_page(
             count => format!("mean of {count} up runs in the last {period}"),
         },
         bars = bars(days),
+        recent = downs_table(recent, now_ms),
         table = days_table(days, segments, now_ms),
     );
 
@@ -398,7 +402,7 @@ mod tests {
     #[test]
     fn the_page_draws_one_bar_per_day_with_drops() {
         let days = [day(0, 2, 90_000), day(1, 0, 0), day(2, 5, 600_000)];
-        let rendered = target_page(&target(), &days, &[], NOW, DEFAULT_PERIOD_DAYS);
+        let rendered = target_page(&target(), &days, &[], &[], NOW, DEFAULT_PERIOD_DAYS);
         assert_eq!(rendered.matches("<rect ").count(), 2);
         assert!(rendered.contains("data-format=\"day\" data-suffix=\": 2\">01-01: 2</title>"));
         assert!(rendered.contains("data-suffix=\": 5\">01-03: 5</title>"));
@@ -410,7 +414,7 @@ mod tests {
     #[test]
     fn the_table_lists_every_day_newest_first_with_its_down_time() {
         let days = [day(0, 2, 90_000), day(1, 0, 0), day(2, 5, 600_000)];
-        let rendered = target_page(&target(), &days, &[], NOW, DEFAULT_PERIOD_DAYS);
+        let rendered = target_page(&target(), &days, &[], &[], NOW, DEFAULT_PERIOD_DAYS);
         assert_eq!(rendered.matches("<tr><td>").count(), 3);
         let first = rendered
             .find("<time datetime=\"1970-01-03")
@@ -437,10 +441,53 @@ mod tests {
     }
 
     #[test]
+    fn the_last_disconnections_sit_above_the_day_by_day_table() {
+        let recent = [DownEpisode {
+            event_id: 1,
+            target: "1.1.1.1".to_string(),
+            label: Some("cloudflare".to_string()),
+            started_at_ms: 3_600_000,
+            ended_at_ms: Some(4_320_000),
+        }];
+        let rendered = target_page(
+            &target(),
+            &[day(0, 1, 720_000)],
+            &[],
+            &recent,
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+        );
+
+        let list = rendered
+            .find("Last 10 disconnections")
+            .expect("the page lists the last disconnections of the target");
+        let table = rendered.find("Day by day").expect("the day-by-day table");
+        assert!(
+            list < table,
+            "the list comes before the table, right under the chart"
+        );
+        assert!(
+            rendered.contains(
+                "<td>cloudflare</td><td class=\"sub\">1.1.1.1</td>\
+                 <td><time datetime=\"1970-01-01T01:00:00.000Z\">1970-01-01 01:00:00 UTC</time></td>\
+                 <td class=\"num\">12m</td>"
+            ),
+            "the row names the target and states how long it was down"
+        );
+    }
+
+    #[test]
+    fn a_target_without_a_drop_still_states_the_empty_list() {
+        let rendered = target_page(&target(), &[day(0, 0, 0)], &[], &[], NOW, 30);
+        assert!(rendered.contains("No disconnection recorded yet."));
+    }
+
+    #[test]
     fn the_table_uses_the_style_shared_with_the_timeline_page() {
         let rendered = target_page(
             &target(),
             &[day(0, 1, 60_000)],
+            &[],
             &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
@@ -463,7 +510,7 @@ mod tests {
     #[test]
     fn a_quiet_month_states_zero_disconnections() {
         let days = [day(0, 0, 0), day(1, 0, 0)];
-        let rendered = target_page(&target(), &days, &[], NOW, DEFAULT_PERIOD_DAYS);
+        let rendered = target_page(&target(), &days, &[], &[], NOW, DEFAULT_PERIOD_DAYS);
         assert!(!rendered.contains("<rect "), "no day draws a bar");
         assert_eq!(
             rendered
@@ -480,6 +527,7 @@ mod tests {
         let rendered = target_page(
             &target(),
             &[day(0, 1, 1_000)],
+            &[],
             &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
@@ -508,7 +556,7 @@ mod tests {
 
     #[test]
     fn the_page_offers_every_period_and_marks_the_one_shown() {
-        let rendered = target_page(&target(), &[day(0, 1, 60_000)], &[], NOW, 30);
+        let rendered = target_page(&target(), &[day(0, 1, 60_000)], &[], &[], NOW, 30);
         for days in PERIODS {
             assert!(
                 rendered.contains(&format!("href=\"/target?target=1.1.1.1&days={days}d\"")),
@@ -527,7 +575,7 @@ mod tests {
     #[test]
     fn a_longer_period_restates_every_figure_it_covers() {
         let days: Vec<DailyDrops> = (0..90).map(|index| day(index, 1, 60_000)).collect();
-        let rendered = target_page(&target(), &days, &[], NOW, 90);
+        let rendered = target_page(&target(), &days, &[], &[], NOW, 90);
         assert!(rendered.contains("last 90 days"));
         assert!(rendered.contains("90 disconnections"));
         assert!(rendered.contains("down time in the last 90 days"));
@@ -548,7 +596,7 @@ mod tests {
     #[test]
     fn a_year_of_days_keeps_the_axis_readable() {
         let days: Vec<DailyDrops> = (0..360).map(|index| day(index, 1, 60_000)).collect();
-        let rendered = target_page(&target(), &days, &[], NOW, 360);
+        let rendered = target_page(&target(), &days, &[], &[], NOW, 360);
         let labels = rendered.matches("data-format=\"day\">").count();
         assert!(
             (6..=7).contains(&labels),
@@ -564,7 +612,7 @@ mod tests {
     #[test]
     fn the_counts_keep_their_place_while_the_columns_have_room() {
         let days = [day(0, 2, 90_000), day(1, 0, 0), day(2, 5, 600_000)];
-        let rendered = target_page(&target(), &days, &[], NOW, 30);
+        let rendered = target_page(&target(), &days, &[], &[], NOW, 30);
         assert!(rendered.contains("fill=\"#c62828\">2</text>"));
         assert!(rendered.contains("fill=\"#666666\">0</text>"));
     }
@@ -574,6 +622,7 @@ mod tests {
         let rendered = target_page(
             &target(),
             &[day(0, 1, 1_000)],
+            &[],
             &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
@@ -592,7 +641,7 @@ mod tests {
     #[test]
     fn the_page_states_the_state_and_the_total_down_time() {
         let days = [day(0, 2, 90_000), day(1, 0, 0), day(2, 5, 600_000)];
-        let rendered = target_page(&target(), &days, &[], NOW, DEFAULT_PERIOD_DAYS);
+        let rendered = target_page(&target(), &days, &[], &[], NOW, DEFAULT_PERIOD_DAYS);
         assert!(rendered.contains("<span class=\"badge up\">up</span>"));
         assert!(rendered.contains("<b>7 disconnections</b>"));
         assert!(
@@ -605,7 +654,14 @@ mod tests {
     fn the_target_label_is_escaped() {
         let mut hostile = target();
         hostile.label = Some("<script>alert(1)</script>".to_string());
-        let rendered = target_page(&hostile, &[day(0, 1, 1_000)], &[], NOW, DEFAULT_PERIOD_DAYS);
+        let rendered = target_page(
+            &hostile,
+            &[day(0, 1, 1_000)],
+            &[],
+            &[],
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+        );
         assert!(!rendered.contains("<script>alert(1)</script>"));
         assert!(rendered.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
     }
@@ -636,6 +692,7 @@ mod tests {
             &target(),
             &[day(0, 1, 300_000)],
             &runs(),
+            &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
         );
@@ -661,6 +718,7 @@ mod tests {
             &target(),
             &[day(0, 1, 60_000)],
             &down,
+            &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
         );
@@ -677,7 +735,7 @@ mod tests {
             to_ms: 51 * 3_600_000,
         }];
         let days = [day(1, 0, 0), day(2, 0, 0)];
-        let rendered = target_page(&target(), &days, &crossing, NOW, DEFAULT_PERIOD_DAYS);
+        let rendered = target_page(&target(), &days, &crossing, &[], NOW, DEFAULT_PERIOD_DAYS);
         assert!(
             rendered.contains(
                 "<td class=\"num\" title=\"1 up run that day\">3h00\
@@ -702,6 +760,7 @@ mod tests {
             &target(),
             &[day(0, 1, 300_000)],
             &runs(),
+            &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
         );
@@ -724,6 +783,7 @@ mod tests {
             &target(),
             &[day(0, 0, 0)],
             &running,
+            &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
         );
@@ -742,7 +802,7 @@ mod tests {
     #[test]
     fn each_bar_states_its_own_count() {
         let days = [day(0, 2, 90_000), day(1, 0, 0), day(2, 5, 600_000)];
-        let rendered = target_page(&target(), &days, &[], NOW, DEFAULT_PERIOD_DAYS);
+        let rendered = target_page(&target(), &days, &[], &[], NOW, DEFAULT_PERIOD_DAYS);
         assert!(rendered.contains("fill=\"#c62828\">2</text>"));
         assert!(rendered.contains("fill=\"#c62828\">5</text>"));
         assert!(
@@ -762,6 +822,7 @@ mod tests {
             &target(),
             &[day(0, 1, 60_000)],
             &[],
+            &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
         );
@@ -772,7 +833,14 @@ mod tests {
     fn a_target_that_is_not_up_states_no_streak() {
         let mut down = target();
         down.state = TargetState::Down;
-        let rendered = target_page(&down, &[day(0, 1, 60_000)], &[], NOW, DEFAULT_PERIOD_DAYS);
+        let rendered = target_page(
+            &down,
+            &[day(0, 1, 60_000)],
+            &[],
+            &[],
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+        );
         assert!(!rendered.contains("class=\"since\""));
     }
 
@@ -781,6 +849,7 @@ mod tests {
         let rendered = target_page(
             &target(),
             &[day(0, 1, 60_000)],
+            &[],
             &[],
             NOW,
             DEFAULT_PERIOD_DAYS,

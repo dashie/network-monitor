@@ -233,6 +233,7 @@ A URL with the default port states it once — `https://example.com:443/` is the
 | `--retention-days <n>` | Retention window |
 | `--target <spec>` | Target list, replaces the file list; repeatable |
 | `--log-level <level>` | `error`, `warn`, `info`, `debug` |
+| `--compression <mode>` | `auto` (default) gzips the HTML pages when the browser accepts it; `off` sends them plain, for a proxy that compresses |
 | `--show-config` | Print the effective configuration and exit |
 
 `--target` takes `[method:]address[,key=value]…`:
@@ -265,10 +266,15 @@ piped.
 - `/` — one lane per target over the selected window (1 h by default; 1, 2, 4, 6, 12, 24 h).
   A lane states the drops, the average `up` run with its spread, the longest run, and how long
   the target has been up without a drop. Below the chart, the last 10 disconnections, each named as its lane is: the label when the target has one, in which case the untitled column beside it repeats the key, and the key alone otherwise.
-- `/target?target=<key>&days=30d` — one target for 30, 60, 90, 180, or 360 days: a bar per day
-  and a per-day table.
+- `/target?target=<key>&days=30d` — one target for 30, 60, 90, 180, or 360 days: a bar per day,
+  the last 10 disconnections of that target in the same table as the timeline page, and a per-day
+  table.
 - `Download History` — the whole history as a gzipped CSV.
 - `/healthz` — `ok` while the process runs.
+
+The pages are gzipped when the browser asks for it — it always does, and the saving is about
+80 % — and sent plain otherwise, or always plain with `--compression off` when a proxy in front
+does the compression. The archive is a gzip file and is never compressed twice.
 
 The page reloads itself every 30 s and formats the instants in your browser's time zone. It has
 **no authentication**: anyone who can reach the port reads the history. Keep the default bind

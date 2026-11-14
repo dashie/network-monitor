@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
+use network_monitor::cli::Compression;
 use network_monitor::shutdown::Shutdown;
 use network_monitor::store::{Event, EventFilter, Store, TargetState};
 use network_monitor::time::now_ms;
@@ -37,12 +38,19 @@ impl Server {
     /// The status, the headers, and the body as it arrived, for a response whose
     /// length is known in advance.
     fn get_bytes(&self, target: &str) -> (u16, String, Vec<u8>) {
+        self.get_bytes_with(target, "")
+    }
+
+    /// The same, with extra request headers such as `Accept-Encoding`.
+    fn get_bytes_with(&self, target: &str, headers: &str) -> (u16, String, Vec<u8>) {
         let mut stream = TcpStream::connect(&self.address).expect("the server answers");
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .expect("the timeout is set");
         stream
-            .write_all(format!("GET {target} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+            .write_all(
+                format!("GET {target} HTTP/1.1\r\nHost: localhost\r\n{headers}\r\n").as_bytes(),
+            )
             .expect("the request is written");
 
         let mut response = Vec::new();
@@ -162,6 +170,10 @@ fn seeded_database() -> (tempfile::TempDir, PathBuf) {
 }
 
 fn start(database: &Path) -> Server {
+    start_with(database, Compression::Auto)
+}
+
+fn start_with(database: &Path, compression: Compression) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").expect("an ephemeral port");
     let address = listener
         .local_addr()
@@ -172,7 +184,7 @@ fn start(database: &Path) -> Server {
     let database = database.to_path_buf();
 
     let handle = thread::spawn(move || {
-        web::serve(listener, &database, &running).expect("the server runs");
+        web::serve(listener, &database, &running, compression).expect("the server runs");
     });
 
     let server = Server {
@@ -307,6 +319,94 @@ fn the_history_can_be_downloaded_as_a_gzipped_csv() {
         "the event that came back is exported too"
     );
     assert!(csv.contains(",down,"), "and the one that went down");
+}
+
+/// The page in its compressed form, decompressed by the test.
+fn gunzip(body: &[u8]) -> String {
+    let mut text = String::new();
+    flate2::read::GzDecoder::new(body)
+        .read_to_string(&mut text)
+        .expect("a gzip body decompresses");
+    text
+}
+
+#[test]
+fn a_page_is_gzipped_when_the_client_accepts_it_and_only_then() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, head, plain) = server.get_bytes("/");
+    assert_eq!(status, 200);
+    assert!(
+        !head.contains("Content-Encoding"),
+        "a client that says nothing gets the page as it is"
+    );
+    assert!(head.contains("Vary: Accept-Encoding"), "caches keep both");
+
+    let (status, head, compressed) = server.get_bytes_with("/", "Accept-Encoding: gzip\r\n");
+    assert_eq!(status, 200);
+    assert!(head.contains("Content-Encoding: gzip"));
+    assert!(head.contains("Vary: Accept-Encoding"));
+    let decoded = gunzip(&compressed);
+    assert!(
+        decoded.starts_with("<!doctype html>"),
+        "the body decompresses to the page"
+    );
+    assert!(decoded.contains("Network Monitor"));
+    assert!(decoded.contains("Last 10 disconnections"));
+    assert!(
+        compressed.len() * 2 < plain.len(),
+        "the page is much smaller: {} against {}",
+        compressed.len(),
+        plain.len()
+    );
+}
+
+#[test]
+fn the_detail_page_is_gzipped_too() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, head, compressed) =
+        server.get_bytes_with("/target?target=1.1.1.1", "Accept-Encoding: gzip\r\n");
+    assert_eq!(status, 200);
+    assert!(head.contains("Content-Encoding: gzip"));
+    assert!(gunzip(&compressed).contains("Disconnections per day"));
+}
+
+#[test]
+fn a_refused_coding_or_an_operator_switch_leaves_the_page_plain() {
+    let (_directory, database) = seeded_database();
+
+    let server = start(&database);
+    let (_, head, _) = server.get_bytes_with("/", "Accept-Encoding: gzip;q=0\r\n");
+    assert!(
+        !head.contains("Content-Encoding"),
+        "a zero quality means the coding is not wanted"
+    );
+
+    let off = start_with(&database, Compression::Off);
+    let (status, head, body) = off.get_bytes_with("/", "Accept-Encoding: gzip\r\n");
+    assert_eq!(status, 200);
+    assert!(
+        !head.contains("Content-Encoding"),
+        "with the switch off the proxy compresses"
+    );
+    assert!(String::from_utf8_lossy(&body).contains("Network Monitor"));
+}
+
+#[test]
+fn the_archive_is_not_compressed_twice() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, head, _body) =
+        server.get_bytes_with("/export/disconnections.csv.gz", "Accept-Encoding: gzip\r\n");
+    assert_eq!(status, 200);
+    assert!(
+        !head.contains("Content-Encoding"),
+        "the archive is already a gzip file, not a compressed response body"
+    );
 }
 
 #[test]

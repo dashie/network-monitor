@@ -53,6 +53,17 @@ pub struct Cli {
     )]
     pub log_level: Option<String>,
 
+    /// Page compression on the wire: auto gzips the HTML when the client accepts it, off
+    /// sends plain bytes for a proxy that compresses
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        default_value_t = Compression::Auto,
+        value_name = "MODE"
+    )]
+    pub compression: Compression,
+
     /// Print the effective configuration and exit
     #[arg(long, global = true)]
     pub show_config: bool,
@@ -123,6 +134,17 @@ pub enum QueryCommand {
         #[arg(long, value_enum, default_value_t = Format::Table)]
         format: Format,
     },
+}
+
+/// How the page travels over HTTP.
+///
+/// `auto` follows the client: the page is gzipped when the request advertises gzip, which
+/// every browser does, and sent as it is otherwise. `off` never compresses, for a
+/// deployment whose proxy in front does the job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Compression {
+    Auto,
+    Off,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]

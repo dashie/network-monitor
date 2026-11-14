@@ -17,8 +17,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use flate2::write::GzEncoder;
 use thiserror::Error;
 
+use crate::cli::Compression;
 use crate::logging;
 use crate::shutdown::{self, Shutdown};
 use crate::store::{Store, StoreError};
@@ -68,9 +70,14 @@ pub fn bind(listen: &str) -> Result<TcpListener, ServeError> {
 }
 
 /// Bind the address and serve until shutdown.
-pub fn run(database: &Path, listen: &str, shutdown: &Shutdown) -> Result<(), ServeError> {
+pub fn run(
+    database: &Path,
+    listen: &str,
+    shutdown: &Shutdown,
+    compression: Compression,
+) -> Result<(), ServeError> {
     let listener = bind(listen)?;
-    serve(listener, database, shutdown)
+    serve(listener, database, shutdown, compression)
 }
 
 /// Serve on an already bound listener, so a test can ask for port 0.
@@ -78,6 +85,7 @@ pub fn serve(
     listener: TcpListener,
     database: &Path,
     shutdown: &Shutdown,
+    compression: Compression,
 ) -> Result<(), ServeError> {
     // Fail before the first request when the database is not usable.
     Store::open_ro(database)?;
@@ -116,7 +124,7 @@ pub fn serve(
                 let database = Arc::clone(&database);
                 let active = Arc::clone(&active);
                 workers.push(thread::spawn(move || {
-                    handle(stream, &database);
+                    handle(stream, &database, compression);
                     active.fetch_sub(1, Ordering::Relaxed);
                 }));
             }
@@ -137,7 +145,7 @@ pub fn serve(
     Ok(())
 }
 
-fn handle(mut stream: TcpStream, database: &Path) {
+fn handle(mut stream: TcpStream, database: &Path, compression: Compression) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
 
@@ -165,6 +173,7 @@ fn handle(mut stream: TcpStream, database: &Path) {
         return;
     }
     let include_body = method == "GET";
+    let gzip = compression == Compression::Auto && accepts_gzip(&request);
 
     let (path, query) = match target.split_once('?') {
         Some((path, query)) => (path, query),
@@ -217,13 +226,7 @@ fn handle(mut stream: TcpStream, database: &Path) {
             }
 
             let body = page::page(&timelines, &downs, &up_since, window);
-            respond(
-                &mut stream,
-                200,
-                "text/html; charset=utf-8",
-                &body,
-                include_body,
-            );
+            respond_page(&mut stream, &body, include_body, gzip);
         }
         "/target" => {
             let params = parse_query(query);
@@ -280,14 +283,16 @@ fn handle(mut stream: TcpStream, database: &Path) {
                 }
             };
 
-            let body = detail::target_page(&target, &days, &segments, now, period_days);
-            respond(
-                &mut stream,
-                200,
-                "text/html; charset=utf-8",
-                &body,
-                include_body,
-            );
+            let recent = match store.recent_downs_for(&target.target, RECENT_DOWNS) {
+                Ok(recent) => recent,
+                Err(error) => {
+                    query_failed(&mut stream, &error, include_body);
+                    return;
+                }
+            };
+
+            let body = detail::target_page(&target, &days, &segments, &recent, now, period_days);
+            respond_page(&mut stream, &body, include_body, gzip);
         }
         "/export/disconnections.csv.gz" => {
             let store = match open_store(&mut stream, database, include_body) {
@@ -385,6 +390,59 @@ fn respond_bytes(
     body: &[u8],
     include_body: bool,
 ) {
+    let head = head(status, content_type, "", body.len());
+    let _ = stream.write_all(head.as_bytes());
+    if include_body && !body.is_empty() {
+        let _ = stream.write_all(body);
+    }
+    let _ = stream.flush();
+}
+
+/// An HTML page, compressed when the request advertises gzip and the operator allows it.
+///
+/// `HEAD` states the same headers as `GET` would, compressed length included.
+fn respond_page(stream: &mut TcpStream, body: &str, include_body: bool, gzip: bool) {
+    let content_type = "text/html; charset=utf-8";
+    if !gzip {
+        let head = head(200, content_type, VARY, body.len());
+        let _ = stream.write_all(head.as_bytes());
+        if include_body {
+            let _ = stream.write_all(body.as_bytes());
+        }
+        let _ = stream.flush();
+        return;
+    }
+
+    let mut encoder = GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let compressed = encoder
+        .write_all(body.as_bytes())
+        .and_then(|()| encoder.finish())
+        .ok();
+    let Some(compressed) = compressed else {
+        // A compression failure must not cost the page: fall back to the plain body.
+        let head = head(200, content_type, VARY, body.len());
+        let _ = stream.write_all(head.as_bytes());
+        if include_body {
+            let _ = stream.write_all(body.as_bytes());
+        }
+        let _ = stream.flush();
+        return;
+    };
+
+    let extra = format!("Content-Encoding: gzip\r\n{VARY}");
+    let head = head(200, content_type, &extra, compressed.len());
+    let _ = stream.write_all(head.as_bytes());
+    if include_body {
+        let _ = stream.write_all(&compressed);
+    }
+    let _ = stream.flush();
+}
+
+/// A cache must keep the compressed and the plain page apart.
+const VARY: &str = "Vary: Accept-Encoding\r\n";
+
+/// The head every reply starts with, so the security headers are stated once.
+fn head(status: u16, content_type: &str, extra: &str, length: usize) -> String {
     let reason = match status {
         200 => "OK",
         204 => "No Content",
@@ -395,21 +453,51 @@ fn respond_bytes(
         _ => "OK",
     };
 
-    let head = format!(
+    format!(
         "HTTP/1.1 {status} {reason}\r\n\
          Content-Type: {content_type}\r\n\
-         Content-Length: {}\r\n\
+         {extra}\
+         Content-Length: {length}\r\n\
          Cache-Control: no-store\r\n\
          X-Content-Type-Options: nosniff\r\n\
-         Connection: close\r\n\r\n",
-        body.len()
-    );
+         Connection: close\r\n\r\n"
+    )
+}
 
-    let _ = stream.write_all(head.as_bytes());
-    if include_body && !body.is_empty() {
-        let _ = stream.write_all(body);
+/// Whether the request advertises gzip, with a quality above zero.
+///
+/// Every browser sends `gzip`; a client that does not must get the plain body.
+fn accepts_gzip(request: &str) -> bool {
+    for line in request.lines() {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if !name.trim().eq_ignore_ascii_case("accept-encoding") {
+            continue;
+        }
+        for item in value.split(',') {
+            let mut pieces = item.split(';');
+            if !pieces
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .eq_ignore_ascii_case("gzip")
+            {
+                continue;
+            }
+            let refused = pieces.any(|parameter| {
+                parameter
+                    .trim()
+                    .strip_prefix("q=")
+                    .and_then(|quality| quality.trim().parse::<f32>().ok())
+                    == Some(0.0)
+            });
+            if !refused {
+                return true;
+            }
+        }
     }
-    let _ = stream.flush();
+    false
 }
 
 /// A response body of unknown length, written as HTTP/1.1 chunks.
@@ -582,6 +670,37 @@ fn resolve_window(from: Option<i64>, to: Option<i64>, hours: Option<u8>, now: i6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_request_that_advertises_gzip_gets_a_compressed_page() {
+        let request = "GET / HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip\r\n\r\n";
+        assert!(accepts_gzip(request));
+    }
+
+    #[test]
+    fn a_request_without_the_header_or_with_another_coding_gets_plain_bytes() {
+        assert!(!accepts_gzip("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+        assert!(!accepts_gzip(
+            "GET / HTTP/1.1\r\nAccept-Encoding: deflate\r\n\r\n"
+        ));
+    }
+
+    #[test]
+    fn the_header_is_read_case_insensitively_and_among_other_codings() {
+        assert!(accepts_gzip(
+            "GET / HTTP/1.1\r\naccept-encoding: br, GZIP;q=0.8, deflate\r\n\r\n"
+        ));
+    }
+
+    #[test]
+    fn a_coding_refused_with_a_zero_quality_is_not_used() {
+        assert!(!accepts_gzip(
+            "GET / HTTP/1.1\r\nAccept-Encoding: gzip;q=0, deflate\r\n\r\n"
+        ));
+        assert!(accepts_gzip(
+            "GET / HTTP/1.1\r\nAccept-Encoding: gzip;q=1.0\r\n\r\n"
+        ));
+    }
 
     #[test]
     fn the_default_window_is_the_last_hour() {

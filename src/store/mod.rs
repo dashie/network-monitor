@@ -786,6 +786,31 @@ impl Store {
         Ok(rows)
     }
 
+    /// The most recent disconnections of one target, newest first.
+    pub fn recent_downs_for(
+        &self,
+        target: &str,
+        limit: u32,
+    ) -> Result<Vec<DownEpisode>, StoreError> {
+        let query = format!(
+            "{DOWNS_SELECT} AND e.target = ?1 ORDER BY e.occurred_at_ms DESC, e.id DESC LIMIT ?2"
+        );
+        let mut statement = self.connection.prepare(&query)?;
+
+        let rows = statement
+            .query_map(params![target, limit], |row| {
+                Ok(DownEpisode {
+                    event_id: row.get(0)?,
+                    target: row.get(1)?,
+                    label: row.get(2)?,
+                    started_at_ms: row.get(3)?,
+                    ended_at_ms: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// One page of disconnections in chronological order, for a streamed export.
     ///
     /// Paging keeps every read transaction short, so a slow download never holds the
@@ -1199,6 +1224,50 @@ mod tests {
         assert_eq!(downs[0].label.as_deref(), Some("quad9"));
 
         assert_eq!(store.recent_downs(1).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_downs_of_one_target_leave_the_others_out() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        store
+            .record_transition(&event(
+                "1.1.1.1",
+                TargetState::Unknown,
+                TargetState::Up,
+                1_000,
+            ))
+            .unwrap();
+        store
+            .record_transition(&event("1.1.1.1", TargetState::Up, TargetState::Down, 2_000))
+            .unwrap();
+        store
+            .record_transition(&event("1.1.1.1", TargetState::Down, TargetState::Up, 5_000))
+            .unwrap();
+        store
+            .record_transition(&event(
+                "9.9.9.9",
+                TargetState::Unknown,
+                TargetState::Down,
+                9_000,
+            ))
+            .unwrap();
+
+        let downs = store.recent_downs_for("1.1.1.1", 10).unwrap();
+        assert_eq!(downs.len(), 1);
+        assert_eq!(downs[0].target, "1.1.1.1");
+        assert_eq!(downs[0].started_at_ms, 2_000);
+        assert_eq!(downs[0].ended_at_ms, Some(5_000));
+
+        let downs = store.recent_downs_for("9.9.9.9", 10).unwrap();
+        assert_eq!(downs.len(), 1);
+        assert_eq!(downs[0].started_at_ms, 9_000);
+        assert_eq!(downs[0].ended_at_ms, None, "the target is still down");
+
+        assert!(
+            store.recent_downs_for("8.8.8.8", 10).unwrap().is_empty(),
+            "a target without a drop lists none"
+        );
     }
 
     #[test]
