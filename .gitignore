@@ -40,4 +40,4 @@ tmp/*
 
 # AI sandbox run logs
 .agent/logs/
-network-monitor-telegram.toml
+network-monitor.toml
