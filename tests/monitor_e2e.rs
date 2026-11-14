@@ -64,7 +64,7 @@ fn the_monitor_records_only_transitions() {
     ]));
     let store = Arc::new(Mutex::new(Store::open_rw(&database).unwrap()));
 
-    let handle = thread::spawn(move || monitor::run(&config, prober, store, &running, None));
+    let handle = thread::spawn(move || monitor::run(&config, prober, store, &running, None, None));
 
     wait_for_events(&expected, 3, Duration::from_secs(5));
     stop.request();
@@ -96,7 +96,7 @@ fn a_restart_continues_from_the_stored_state() {
     let first = test_config(&database);
     let prober: Arc<dyn Probe> = Arc::new(FakeProbe::always(up()));
     let store = Arc::new(Mutex::new(Store::open_rw(&database).unwrap()));
-    let handle = thread::spawn(move || monitor::run(&first, prober, store, &running, None));
+    let handle = thread::spawn(move || monitor::run(&first, prober, store, &running, None, None));
     wait_for_events(&expected, 1, Duration::from_secs(5));
     stop.request();
     handle.join().unwrap().unwrap();
@@ -106,7 +106,7 @@ fn a_restart_continues_from_the_stored_state() {
     let second = test_config(&database);
     let prober: Arc<dyn Probe> = Arc::new(FakeProbe::always(down()));
     let store = Arc::new(Mutex::new(Store::open_rw(&database).unwrap()));
-    let handle = thread::spawn(move || monitor::run(&second, prober, store, &running, None));
+    let handle = thread::spawn(move || monitor::run(&second, prober, store, &running, None, None));
     wait_for_events(&expected, 2, Duration::from_secs(5));
     stop.request();
     handle.join().unwrap().unwrap();
@@ -197,7 +197,7 @@ fn each_recorded_transition_is_notified_once() {
     let sink: Arc<dyn Notifier> = notifier.clone();
 
     let handle = thread::spawn(move || {
-        monitor::run_with_notifier(&config, prober, store, &running, None, sink)
+        monitor::run_with_notifier(&config, prober, store, &running, None, sink, None)
     });
 
     wait_for_notifications(&notifier, 3, Duration::from_secs(5));
@@ -263,7 +263,7 @@ fn every_target_uses_its_own_timeout_and_interval() {
     let store = Arc::new(Mutex::new(Store::open_rw(&database).unwrap()));
     let stop = Shutdown::new();
     let running = stop.clone();
-    let handle = thread::spawn(move || monitor::run(&config, prober, store, &running, None));
+    let handle = thread::spawn(move || monitor::run(&config, prober, store, &running, None, None));
 
     thread::sleep(Duration::from_millis(450));
     stop.request();
@@ -291,4 +291,52 @@ fn every_target_uses_its_own_timeout_and_interval() {
     );
     assert!(fast >= 3, "the 10 ms target was probed {fast} time(s)");
     assert!(slow <= 2, "the 2 s target was probed {slow} time(s)");
+}
+
+/// The channel learns that the monitor started, before the first transition.
+#[test]
+fn the_startup_announcement_reaches_the_channel_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("events.db");
+    let config = test_config(&database);
+
+    let stop = Shutdown::new();
+    let running = stop.clone();
+    let prober: Arc<dyn Probe> = Arc::new(FakeProbe::always(up()));
+    let store = Arc::new(Mutex::new(Store::open_rw(&database).unwrap()));
+    let notifier = Arc::new(FakeNotifier::new());
+    let sink: Arc<dyn Notifier> = notifier.clone();
+    let announcement = "READY network-monitor\nTargets: 1\n".to_string();
+
+    let handle = thread::spawn(move || {
+        monitor::run_with_notifier(
+            &config,
+            prober,
+            store,
+            &running,
+            None,
+            sink,
+            Some(announcement),
+        )
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while notifier.announcements().is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the announcement"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    stop.request();
+    handle
+        .join()
+        .expect("the monitor thread does not panic")
+        .unwrap();
+
+    assert_eq!(
+        notifier.announcements(),
+        vec!["READY network-monitor\nTargets: 1\n".to_string()],
+        "one announcement per start"
+    );
 }

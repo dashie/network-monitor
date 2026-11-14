@@ -260,6 +260,9 @@ Setting it up, from an empty Telegram account:
 
 What is sent, and when:
 
+- The monitor starts: one `READY` message as soon as every target is being probed, stating the
+  configuration file it read, the keys of the targets it started, and the address of the page
+  when it serves one. A restart sends it again.
 - A target stops answering: one `DOWN` message at once, with the cause as a code and a sentence.
 - A target answers again: one `UP` message only after `up` has held continuously for
   `stabilize_seconds`. A target that drops again inside that window produces no message at all,
@@ -274,6 +277,18 @@ The message is plain text with a fixed layout — state, label and key, cause, U
 ```text
 DOWN cloudflare-dns (icmp://1.1.1.1)
 Cause: ICMP.NO_REPLY — no reply within 2000 ms
+2025-11-24T16:00:00.000Z
+```
+
+The startup message states one fact per line and closes with the instant:
+
+```text
+READY network-monitor
+Config: /etc/network-monitor/network-monitor-qubo.toml
+Targets: 2
+- icmp://192.168.1.1
+- tcp://1.1.1.1:443
+Web: http://0.0.0.0:8642/
 2025-11-24T16:00:00.000Z
 ```
 
@@ -444,6 +459,10 @@ snapshot, a backup, or a volume mounted read-only.
 - `retention_days > 0` deletes older events periodically; `0` keeps everything.
 - `--log-level debug` logs every verdict; `info` logs every transition (the default), `warn`
   local probe failures, `error` fatal conditions.
+- A start writes, at `info`, the lines that state what the process does: `initializing`, the
+  configuration file it read (or that it read none), whether Telegram is configured, one
+  `initialized target <key>` line per target, and — when the page is served —
+  `web interface ready on http://<address>/` with the address it listens on.
 - `SIGINT`/`SIGTERM` stop the process between two probe cycles, with no partial write.
 
 ## Troubleshooting

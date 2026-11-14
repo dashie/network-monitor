@@ -105,7 +105,7 @@ pub fn serve(
     logging::info(
         None,
         &format!(
-            "web interface on http://{address}/ reading {}",
+            "web interface ready on http://{address}/ reading {}",
             database.display()
         ),
     );

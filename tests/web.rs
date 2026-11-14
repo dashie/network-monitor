@@ -245,6 +245,22 @@ fn serves_the_page_with_a_band_per_state() {
         response.contains("and counting"),
         "the seeded target was down at the end of the window"
     );
+
+    let legend_start = response.find("<div class=\"legend\">").expect("a legend");
+    let legend = &response[legend_start..];
+    let legend = &legend[..legend.find("</div>").expect("the legend closes")];
+    let order = [
+        legend.find(">up<").expect("up in the legend"),
+        legend.find(">down<").expect("down in the legend"),
+        legend
+            .find(">fault too short to draw<")
+            .expect("the short fault in the legend"),
+        legend.find(">unknown<").expect("unknown in the legend"),
+    ];
+    assert!(
+        order.windows(2).all(|pair| pair[0] < pair[1]),
+        "the legend reads up, down, fault too short to draw, unknown: {legend}"
+    );
 }
 
 #[test]

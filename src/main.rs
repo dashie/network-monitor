@@ -1,5 +1,6 @@
 //! Entry point: parse the command line, resolve the configuration, dispatch.
 
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
@@ -58,6 +59,7 @@ fn run() -> Result<ExitCode, AppError> {
 
     let overrides = cli.overrides().map_err(AppError::Invalid)?;
     let loaded = config::load(cli.config.as_deref())?;
+    let source = loaded.as_ref().map(|loaded| loaded.path.clone());
     let reload = loaded.as_ref().map(|loaded| monitor::Reload {
         path: loaded.path.clone(),
         overrides: overrides.clone(),
@@ -72,11 +74,15 @@ fn run() -> Result<ExitCode, AppError> {
 
     match cli.command {
         Some(Command::Monitor { listen }) => {
+            log_initializing(source.as_deref());
             settings.require_targets()?;
             validate_interfaces(&settings)?;
-            run_monitor(&settings, reload, listen, compression)?;
+            log_telegram(&settings);
+            log_targets(&settings);
+            run_monitor(&settings, source.as_deref(), reload, listen, compression)?;
         }
         Some(Command::Serve { listen }) => {
+            log_initializing(source.as_deref());
             let stop = shutdown::Shutdown::new();
             shutdown::install();
             web::run(&settings.database, &listen, &stop, compression)?;
@@ -136,6 +142,37 @@ fn run() -> Result<ExitCode, AppError> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// The opening `INFO` lines: the process states that it starts and names what it read.
+fn log_initializing(source: Option<&Path>) {
+    logging::info(None, "initializing");
+    match source {
+        Some(path) => logging::info(
+            None,
+            &format!("reading configuration from {}", path.display()),
+        ),
+        None => logging::info(
+            None,
+            "no configuration file; using the command line and the built-in defaults",
+        ),
+    }
+}
+
+fn log_telegram(settings: &Config) {
+    match &settings.telegram {
+        Some(telegram) => logging::info(
+            None,
+            &format!("telegram configured for chat {}", telegram.chat_id),
+        ),
+        None => logging::info(None, "telegram not configured"),
+    }
+}
+
+fn log_targets(settings: &Config) {
+    for target in &settings.targets {
+        logging::info(None, &format!("initialized target {}", target.key()));
+    }
+}
+
 fn validate_interfaces(settings: &Config) -> Result<(), AppError> {
     for target in &settings.targets {
         if let Some(name) = &target.interface {
@@ -149,6 +186,7 @@ fn validate_interfaces(settings: &Config) -> Result<(), AppError> {
 
 fn run_monitor(
     settings: &Config,
+    source: Option<&Path>,
     reload: Option<monitor::Reload>,
     listen: Option<String>,
     compression: Compression,
@@ -159,11 +197,18 @@ fn run_monitor(
 
     shutdown::install();
 
+    let mut serving = None;
     // Bind before the first probe: an unusable address must fail at once, not after
     // the monitor has been running for a while.
     let web_thread = match listen {
         Some(address) => {
             let listener = web::bind(&address)?;
+            serving = Some(
+                listener
+                    .local_addr()
+                    .map(|bound| bound.to_string())
+                    .unwrap_or(address),
+            );
             let database = settings.database.clone();
             let web_stop = stop.clone();
             Some(std::thread::spawn(move || {
@@ -175,7 +220,8 @@ fn run_monitor(
         None => None,
     };
 
-    let outcome = monitor::run(settings, prober, store, &stop, reload);
+    let announcement = monitor::startup_message(settings, source, serving.as_deref());
+    let outcome = monitor::run(settings, prober, store, &stop, reload, Some(announcement));
 
     if let Some(thread) = web_thread {
         stop.request();

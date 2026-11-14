@@ -71,7 +71,7 @@ fn start_with_probe(config_path: &Path, database: &Path) -> (Running, Arc<FakePr
     let running = stop.clone();
 
     let handle =
-        thread::spawn(move || monitor::run(&settings, prober, store, &running, Some(reload)));
+        thread::spawn(move || monitor::run(&settings, prober, store, &running, Some(reload), None));
 
     (
         Running {
@@ -98,7 +98,7 @@ fn start_with_notifier(config_path: &Path, database: &Path) -> (Running, Arc<Fak
     let running = stop.clone();
 
     let handle = thread::spawn(move || {
-        monitor::run_with_notifier(&settings, prober, store, &running, Some(reload), sink)
+        monitor::run_with_notifier(&settings, prober, store, &running, Some(reload), sink, None)
     });
 
     (

@@ -17,7 +17,7 @@ use crate::probe::Probe;
 use crate::reload::{self, Change, Watcher};
 use crate::shutdown::{self, Shutdown};
 use crate::store::{Event, Store, StoreError, TargetState};
-use crate::time::now_ms;
+use crate::time::{format_rfc3339, now_ms};
 
 use state::Transition;
 
@@ -215,16 +215,37 @@ impl Supervisor {
     }
 }
 
+/// The message the channel receives once the monitor is ready, so a start is visible
+/// where the incidents are: the configuration it read, the targets it started, and the
+/// address of the page when it serves one.
+pub fn startup_message(config: &Config, source: Option<&Path>, serving: Option<&str>) -> String {
+    let mut text = String::from("READY network-monitor\n");
+    let source = source.map_or_else(|| "none".to_string(), |path| path.display().to_string());
+    text.push_str(&format!("Config: {source}\n"));
+    text.push_str(&format!("Targets: {}\n", config.targets.len()));
+    for target in &config.targets {
+        text.push_str(&format!("- {}\n", target.key()));
+    }
+    match serving {
+        Some(address) => text.push_str(&format!("Web: http://{address}/\n")),
+        None => text.push_str("Web: none\n"),
+    }
+    text.push_str(&format_rfc3339(now_ms()));
+    text
+}
+
 /// Probe every target until shutdown, persisting transitions.
 ///
 /// Without a `[telegram]` section no delivery thread is started and the process makes
-/// no outbound connection beyond the probes.
+/// no outbound connection beyond the probes. `announcement`, when present, reaches the
+/// channel once every worker runs.
 pub fn run(
     config: &Config,
     prober: Arc<dyn Probe>,
     store: Arc<Mutex<Store>>,
     shutdown: &Shutdown,
     reload: Option<Reload>,
+    announcement: Option<String>,
 ) -> Result<(), RunError> {
     let handle = config
         .telegram
@@ -235,7 +256,15 @@ pub fn run(
         None => Arc::new(NoopNotifier),
     };
 
-    let result = run_with_notifier(config, prober, store, shutdown, reload, notifier);
+    let result = run_with_notifier(
+        config,
+        prober,
+        store,
+        shutdown,
+        reload,
+        notifier,
+        announcement,
+    );
     if let Some(handle) = handle {
         handle.shutdown();
     }
@@ -250,6 +279,7 @@ pub fn run_with_notifier(
     shutdown: &Shutdown,
     reload: Option<Reload>,
     notifier: Arc<dyn Notifier>,
+    announcement: Option<String>,
 ) -> Result<(), RunError> {
     config.require_targets().map_err(|_| RunError::NoTargets)?;
 
@@ -272,6 +302,7 @@ pub fn run_with_notifier(
         thread::spawn(move || retention_worker(store, days, stop))
     };
 
+    let channel = Arc::clone(&notifier);
     let mut supervisor = Supervisor {
         config: config.clone(),
         overrides: reload
@@ -285,6 +316,10 @@ pub fn run_with_notifier(
         workers: Vec::new(),
     };
     supervisor.start_workers()?;
+
+    if let Some(text) = announcement {
+        channel.announce(text);
+    }
 
     let mut watcher = reload.as_ref().map(|reload| Watcher::new(&reload.path));
     let watched_path = reload.map(|reload| reload.path);
@@ -420,4 +455,65 @@ fn retention_worker(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Config, FileConfig, FileTarget, Overrides};
+
+    fn config() -> Config {
+        Config::resolve(
+            Some(FileConfig {
+                targets: Some(vec![
+                    FileTarget {
+                        ip: Some("1.1.1.1".to_string()),
+                        ..FileTarget::default()
+                    },
+                    FileTarget {
+                        method: Some("tcp".to_string()),
+                        host: Some("1.1.1.1".to_string()),
+                        port: Some(443),
+                        ..FileTarget::default()
+                    },
+                ]),
+                ..FileConfig::default()
+            }),
+            Overrides::default(),
+        )
+        .expect("a valid configuration")
+    }
+
+    #[test]
+    fn the_startup_message_names_the_file_the_targets_and_the_page() {
+        let text = startup_message(
+            &config(),
+            Some(Path::new("/etc/network-monitor.toml")),
+            Some("0.0.0.0:8642"),
+        );
+
+        assert!(
+            text.starts_with(
+                "READY network-monitor\nConfig: /etc/network-monitor.toml\nTargets: 2\n"
+            ),
+            "unexpected: {text}"
+        );
+        assert!(text.contains("\n- icmp://1.1.1.1\n"), "unexpected: {text}");
+        assert!(
+            text.contains("\n- tcp://1.1.1.1:443\n"),
+            "unexpected: {text}"
+        );
+        assert!(
+            text.contains("Web: http://0.0.0.0:8642/\n"),
+            "unexpected: {text}"
+        );
+    }
+
+    #[test]
+    fn a_start_without_a_file_or_a_page_says_so() {
+        let text = startup_message(&config(), None, None);
+
+        assert!(text.contains("Config: none\n"), "unexpected: {text}");
+        assert!(text.contains("Web: none\n"), "unexpected: {text}");
+    }
 }

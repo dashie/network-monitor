@@ -157,6 +157,86 @@ fn an_invalid_listen_address_fails_before_probing() {
 }
 
 #[test]
+fn the_startup_log_states_the_defaults_and_every_target() {
+    let directory = tempfile::tempdir().unwrap();
+
+    monitor(directory.path())
+        .args([
+            "monitor",
+            "--target",
+            "1.1.1.1",
+            "--target",
+            "tcp:1.1.1.1:443",
+            "--database",
+            "events.db",
+            "--listen",
+            "not-an-address",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("INFO  initializing"))
+        .stderr(predicate::str::contains(
+            "INFO  no configuration file; using the command line and the built-in defaults",
+        ))
+        .stderr(predicate::str::contains("INFO  telegram not configured"))
+        .stderr(predicate::str::contains(
+            "INFO  initialized target icmp://1.1.1.1",
+        ))
+        .stderr(predicate::str::contains(
+            "INFO  initialized target tcp://1.1.1.1:443",
+        ));
+}
+
+#[test]
+fn the_startup_log_names_the_configuration_file() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("network-monitor.toml"),
+        "[[targets]]\nip = \"9.9.9.9\"\n",
+    )
+    .unwrap();
+
+    monitor(directory.path())
+        .args([
+            "monitor",
+            "--database",
+            "events.db",
+            "--listen",
+            "not-an-address",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "INFO  reading configuration from network-monitor.toml",
+        ));
+}
+
+#[test]
+fn the_startup_log_names_the_configured_chat() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("network-monitor.toml"),
+        "[[targets]]\nip = \"9.9.9.9\"\n\n[telegram]\nbot_token = \"123456:abc-def\"\nchat_id = \"-100200\"\n",
+    )
+    .unwrap();
+
+    monitor(directory.path())
+        .args([
+            "monitor",
+            "--database",
+            "events.db",
+            "--listen",
+            "not-an-address",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "INFO  telegram configured for chat -100200",
+        ))
+        .stderr(predicate::str::contains("123456:abc-def").not());
+}
+
+#[test]
 fn serve_refuses_an_invalid_listen_address() {
     let directory = tempfile::tempdir().unwrap();
 

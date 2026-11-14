@@ -158,15 +158,17 @@ C4Container
 
 ### `monitor`
 
-- **Input:** the effective configuration, a `Probe` implementation, a `Store`, a `Shutdown` handle, and optionally the path to re-read.
-- **Output:** database writes, log lines, and a process exit status.
+- **Input:** the effective configuration, a `Probe` implementation, a `Store`, a `Shutdown` handle, optionally the path to re-read, and optionally the `READY` text for the channel.
+- **Output:** database writes, log lines, the startup announcement handed to the notifier once every worker runs, and a process exit status.
 - **Guarantees:** at most one in-flight probe per target; a transition is written at most once per cycle; shutdown on `SIGINT` or `SIGTERM` happens between two cycles, never inside a transaction; a reload is applied only when the new file parses and resolves to at least one target, and the database path in use never changes at runtime.
 
 ### `notify`
 
-- **Input:** a `Notification` for every recorded transition, and the resolved `[telegram]` settings when the section exists.
-- **Output:** one Telegram message per reported state change, or a `WARN` line when a message is lost.
-- **Guarantees:** the decision is per target and lives in `notify::policy`, free of I/O: `down` is reported at once unless the last reported state was already `down`, `up` is reported only after `stabilize_seconds` of continuous `up`, and a `down` inside that window cancels it. Delivery runs on its own thread behind a bounded queue of 32 messages that drops the oldest instead of blocking a probe; one message is attempted five times, waiting 1, 2, 4, and 8 seconds, and a non-retryable answer or a shutdown stops the retries at once. A notification is never a condition of recording (INV-12), and the bot token never reaches a log line, an error message, or `--show-config`. The section is read when the delivery thread starts; a reload that changes it is reported and ignored until the next start.
+- **Input:** a `Notification` for every recorded transition, the `READY` text once the monitor
+  has started every worker, and the resolved `[telegram]` settings when the section exists.
+- **Output:** one Telegram message per reported state change and one for the start, or a `WARN`
+  line when a message is lost.
+- **Guarantees:** the decision is per target and lives in `notify::policy`, free of I/O: `down` is reported at once unless the last reported state was already `down`, `up` is reported only after `stabilize_seconds` of continuous `up`, and a `down` inside that window cancels it. The startup announcement bypasses that decision and is sent as it is, through the same bounded queue and retries. Delivery runs on its own thread behind a bounded queue of 32 messages that drops the oldest instead of blocking a probe; one message is attempted five times, waiting 1, 2, 4, and 8 seconds, and a non-retryable answer or a shutdown stops the retries at once. A notification is never a condition of recording (INV-12), and the bot token never reaches a log line, an error message, or `--show-config`. The section is read when the delivery thread starts; a reload that changes it is reported and ignored until the next start.
 
 ### `reload`
 

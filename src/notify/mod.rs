@@ -17,7 +17,7 @@ use crate::logging;
 use crate::shutdown::{self, Shutdown};
 
 use policy::Engine;
-use queue::Queue;
+use queue::{Message, Queue};
 
 pub use policy::Notification;
 
@@ -27,9 +27,13 @@ const IDLE_POLL: Duration = Duration::from_secs(1);
 /// How many times one message is attempted before it is declared lost.
 pub const ATTEMPTS: usize = 5;
 
-/// What the monitor knows about notifications: a sole method, and no result.
+/// What the monitor knows about notifications: a sole method for a state change, one
+/// for the startup announcement, and no result.
 pub trait Notifier: Send + Sync {
     fn notify(&self, notification: Notification);
+
+    /// Hand the startup announcement to the channel, in its own words.
+    fn announce(&self, text: String);
 }
 
 /// The notifier of a process without a `[telegram]` section.
@@ -38,6 +42,8 @@ pub struct NoopNotifier;
 
 impl Notifier for NoopNotifier {
     fn notify(&self, _notification: Notification) {}
+
+    fn announce(&self, _text: String) {}
 }
 
 /// Why a delivery attempt failed, and whether another attempt can help.
@@ -113,12 +119,20 @@ pub struct ChannelNotifier {
 
 impl Notifier for ChannelNotifier {
     fn notify(&self, notification: Notification) {
-        if self.queue.push(notification) {
-            logging::warn(
-                None,
-                "notification queue full; the oldest message was dropped",
-            );
-        }
+        report_drop(self.queue.push(notification));
+    }
+
+    fn announce(&self, text: String) {
+        report_drop(self.queue.push_announcement(text));
+    }
+}
+
+fn report_drop(dropped: bool) {
+    if dropped {
+        logging::warn(
+            None,
+            "notification queue full; the oldest message was dropped",
+        );
     }
 }
 
@@ -197,11 +211,12 @@ fn run(
             .map_or(IDLE_POLL, |remaining| remaining.min(IDLE_POLL));
 
         match queue.pop_timeout(wait) {
-            Some(notification) => {
+            Some(Message::Notification(notification)) => {
                 if let Some(due) = engine.observe(notification) {
                     send(&mut *sender, &due, shutdown);
                 }
             }
+            Some(Message::Announcement(text)) => announce(&mut *sender, &text, shutdown),
             None => {
                 if queue.is_closed() {
                     break;
@@ -218,5 +233,12 @@ fn run(
 fn send(sender: &mut dyn Sender, notification: &Notification, shutdown: &Shutdown) {
     if deliver(sender, &notification.text(), shutdown).is_ok() {
         logging::info(Some(&notification.target), "notification sent");
+    }
+}
+
+/// Deliver the startup announcement and report the outcome.
+fn announce(sender: &mut dyn Sender, text: &str, shutdown: &Shutdown) {
+    if deliver(sender, text, shutdown).is_ok() {
+        logging::info(None, "startup announcement sent");
     }
 }

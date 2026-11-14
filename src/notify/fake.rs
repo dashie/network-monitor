@@ -69,10 +69,11 @@ impl Sender for FakeSender {
     }
 }
 
-/// Records every notification the monitor hands it.
+/// Records every notification and announcement the monitor hands it.
 #[derive(Debug, Clone, Default)]
 pub struct FakeNotifier {
     notifications: Arc<Mutex<Vec<Notification>>>,
+    announcements: Arc<Mutex<Vec<String>>>,
 }
 
 impl FakeNotifier {
@@ -83,6 +84,14 @@ impl FakeNotifier {
     /// Every notification received, oldest first.
     pub fn notifications(&self) -> Vec<Notification> {
         self.notifications
+            .lock()
+            .expect("the fake notifier lock is not poisoned")
+            .clone()
+    }
+
+    /// Every announcement received, oldest first.
+    pub fn announcements(&self) -> Vec<String> {
+        self.announcements
             .lock()
             .expect("the fake notifier lock is not poisoned")
             .clone()
@@ -106,5 +115,12 @@ impl Notifier for FakeNotifier {
             .lock()
             .expect("the fake notifier lock is not poisoned")
             .push(notification);
+    }
+
+    fn announce(&self, text: String) {
+        self.announcements
+            .lock()
+            .expect("the fake notifier lock is not poisoned")
+            .push(text);
     }
 }

@@ -180,3 +180,31 @@ fn a_failed_delivery_is_retried_before_it_gives_up() {
 
     handle.shutdown();
 }
+
+#[test]
+fn an_announcement_reaches_the_channel_as_it_is() {
+    let shutdown = Shutdown::new();
+    let sink = FakeSender::always_ok();
+    let handle = start_with(
+        &settings(Duration::from_secs(60)),
+        Box::new(sink.clone()),
+        &shutdown,
+    );
+
+    handle
+        .notifier
+        .announce("READY network-monitor\nTargets: 0\n".to_string());
+
+    wait_for(
+        || sink.attempts() >= 1,
+        Duration::from_secs(2),
+        "the startup announcement",
+    );
+    assert_eq!(
+        sink.sent(),
+        vec!["READY network-monitor\nTargets: 0\n".to_string()],
+        "the announcement is sent without the state policy touching it"
+    );
+
+    handle.shutdown();
+}

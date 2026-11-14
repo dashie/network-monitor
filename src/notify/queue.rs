@@ -13,9 +13,16 @@ use super::Notification;
 /// How many messages may wait for delivery before the oldest is dropped.
 pub const CAPACITY: usize = 32;
 
+/// What the delivery thread carries: a state change to decide, or a text to send as it is.
+#[derive(Debug)]
+pub enum Message {
+    Notification(Notification),
+    Announcement(String),
+}
+
 #[derive(Debug, Default)]
 struct State {
-    items: VecDeque<Notification>,
+    items: VecDeque<Message>,
     closed: bool,
 }
 
@@ -31,23 +38,34 @@ impl Queue {
         Queue::default()
     }
 
-    /// Append a message, dropping the oldest when the queue is full.
+    /// Append a state change, dropping the oldest when the queue is full.
     ///
     /// Returns `true` when a message was dropped to make room.
     pub fn push(&self, notification: Notification) -> bool {
+        self.push_message(Message::Notification(notification))
+    }
+
+    /// Append the startup announcement, dropping the oldest when the queue is full.
+    ///
+    /// Returns `true` when a message was dropped to make room.
+    pub fn push_announcement(&self, text: String) -> bool {
+        self.push_message(Message::Announcement(text))
+    }
+
+    fn push_message(&self, message: Message) -> bool {
         let mut state = self.lock();
         let dropped = state.items.len() >= CAPACITY;
         if dropped {
             state.items.pop_front();
         }
-        state.items.push_back(notification);
+        state.items.push_back(message);
         drop(state);
         self.ready.notify_one();
         dropped
     }
 
     /// Take the oldest message, waiting at most `wait` for one to arrive.
-    pub fn pop_timeout(&self, wait: Duration) -> Option<Notification> {
+    pub fn pop_timeout(&self, wait: Duration) -> Option<Message> {
         let mut state = self.lock();
         if state.items.is_empty() && !state.closed {
             let (next, _) = self
@@ -96,15 +114,29 @@ mod tests {
         let queue = Queue::new();
         assert!(!queue.push(notification(1)));
         assert!(!queue.push(notification(2)));
-        assert_eq!(
-            queue.pop_timeout(Duration::ZERO).unwrap().key,
-            "icmp://10.0.0.1"
-        );
-        assert_eq!(
-            queue.pop_timeout(Duration::ZERO).unwrap().key,
-            "icmp://10.0.0.2"
-        );
+        assert_eq!(pop_key(&queue), "icmp://10.0.0.1");
+        assert_eq!(pop_key(&queue), "icmp://10.0.0.2");
         assert!(queue.pop_timeout(Duration::ZERO).is_none());
+    }
+
+    fn pop_key(queue: &Queue) -> String {
+        match queue.pop_timeout(Duration::ZERO).unwrap() {
+            Message::Notification(item) => item.key,
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_announcement_travels_with_the_state_changes() {
+        let queue = Queue::new();
+        assert!(!queue.push(notification(1)));
+        assert!(!queue.push_announcement("READY".to_string()));
+
+        assert_eq!(pop_key(&queue), "icmp://10.0.0.1");
+        match queue.pop_timeout(Duration::ZERO).unwrap() {
+            Message::Announcement(text) => assert_eq!(text, "READY"),
+            other => panic!("unexpected message: {other:?}"),
+        }
     }
 
     #[test]
@@ -116,7 +148,7 @@ mod tests {
         assert!(queue.push(notification(CAPACITY)), "the oldest was dropped");
 
         let mut seen = Vec::new();
-        while let Some(item) = queue.pop_timeout(Duration::ZERO) {
+        while let Some(Message::Notification(item)) = queue.pop_timeout(Duration::ZERO) {
             seen.push(item.occurred_at_ms);
         }
         assert_eq!(seen.len(), CAPACITY);
