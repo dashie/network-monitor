@@ -36,8 +36,8 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0022 | Drop the down-time and availability columns from the timeline | accepted | 2026-11-13 | A lane states `DROPS`, `AVG UP`, `MAX`, `UP FOR`; the freed width goes to the bands |
 | ADR-0023 | One probe contract with four methods and a prefixed target key | accepted | 2026-11-14 | `Endpoint` per method, one module each, `method://endpoint` as the stored identity; no schema change |
 | ADR-0024 | Use rustls, a hand-written DNS codec and socket2 instead of an async stack | accepted | 2026-11-14 | `ring` provider with embedded roots, one UDP question decoded here, `socket2` for interface-bound TCP |
-
 | ADR-0025 | Give every failure a code and a message, record the cause of a fault, and call the rows faults | accepted | 2026-11-14 | `probe::failure` holds the closed set of codes and one template each; schema version 2 adds `cause` and `cause_message`; the CSV grows two trailing columns and `/export/faults.csv.gz` replaces `/export/disconnections.csv.gz`, which answers `308` |
+| ADR-0026 | Expose the host personal skills read-only instead of copying them | accepted | 2026-11-14 | One read-only bind of `~/.copilot/skills` onto the same path; nothing else from the host home |
 
 ## Records
 
@@ -970,3 +970,41 @@ worse as soon as the table carried a row that is not a lost connection.
   produced a message that lied about what happened.
 - The page gains its first control besides the links, and with it a third script of about fifteen
   lines.
+
+## ADR-0026 — Expose the host personal skills read-only instead of copying them
+
+**Status:** accepted · **Date:** 2026-11-14
+
+### Context
+
+The sandbox home is a named volume and no host home directory is mounted, so the
+personal skills the agent relies on, stored under `~/.copilot/skills` on the host,
+were invisible inside the container and were never discovered. Copying them into the
+volume with `docker cp` drifts after every edit. Committing them as project skills
+puts personal tooling into this repository's history, under its review rules. The
+skills already live in their own Git repository, so any second copy is a source of
+drift.
+
+### Decision
+
+Bind `${localEnv:HOME}/.copilot/skills` read-only onto `/home/dev/.copilot/skills`,
+inside the existing `~/.copilot` volume. Nothing else from the host home is exposed
+and the mount is `type=bind,readonly`. This is the only exception to the "no host
+home directory" guarantee of the isolation model.
+
+### Consequences
+
+- Host and sandbox share one copy: `git pull` on the host is enough to update the
+  sandbox, and a write from the sandbox fails with `EROFS`, so the agent cannot
+  corrupt the personal tooling. New skills are created on the host only.
+- A skill is trusted content: the agent follows its text and may run the scripts it
+  ships, as `dev`, inside the container. Read-only protects the host copy from the
+  agent, not the agent from a skill. Capabilities stay dropped, there is no Docker
+  socket and no host credential, so the blast radius remains the container and the
+  worktree.
+- The exception is narrow on purpose: `~/.copilot/config.json`, `session-state/`, and
+  the session store hold credentials and conversation history and are never mounted.
+- If the host directory is absent, Docker creates an empty root-owned directory at the
+  source instead of failing, and the symptom is silently missing skills.
+  `${localEnv:HOME}` is resolved on the client, so an unset `HOME` produces the same
+  symptom. The runbook checks the source before starting the container.

@@ -1,0 +1,88 @@
+// AI sandbox for network-monitor.
+// Isolation model: no host home except a read-only skills bind, no Docker socket,
+// no credentials, non-root user, dropped capabilities, bounded resources. See
+// docs/AGENT-SANDBOX.md.
+{
+  "name": "network-monitor - AI sandbox",
+
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".",
+    "args": {
+      "BASE_IMAGE": "mcr.microsoft.com/devcontainers/rust:1"
+    }
+  },
+
+  "remoteUser": "dev",
+  "containerUser": "dev",
+  "init": true,
+
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+  "workspaceFolder": "/workspace",
+
+  // Named volumes for state; the only host path is the read-only skills bind below.
+  "mounts": [
+    "source=network-monitor-copilot,target=/home/dev/.copilot,type=volume",
+    "source=network-monitor-npm,target=/home/dev/.npm,type=volume",
+    "source=network-monitor-cache,target=/home/dev/.cache,type=volume",
+    "source=network-monitor-local,target=/home/dev/.local,type=volume",
+    // Personal skills, read-only. Only the skills directory: the rest of
+    // ~/.copilot holds credentials and session data and stays out of the sandbox.
+    "source=${localEnv:HOME}/.copilot/skills,target=/home/dev/.copilot/skills,type=bind,readonly"
+  ],
+
+  "runArgs": [
+    "--cap-drop=ALL",
+    "--security-opt=no-new-privileges",
+    "--memory=4g",
+    "--cpus=4",
+    "--pids-limit=2048",
+    "--hostname=agent-sandbox"
+  ],
+
+  "containerEnv": {
+    "COPILOT_HOME": "/home/dev/.copilot",
+    "GIT_CONFIG_GLOBAL": "/home/dev/.gitconfig",
+    "GIT_TERMINAL_PROMPT": "0",
+    "DEBIAN_FRONTEND": "noninteractive",
+    "TZ": "UTC"
+  },
+
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+
+  "customizations": {
+    "vscode": {
+      // Workspace extensions, installed inside the container. Any extension that
+      // contributes Copilot Chat models (languageModelChatProviders) must be listed
+      // here, or its models never reach the model picker in this window.
+      "extensions": ["rust-lang.rust-analyzer", "Vizards.deepseek-v4-for-copilot"],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "git.enableCommitSigning": false,
+        "git.postCommitCommand": "none",
+
+        // Chat autonomy, scoped to the sandbox. These replace the CLI flags
+        // (--allow-all, --no-ask-user) which do not apply to the chat UI.
+        "chat.permissions.default": "autoApprove",
+        "chat.agent.maxRequests": 300,
+        "chat.tools.terminal.enableAutoApprove": true,
+        // Destructive and history-changing commands still ask, so an unattended
+        // run cannot delete work or touch Git by accident.
+        "chat.tools.terminal.autoApprove": {
+          "rm": false,
+          "rmdir": false,
+          "del": false,
+          "kill": false,
+          "curl": false,
+          "wget": false,
+          "eval": false,
+          "chmod": false,
+          "chown": false,
+          "/^git\\s+(commit|push|tag|merge|rebase|reset|clean)/i": false
+        }
+      }
+    }
+  },
+
+  "forwardPorts": [8642]
+}

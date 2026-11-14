@@ -95,6 +95,7 @@ Not done yet: the Windows raw-socket path is written but not exercised on a Wind
 | [docs/GLOSSARY.md](docs/GLOSSARY.md) | One precise definition per domain term |
 | [docs/DEVELOPER-GUIDE.md](docs/DEVELOPER-GUIDE.md) | Build, run, test, extend, and the Git standards |
 | [docs/UPTIME-KUMA-IMPORT.md](docs/UPTIME-KUMA-IMPORT.md) | Runbook: import an Uptime Kuma history into a database |
+| [docs/AGENT-SANDBOX.md](docs/AGENT-SANDBOX.md) | Dev-container sandbox for unattended AI agent runs: isolation, autonomy, recovery |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Branching, review, definition of done |
 | [AGENTS.md](AGENTS.md) | Rules for human and AI contributors |
 
