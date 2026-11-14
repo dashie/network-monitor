@@ -264,7 +264,7 @@ piped.
 
 - `/` — one lane per target over the selected window (1 h by default; 1, 2, 4, 6, 12, 24 h).
   A lane states the drops, the average `up` run with its spread, the longest run, and how long
-  the target has been up without a drop. Below the chart, the last 10 disconnections.
+  the target has been up without a drop. Below the chart, the last 10 disconnections, each named as its lane is: the label when the target has one, in which case the untitled column beside it repeats the key, and the key alone otherwise.
 - `/target?target=<key>&days=30d` — one target for 30, 60, 90, 180, or 360 days: a bar per day
   and a per-day table.
 - `Download History` — the whole history as a gzipped CSV.

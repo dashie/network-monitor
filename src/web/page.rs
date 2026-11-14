@@ -415,12 +415,12 @@ fn downs_table(downs: &[DownEpisode], now_ms: i64) -> String {
         "<h2>Last 10 disconnections\
          <a class=\"download\" href=\"/export/disconnections.csv.gz\">Download History</a>\
          </h2>\n<table>\n\
-         <thead><tr><th>target</th><th>started</th><th class=\"num\">lasted</th></tr></thead>\n\
+         <thead><tr><th>target</th><th></th><th>started</th><th class=\"num\">lasted</th></tr></thead>\n\
          <tbody>\n",
     );
 
     if downs.is_empty() {
-        output.push_str("<tr><td colspan=\"3\">No disconnection recorded yet.</td></tr>\n");
+        output.push_str("<tr><td colspan=\"4\">No disconnection recorded yet.</td></tr>\n");
     }
 
     for episode in downs {
@@ -428,10 +428,20 @@ fn downs_table(downs: &[DownEpisode], now_ms: i64) -> String {
             Some(end) => (format_span(end - episode.started_at_ms), false),
             None => (format_span(now_ms - episode.started_at_ms), true),
         };
+        let name = episode
+            .label
+            .clone()
+            .unwrap_or_else(|| episode.target.clone());
+        // The key is the name when there is no label, and its own column when there is.
+        let key = match episode.label {
+            Some(_) => episode.target.as_str(),
+            None => "",
+        };
         let _ = writeln!(
             output,
-            "<tr><td>{}</td><td><time datetime=\"{}\">{}</time></td><td{}>{}{}</td></tr>",
-            escape(&episode.target),
+            "<tr><td>{}</td><td class=\"sub\">{}</td><td><time datetime=\"{}\">{}</time></td><td{}>{}{}</td></tr>",
+            escape(&name),
+            escape(key),
             format_rfc3339(episode.started_at_ms),
             utc_text(episode.started_at_ms),
             if ongoing {
@@ -830,12 +840,14 @@ mod tests {
             DownEpisode {
                 event_id: 2,
                 target: "1.1.1.1".to_string(),
+                label: None,
                 started_at_ms: 7_000_000,
                 ended_at_ms: None,
             },
             DownEpisode {
                 event_id: 1,
                 target: "8.8.8.8".to_string(),
+                label: None,
                 started_at_ms: 3_600_000,
                 ended_at_ms: Some(4_320_000),
             },
@@ -854,11 +866,48 @@ mod tests {
         assert!(rendered.contains("8.8.8.8"));
     }
 
+    /// The list names a target the way its lane does: the label when there is one, the key
+    /// otherwise, with the key always in the tooltip.
+    #[test]
+    fn a_disconnection_names_its_target_like_the_lane_above() {
+        let downs = [
+            DownEpisode {
+                event_id: 2,
+                target: "tcp://1.1.1.1:443".to_string(),
+                label: Some("cloudflare-https".to_string()),
+                started_at_ms: 7_000_000,
+                ended_at_ms: None,
+            },
+            DownEpisode {
+                event_id: 1,
+                target: "icmp://8.8.8.8".to_string(),
+                label: None,
+                started_at_ms: 3_600_000,
+                ended_at_ms: Some(4_320_000),
+            },
+        ];
+        let window = Window {
+            from_ms: 0,
+            to_ms: 7_200_000,
+        };
+        let rendered = page(&[timeline()], &downs, &no_streaks(), window);
+
+        assert!(
+            rendered.contains("<td>cloudflare-https</td><td class=\"sub\">tcp://1.1.1.1:443</td>"),
+            "a labelled target is shown under its label, with the key in its own column"
+        );
+        assert!(
+            rendered.contains("<td>icmp://8.8.8.8</td><td class=\"sub\"></td>"),
+            "an unlabelled target keeps the key in the first column, so the second is empty"
+        );
+    }
+
     #[test]
     fn the_duration_column_uses_the_style_shared_with_the_detail_page() {
         let downs = [DownEpisode {
             event_id: 1,
             target: "8.8.8.8".to_string(),
+            label: None,
             started_at_ms: 3_600_000,
             ended_at_ms: Some(4_320_000),
         }];
@@ -881,6 +930,7 @@ mod tests {
         let downs = [DownEpisode {
             event_id: 1,
             target: "1.1.1.1".to_string(),
+            label: None,
             started_at_ms: 7_000_000,
             ended_at_ms: None,
         }];
@@ -1202,6 +1252,7 @@ mod tests {
         let downs = [DownEpisode {
             event_id: 1,
             target: "8.8.8.8".to_string(),
+            label: None,
             started_at_ms: 3_600_000,
             ended_at_ms: Some(4_320_000),
         }];

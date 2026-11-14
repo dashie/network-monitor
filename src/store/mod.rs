@@ -139,6 +139,8 @@ pub struct DownEpisode {
     /// Id of the `down` event, used to page through the history.
     pub event_id: i64,
     pub target: String,
+    /// The label of the target, so the list names it the way the chart does.
+    pub label: Option<String>,
     pub started_at_ms: i64,
     /// `None` while the target is still down.
     pub ended_at_ms: Option<i64>,
@@ -146,13 +148,14 @@ pub struct DownEpisode {
 
 const DAY_MS: i64 = 86_400_000;
 
-/// The columns of one disconnection: event id, target, start, end. The end is `NULL`
-/// while the target is still down. Shared by the page and the export.
+/// The columns of one disconnection: event id, target, label, start, end. The end is
+/// `NULL` while the target is still down. Shared by the page and the export.
 const DOWNS_SELECT: &str = "
-SELECT e.id, e.target, e.occurred_at_ms,
+SELECT e.id, e.target, t.label, e.occurred_at_ms,
        (SELECT MIN(n.occurred_at_ms) FROM events n
          WHERE n.target = e.target AND n.occurred_at_ms > e.occurred_at_ms)
 FROM events e
+LEFT JOIN targets t ON t.target = e.target
 WHERE e.state = 'down'";
 
 /// Split the part of `[start_ms, end_ms)` that falls inside `[from_ms, to_ms)` into
@@ -700,7 +703,7 @@ impl Store {
         }
 
         let episodes = statement.query_map(params![target, to_ms], |row| {
-            Ok((row.get::<_, i64>(2)?, row.get::<_, Option<i64>>(3)?))
+            Ok((row.get::<_, i64>(3)?, row.get::<_, Option<i64>>(4)?))
         })?;
         for episode in episodes {
             let (started_at_ms, ended_at_ms) = episode?;
@@ -774,8 +777,9 @@ impl Store {
                 Ok(DownEpisode {
                     event_id: row.get(0)?,
                     target: row.get(1)?,
-                    started_at_ms: row.get(2)?,
-                    ended_at_ms: row.get(3)?,
+                    label: row.get(2)?,
+                    started_at_ms: row.get(3)?,
+                    ended_at_ms: row.get(4)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -795,8 +799,9 @@ impl Store {
                 Ok(DownEpisode {
                     event_id: row.get(0)?,
                     target: row.get(1)?,
-                    started_at_ms: row.get(2)?,
-                    ended_at_ms: row.get(3)?,
+                    label: row.get(2)?,
+                    started_at_ms: row.get(3)?,
+                    ended_at_ms: row.get(4)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1183,6 +1188,15 @@ mod tests {
         assert_eq!(downs[0].ended_at_ms, None, "the target is still down");
         assert_eq!(downs[1].started_at_ms, 2_000);
         assert_eq!(downs[1].ended_at_ms, Some(5_000));
+        assert_eq!(downs[1].label, None, "the target carries no label");
+
+        let mut labelled = event("9.9.9.9", TargetState::Unknown, TargetState::Down, 12_000);
+        labelled.label = Some("quad9".to_string());
+        store.record_transition(&labelled).unwrap();
+
+        let downs = store.recent_downs(10).unwrap();
+        assert_eq!(downs[0].target, "9.9.9.9");
+        assert_eq!(downs[0].label.as_deref(), Some("quad9"));
 
         assert_eq!(store.recent_downs(1).unwrap().len(), 1);
     }
