@@ -29,6 +29,8 @@ fn transition(target: &str, previous: TargetState, state: TargetState, at: i64) 
         } else {
             None
         },
+        cause: None,
+        cause_message: None,
     }
 }
 
@@ -38,15 +40,30 @@ fn seeded(path: &Path) {
     let mut store = Store::open_rw(path).expect("the database opens");
     for event in [
         transition("1.1.1.1", TargetState::Unknown, TargetState::Up, 1_000),
-        transition("1.1.1.1", TargetState::Up, TargetState::Down, 2_000),
+        down_with_cause(2_000),
         transition("1.1.1.1", TargetState::Down, TargetState::Up, 62_000),
-        transition("8.8.8.8", TargetState::Unknown, TargetState::Down, 50_000),
+        down_with_cause_for("8.8.8.8", 50_000),
         transition("9.9.9.9", TargetState::Unknown, TargetState::Up, 70_000),
     ] {
         store
             .record_transition(&event)
             .expect("the event is written");
     }
+}
+
+/// A disconnection of `1.1.1.1` that knows why it happened.
+fn down_with_cause(at: i64) -> Event {
+    let mut event = transition("1.1.1.1", TargetState::Up, TargetState::Down, at);
+    event.cause = Some("TCP.REFUSED".to_string());
+    event.cause_message = Some("the connection to 1.1.1.1:443 was refused".to_string());
+    event
+}
+
+fn down_with_cause_for(target: &str, at: i64) -> Event {
+    let mut event = transition(target, TargetState::Unknown, TargetState::Down, at);
+    event.cause = Some("TCP.TIMEOUT".to_string());
+    event.cause_message = Some(format!("no answer from {target} within 2000 ms"));
+    event
 }
 
 fn archive_of(path: &Path) -> Vec<u8> {
@@ -129,6 +146,74 @@ fn a_gzipped_export_restores_the_same_history() {
         .expect("the target exists");
     assert_eq!(target.label.as_deref(), Some("probe"));
     assert_eq!(target.interface.as_deref(), Some("eth0"));
+}
+
+#[test]
+fn the_cause_of_a_fault_survives_the_round_trip() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let original = directory.path().join("original.db");
+    let restored = directory.path().join("restored.db");
+    seeded(&original);
+    let file = directory.path().join("history.csv.gz");
+    std::fs::write(&file, archive_of(&original)).expect("the archive is written");
+
+    import::run(
+        &restored,
+        file.to_str().unwrap(),
+        import::Options::default(),
+    )
+    .expect("the import succeeds");
+
+    let store = Store::open_ro(&restored).expect("the database opens");
+    let faults = store.recent_faults(10).expect("the faults are read");
+    let codes: Vec<&str> = faults
+        .iter()
+        .filter_map(|fault| fault.cause.as_deref())
+        .collect();
+    assert!(
+        codes.contains(&"TCP.REFUSED") && codes.contains(&"TCP.TIMEOUT"),
+        "both causes come back, got {codes:?}"
+    );
+    let refused = faults
+        .iter()
+        .find(|fault| fault.cause.as_deref() == Some("TCP.REFUSED"))
+        .expect("the refused fault is there");
+    assert_eq!(
+        refused.cause_message.as_deref(),
+        Some("the connection to 1.1.1.1:443 was refused")
+    );
+}
+
+#[test]
+fn an_archive_written_before_causes_still_imports() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let restored = directory.path().join("restored.db");
+    let file = directory.path().join("history.csv");
+    // The six columns of version 0.2, and nothing after them.
+    std::fs::write(
+        &file,
+        "target,label,interface,state,occurred_at,rtt_us\n\
+         icmp://1.1.1.1,uplink,eth0,up,2026-11-14T08:00:00.000Z,12000\n\
+         icmp://1.1.1.1,uplink,eth0,down,2026-11-14T08:30:00.000Z,\n",
+    )
+    .expect("the archive is written");
+
+    let report = import::run(
+        &restored,
+        file.to_str().unwrap(),
+        import::Options::default(),
+    )
+    .expect("an old archive is not refused");
+
+    assert_eq!(report.events, 2);
+    assert_eq!(
+        report.skipped, 0,
+        "no row is dropped for the missing columns"
+    );
+    let store = Store::open_ro(&restored).expect("the database opens");
+    let faults = store.recent_faults(10).expect("the faults are read");
+    assert_eq!(faults.len(), 1);
+    assert_eq!(faults[0].cause, None, "an old archive states no cause");
 }
 
 #[test]

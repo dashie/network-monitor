@@ -304,6 +304,10 @@ struct Row {
     state: TargetState,
     occurred_at_ms: i64,
     rtt_us: Option<i64>,
+    /// The seventh column of an archive written with causes; absent before version 0.3.
+    cause: Option<String>,
+    /// The eighth column, the standard message of that cause.
+    cause_message: Option<String>,
 }
 
 impl Row {
@@ -329,6 +333,11 @@ impl Row {
             value => Some(value.parse().ok()?),
         };
 
+        // An archive written before version 0.3 ends at `rtt_us`: it imports unchanged,
+        // with no cause on its rows.
+        let cause = fields.get(6).map(|field| field.trim()).and_then(optional);
+        let cause_message = fields.get(7).map(|field| field.trim()).and_then(optional);
+
         Some(Self {
             target,
             label: optional(fields[1].trim()),
@@ -336,6 +345,8 @@ impl Row {
             state,
             occurred_at_ms: parse_rfc3339(fields[4].trim())?,
             rtt_us,
+            cause,
+            cause_message,
         })
     }
 
@@ -349,6 +360,8 @@ impl Row {
             state: self.state,
             occurred_at_ms: self.occurred_at_ms,
             rtt_us: self.rtt_us,
+            cause: self.cause.clone(),
+            cause_message: self.cause_message.clone(),
         }
     }
 }

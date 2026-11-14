@@ -300,6 +300,7 @@ fn monitor_target(
         }
 
         if let Some(transition) = state::transition(previous, &outcome) {
+            let cause = transition.cause.as_ref();
             let event = Event {
                 target: target.key(),
                 interface: target.interface.clone(),
@@ -308,6 +309,8 @@ fn monitor_target(
                 state: transition.to,
                 occurred_at_ms: now_ms(),
                 rtt_us: transition.rtt_us,
+                cause: cause.map(|failure| failure.code().to_string()),
+                cause_message: cause.map(|failure| failure.message().to_string()),
             };
 
             {

@@ -61,7 +61,7 @@ Trust boundaries: the database file is written only by the `monitor` process and
 
 ## 4. Solution strategy
 
-- **One binary, two verbs.** `monitor` and `query` share the configuration, the schema, and the process image. Deployment is one artifact; the query path opens the database read-only and cannot repair it.
+- **One binary, two verbs.** `monitor` and `query` share the configuration, the schema, and the process image. Deployment is one artifact; the query path opens the database read-only and cannot repair or migrate it.
 - **Event-only persistence with a current-state projection.** An append-only `events` table holds transitions; a `targets` table holds the current state and the last probe outcome. The writer updates both in one transaction, so a reader never sees a state that contradicts the latest event.
 - **Layered configuration as data.** Defaults, file, and command line are merged into one immutable effective configuration before anything else runs; each layer is a pure function with a test.
 - **Probe behind a contract.** `Probe::probe(target, interface) -> Result<Verdict, ProbeError>` separates the transport from the decision. `Verdict::{Up, Down}` answers "the peer is silent"; `ProbeError::Local` answers "the host cannot probe". The type system keeps the two apart.
@@ -115,11 +115,12 @@ C4Container
 | `config` | Load the TOML file, validate it, merge defaults, file, and overrides into one effective configuration | `Config`, `Target`, `TargetSpec`, `ConfigError` |
 | `probe` | Dispatch one reachability check to the transport its endpoint names, and classify the outcome | `Probe` trait, `Endpoint`, `Method`, `Verdict`, `ProbeError`, `Prober` |
 | `probe::icmp`, `probe::tcp`, `probe::dns`, `probe::http` | One transport each: an echo request, a TCP connect, a DNS question, an HTTP request | `IcmpProbe`, `TcpProbe`, `DnsProbe`, `HttpProbe` |
+| `probe::failure` | The vocabulary of a failure: the closed set of codes, the details a message may insert, and the template of each code | `Code`, `Details`, `Failure` |
 | `probe::interface` | Validate an interface name and bind a socket to it | `validate`, `bind_socket` per platform |
 | `monitor` | Supervise one interval loop per target, decide whether a transition occurred, reload the configuration file, dispatch transitions to the store | `run(config, prober, store, shutdown, reload)` |
 | `reload` | Compare the configuration file with the last accepted content and report a change | `Watcher`, `Change`, `POLL_INTERVAL` |
 | `web` | Serve the read-only timeline, the per-target detail page, and a health check | `bind`, `serve`, `page`, `target_page` |
-| `store` | Own the schema, migrations, the event write transaction, retention, and the read queries | `Store`, `Event`, `TargetState`, `DownEpisode`, `ExportedEvent`, `StoreError` |
+| `store` | Own the schema, migrations, the event write transaction, retention, and the read queries | `Store`, `Event`, `TargetState`, `Fault`, `ExportedEvent`, `StoreError` |
 | `query` | Read current state and event history, apply filters, render a table or JSON | `QueryFilter`, `Renderer` |
 | `import` | Restore a history from the exported CSV, read from a path, an `http://` URL, or stdin | `run`, `parse_source`, `Report`, `ImportError` |
 
@@ -134,20 +135,20 @@ C4Container
 ### `probe`
 
 - **Input:** an `Endpoint` (method plus parameters), an optional interface name, and the timeout of the target. The interface applies to `icmp` and `tcp`; the configuration refuses it on the other methods.
-- **Output:** `Verdict::Up { rtt }`, `Verdict::Down`, or `ProbeError::Local { reason }`.
-- **Guarantees:** one check per call; the wait is bounded by the timeout of the request, never by state inside the prober, so two targets of one process may use different timeouts; `icmp` shortens every wait to what is left of its budget, so packets from other hosts — a raw ICMP socket receives them all — can delay the verdict but never postpone it, and a reply from a different address or identifier is discarded; `tcp` opens and closes one connection without sending a byte; `dns` sends one question and bounds the answer buffer; `http` sends one `GET` and bounds the head; a local failure (socket, permission, interface, unresolvable name, malformed answer) is never reported as `Down`. The one documented exception is the DNS system resolver, which offers no portable way to tell a missing name from an unreachable resolver and therefore reports both as `Down`.
+- **Output:** `Verdict::Up { rtt }`, `Verdict::Down(Failure)` with the cause of the failure, or a `ProbeError` that carries a `Failure` too.
+- **Guarantees:** one check per call; the wait is bounded by the timeout of the request, never by state inside the prober, so two targets of one process may use different timeouts; `icmp` shortens every wait to what is left of its budget, so packets from other hosts — a raw ICMP socket receives them all — can delay the verdict but never postpone it, and a reply from a different address or identifier is discarded; `tcp` opens and closes one connection without sending a byte; `dns` sends one question and bounds the answer buffer; `http` sends one `GET` and bounds the head; a local failure (socket, permission, interface, unresolvable name, malformed answer) is never reported as `Down`; every failure states a code and one standard message, both declared in `probe::failure` and never worded at a call site, so a log line and a table row can be filtered by the code. The one documented exception is the DNS system resolver, which offers no portable way to tell a missing name from an unreachable resolver and therefore reports both as `Down`.
 
 ### `store`
 
 - **Input:** transitions from the monitor, retention commands, read queries.
 - **Output:** persisted rows, or `StoreError`.
-- **Guarantees:** a transition writes the event and the current state in one transaction; the schema is created and migrated on open; a database from a newer schema version is refused; the writer connection is the only writer in the process.
+- **Guarantees:** a transition writes the event and the current state in one transaction; the schema is created and migrated by a writable open — version 2 adds `events.cause` and `events.cause_message` to a version 1 database and keeps every row —, a read-only open reading an older database as it is; a database from a newer schema version is refused; the writer connection is the only writer in the process. A fault is read back as `Fault`: the code and the message of its cause are stored with the event as they were rendered, so history states what the probe reported at that moment.
 
 ### `query`
 
 - **Input:** a filter (target, time range, limit) and an output format.
 - **Output:** a table or JSON document on stdout, or an error on stderr with a non-zero exit code.
-- **Guarantees:** the database is opened read-only; the command works while the monitor holds a write transaction; the JSON shape is stable enough to be parsed by scripts.
+- **Guarantees:** the database is opened read-only and nothing is written, a database one version behind being read with `NULL` in place of the columns it lacks; the command works while the monitor holds a write transaction; the JSON shape is stable enough to be parsed by scripts.
 
 ### `monitor`
 
@@ -164,14 +165,14 @@ C4Container
 ### `web`
 
 - **Input:** the database path and an optional `window`/`from`/`to`/`target` query string; a bound listener in tests.
-- **Output:** the timeline page with one lane per target — drops, the average `up` run with its spread, the longest `up` run of the window, and how long the target has been up without a drop, in that order, the statistics computed by `web::stats` from the same segments that draw the bands, the streak from the age of the current state in the `targets` table — plus the last 10 disconnections; the detail page of one target — opened with a breadcrumb that leads back to the timeline, a period selector for the last 30, 60, 90, 180, or 360 days (30 when the query names none, the choice in `?days=90d`), then its per-day chart for that period, labelled with the count of every day while the columns have room for it — the quiet ones stating a muted zero at the baseline — and unlabelled past about seven weeks, when the table takes over, the last 10 disconnections of that target in the table the timeline draws, before the day-by-day table, and a per-day table of disconnections, down time, and average `up` run with the longest run under the mean, whose current-day row states the last 24 hours instead, tagged and styled apart, the figure being labelled `AVG UP` on both pages — ; a streamed gzipped CSV of every event, a footer that states the manual of the page in small type under a rule narrower than the content, the icon both pages open with and advertise (`/icon.svg` as the masthead mark and the favicon, `/icon.png` for the browsers without SVG support, both embedded in the executable), a plain-text health check, or a plain-text error. The CSV columns are `target,label,interface,state,occurred_at,rtt_us`: the same file the import reads back.
-- **Guarantees:** every request opens the database read-only; a statistic is derived from the rendered segments only, with an `up` run clipped by the window counted as it appears, so a figure can never disagree with the chart above it; only `GET` and `HEAD` are answered; dynamic text is HTML-escaped; the window is one of the offered spans — 1, 2, 4, 6, 12, or 24 hours, 1 by default, an unknown `window` falling back to the default — clamped to the last 30 days and never past now; every instant is emitted in UTC (`<time datetime>`, `data-datetime`) and formatted by the browser with `Intl`, so the server needs neither a locale nor a time zone and a page is identical for every reader; nothing is written, and the socket exists only while the process that bound it runs. The export is streamed as HTTP chunks and deflated on the fly, in pages of 1 000 events: the response holds no copy of the file and no long read transaction.
+- **Output:** the timeline page with one lane per target — drops, the average `up` run with its spread, the longest `up` run of the window, and how long the target has been up without a drop, in that order, the statistics computed by `web::stats` from the same segments that draw the bands, the streak from the age of the current state in the `targets` table — plus the last 10 faults, each stating its target as a label over its key, the start, the code of its cause and, last, the duration — the four columns keeping a stated share of the width —, with the standard message underneath the row that opens it; the detail page of one target — opened with a breadcrumb that leads back to the timeline, a period selector for the last 30, 60, 90, 180, or 360 days (30 when the query names none, the choice in `?days=90d`), then its per-day chart for that period, labelled with the count of every day while the columns have room for it — the quiet ones stating a muted zero at the baseline — and unlabelled past about seven weeks, when the table takes over, the last 10 faults of that target in the table the timeline draws, before the day-by-day table, and a per-day table of faults, down time, and average `up` run with the longest run under the mean, whose current-day row states the last 24 hours instead, tagged and styled apart, the figure being labelled `AVG UP` on both pages — ; a streamed gzipped CSV of every event — `/export/faults.csv.gz`, with the older `/export/disconnections.csv.gz` answering `308` —, a footer that states the manual of the page in small type under a rule narrower than the content, the icon both pages open with and advertise (`/icon.svg` as the masthead mark and the favicon, `/icon.png` for the browsers without SVG support, both embedded in the executable), a plain-text health check, or a plain-text error. The CSV columns are `target,label,interface,state,occurred_at,rtt_us,cause,cause_message`: the same file the import reads back, and an archive that ends after `rtt_us` still imports.
+- **Guarantees:** every request opens the database read-only and writes nothing, a database one version behind being read without the columns it lacks; a statistic is derived from the rendered segments only, with an `up` run clipped by the window counted as it appears, so a figure can never disagree with the chart above it; only `GET` and `HEAD` are answered; dynamic text is HTML-escaped; the window is one of the offered spans — 1, 2, 4, 6, 12, or 24 hours, 1 by default, an unknown `window` falling back to the default — clamped to the last 30 days and never past now; every instant is emitted in UTC (`<time datetime>`, `data-datetime`) and formatted by the browser with `Intl`, so the server needs neither a locale nor a time zone and a page is identical for every reader; no row is written, and the socket exists only while the process that bound it runs. The export is streamed as HTTP chunks and deflated on the fly, in pages of 1 000 events: the response holds no copy of the file and no long read transaction.
 
 ### `import`
 
 - **Input:** the database path and a source string — a path, an `http://` URL, or `-`.
 - **Output:** a `Report` with the number of events written, the number of rows ignored, the number of targets, and the detected format.
-- **Guarantees:** the archive is the format the page exports, one row per event, gzipped or plain, detected from the first two bytes; the older disconnection-only header is refused with a message; events are batched into one transaction per 500 rows; an event already present is not written twice; the rows may arrive in any order, because after the writes one pass driven by the timestamps drops the events that repeat the state before them (BR-1) and points every event at the state it really replaced; the target projection, labels and interfaces included, is then rebuilt from the events.
+- **Guarantees:** the archive is the format the page exports, one row per event, gzipped or plain, detected from the first two bytes; the older header without the cause columns is refused with a message; events are batched into one transaction per 500 rows; an event already present is not written twice; the rows may arrive in any order, because after the writes one pass driven by the timestamps drops the events that repeat the state before them (BR-1) and points every event at the state it really replaced; the target projection, labels and interfaces included, is then rebuilt from the events.
 - **Replace mode:** with `--replace-window` the archive is read once to find the window each target covers, every event of that target inside its own window is deleted, the archive is applied in a second pass over the same bytes — standard input and an URL are spooled to a temporary file next to the database, so both passes see the same content — and the target projection is rebuilt from the events that remain. The state before the window seeds the `previous_state` of the first imported event.
 
 ### Data model
@@ -180,8 +181,9 @@ Two tables, owned exclusively by the `store` component. Timestamps are UTC epoch
 The key of a target is its canonical string — `icmp://1.1.1.1`, `tcp://1.1.1.1:443`,
 `dns://example.com@9.9.9.9`, `https://example.com/health` — so a method change or another
 port is another target. A writable open rewrites the bare addresses a previous version wrote
-into their `icmp://` form, once and idempotently; the read-only open the page uses never
-writes (INV-10).
+into their `icmp://` form, once and idempotently; the read-only open the page uses never writes —
+not even the schema — because a database one version behind is read with `NULL` in place of the
+cause columns it lacks, so a page view can never alter the history (INV-10).
 
 ```sql
 PRAGMA journal_mode = WAL;
@@ -218,7 +220,7 @@ CREATE TABLE IF NOT EXISTS targets (
 
 - **Ownership:** only the `store` component reads or writes these tables. The `query` component goes through the same module, with a read-only connection.
 - **Retention:** the job deletes from `events` only. It never deletes a `targets` row, so a target keeps its current state and its last transition time.
-- **Migrations:** `schema_meta.version` is compared on open. An older database is migrated forward step by step; a newer one is refused (BR-9).
+- **Migrations:** `schema_meta.version` is compared on open. A writable open migrates an older database forward step by step; a read-only open reads it as it is; a newer one is refused (BR-9).
 
 ## 6. Runtime view
 
@@ -260,7 +262,7 @@ Takeaway: the write path is one transaction per transition, and the read path ne
 - **Container.** A multi-stage image builds the static musl binary and copies it onto a minimal base, together with a default configuration that probes the container's loopback so a bare `docker run` starts. The build uses the `release-dev` profile (thin LTO, parallel codegen) and a cached `target` directory, so a source change does not recompile every dependency; `PROFILE=release` produces the published artifact. The process runs as the container user with `--cap-drop ALL --cap-add NET_RAW`, the configuration mounted read-only over the default when real targets are needed, a volume for the database, and certificate roots compiled into the binary for HTTPS targets. No port is published: the page, when the command adds `--listen`, binds the host address directly through host networking. Host networking (`network_mode: host`) is required when a target is bound to a physical interface, because a bridge container only sees its own `eth0`.
 - **QNAP Container Station.** A project from [docker-compose.yml](../docker-compose.yml) that builds and runs the generic image with restart policy `unless-stopped`, host networking, and the named `network-monitor-data` volume as the database. The configuration is not a file on the NAS: it is the `content` of the project's `monitor-config` config, which compose copies into the container over `/etc/network-monitor/config.toml`, so the whole deployment is one YAML and the image stays reusable. The volume must be a local share, not a network share. Build and deployment — including a Docker context that points at the NAS so the image is built there — are in [DEVELOPER-GUIDE.md](./DEVELOPER-GUIDE.md#container-and-qnap-deployment).
 - **Configuration sources.** The TOML file, then the command line. In the container the file arrives as a compose config object mounted over the default path, and the compose `command` passes only what has no key in the file — `--config` and `--listen`. There is no environment-variable layer.
-- **Upgrades.** Replace the binary or image and restart. The schema is migrated on open; a rollback to an older binary against a newer schema is refused, so the database must be backed up before a downgrade. `import` restores the disconnection history into a fresh database after a redeploy: it does not know the labels and the interfaces, which the next probe of the monitor writes back from the configuration.
+- **Upgrades.** Replace the binary or image and restart. The schema is migrated by the first writable open, `monitor` or `import`; a rollback to an older binary against a newer schema is refused, so the database must be backed up before a downgrade. `import` restores the fault history into a fresh database after a redeploy: it does not know the labels and the interfaces, which the next probe of the monitor writes back from the configuration.
 - **Web page.** The same process that probes can serve the page: `monitor --config … --database … --listen 0.0.0.0:8642`. With host networking the listener needs no published port and shares the volume it is already writing. `serve --listen … --database …` remains the option for a viewer that must not have `NET_RAW`; it reads the same volume and can run on another host.
 
 ## 8. Cross-cutting concepts
@@ -287,7 +289,7 @@ While monitoring runs, the file is polled once per second and a valid change is 
 
 ### Data ownership
 
-The `store` component owns the schema, the migration order, and every statement. No other component issues SQL. The `query` component uses read-only access and cannot repair, migrate, or compact a database.
+The `store` component owns the schema, the migration order, and every statement. No other component issues SQL. The `query` component uses read-only access and cannot repair, rewrite, migrate, or compact a database.
 
 ## 9. Architecture decisions
 
@@ -341,5 +343,5 @@ enforced or verified.
 - `INV-7`: The event and the current state of a target are committed in the same transaction. Enforced by the store write function, verified by a test that interrupts the writer after `BEGIN`.
 - `INV-8`: The release binary has no dependency beyond the platform C runtime, and SQLite is compiled in. Enforced by the static build, verified by the `ldd` check in CI.
 - `INV-9`: A configuration file that cannot be read, does not parse, or resolves to no targets never changes the running configuration and never stops monitoring. Enforced by the supervisor, verified by `tests/reload.rs`.
-- `INV-10`: The web page never writes: every request opens the database read-only and issues only `SELECT` statements. Enforced by the `store` read-only open, verified by `tests/web.rs`.
+- `INV-10`: The web page never writes: every request opens the database read-only and issues only `SELECT` statements, a database one version behind being read with `NULL` in place of the columns it lacks. Enforced by the `store` read-only open, which never migrates, rewrites, or repairs, verified by `tests/web.rs` and by the store tests that a read-only open leaves the schema and the history as they are.
 - `INV-11`: A process opens at most one listener, and only when `--listen` is given; `monitor --listen` binds it before the first probe and stops it with the monitor. Enforced by the single call to `web::bind`, verified by the CLI and web tests.

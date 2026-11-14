@@ -6,6 +6,7 @@
 //! behaviour of each method lives in its own module (`icmp`, `tcp`, `dns`, `http`).
 
 pub mod dns;
+pub mod failure;
 pub mod fake;
 pub mod http;
 pub mod icmp;
@@ -17,6 +18,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 use thiserror::Error;
+
+pub use failure::{Code, Details, Failure};
 
 /// The kind of reachability check a target asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,26 +247,40 @@ impl fmt::Display for Endpoint {
 ///
 /// A local failure is *not* a verdict: it is a [`ProbeError`], so the monitor can
 /// never record "the target is down" when the host merely could not probe (INV-5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
     /// The check succeeded, with the time it took.
     Up { rtt: Duration },
-    /// The check failed, as a definitive answer of the target.
-    Down,
+    /// The check failed, as a definitive answer of the target, with the reason it states.
+    Down(Failure),
 }
 
 /// A failure of this host to perform the probe.
+///
+/// It speaks the same language as a verdict cause — a code and one standard message — so an
+/// operator reads one vocabulary everywhere. It is still never persisted (INV-5): only a
+/// verdict is, and a local failure appears in the log.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum ProbeError {
-    #[error("{reason}")]
-    Local { reason: String },
+#[error("{failure}")]
+pub struct ProbeError {
+    failure: Failure,
 }
 
 impl ProbeError {
-    pub fn local(reason: impl Into<String>) -> Self {
-        ProbeError::Local {
-            reason: reason.into(),
+    pub fn of(code: Code, details: &Details<'_>) -> Self {
+        ProbeError {
+            failure: Failure::new(code, details),
         }
+    }
+
+    /// The short token, for a log line that can be filtered by it.
+    pub fn code(&self) -> &'static str {
+        self.failure.code()
+    }
+
+    /// The standard message of this occurrence.
+    pub fn message(&self) -> &str {
+        self.failure.message()
     }
 }
 

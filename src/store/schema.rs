@@ -4,7 +4,7 @@
 //! "Data ownership" in docs/ARCHITECTURE.md).
 
 /// Schema version written to `schema_meta` by this binary.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Connection pragmas: WAL for concurrent readers, `NORMAL` sync for throughput,
 /// and a busy timeout so a reader never fails on a short write lock.
@@ -28,7 +28,9 @@ CREATE TABLE IF NOT EXISTS events (
     previous_state TEXT    NOT NULL,
     state          TEXT    NOT NULL,
     occurred_at_ms INTEGER NOT NULL,
-    rtt_us         INTEGER
+    rtt_us         INTEGER,
+    cause          TEXT,
+    cause_message  TEXT
 );
 
 CREATE INDEX IF NOT EXISTS events_target_time

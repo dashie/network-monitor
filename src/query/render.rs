@@ -58,12 +58,20 @@ pub fn events(rows: &[EventRow], format: Format) -> String {
                         row.target.clone(),
                         row.interface.clone().unwrap_or_else(|| "-".to_string()),
                         format!("{} -> {}", row.previous_state.as_str(), row.state.as_str()),
+                        row.cause.clone().unwrap_or_else(|| "-".to_string()),
                         millis(row.rtt_us),
                     ]
                 })
                 .collect();
             table(
-                &["OCCURRED AT", "TARGET", "INTERFACE", "TRANSITION", "RTT"],
+                &[
+                    "OCCURRED AT",
+                    "TARGET",
+                    "INTERFACE",
+                    "TRANSITION",
+                    "CAUSE",
+                    "RTT",
+                ],
                 body,
             )
         }
@@ -73,7 +81,8 @@ pub fn events(rows: &[EventRow], format: Format) -> String {
                 .map(|row| {
                     format!(
                         "  {{\"id\":{}, \"target\":{}, \"interface\":{}, \"previousState\":{}, \
-                         \"state\":{}, \"occurredAt\":{}, \"occurredAtMs\":{}, \"rttUs\":{}}}",
+                         \"state\":{}, \"occurredAt\":{}, \"occurredAtMs\":{}, \"rttUs\":{}, \
+                         \"cause\":{}, \"causeMessage\":{}}}",
                         row.id,
                         json_string(&row.target),
                         json_option(&row.interface),
@@ -82,6 +91,8 @@ pub fn events(rows: &[EventRow], format: Format) -> String {
                         json_string(&format_rfc3339(row.occurred_at_ms)),
                         row.occurred_at_ms,
                         json_number(row.rtt_us),
+                        json_option(&row.cause),
+                        json_option(&row.cause_message),
                     )
                 })
                 .collect();
@@ -206,6 +217,8 @@ mod tests {
             state: TargetState::Up,
             occurred_at_ms: 0,
             rtt_us: Some(1_234),
+            cause: None,
+            cause_message: None,
         }
     }
 
@@ -233,5 +246,45 @@ mod tests {
         assert!(rendered.contains("\"previousState\":\"unknown\""));
         assert!(rendered.contains("\"rttUs\":1234"));
         assert!(rendered.contains("\"interface\":null"));
+        assert!(
+            rendered.contains("\"cause\":null"),
+            "an up event has no cause"
+        );
+    }
+
+    #[test]
+    fn an_event_table_states_the_cause_of_a_disconnection() {
+        let mut row = event_row();
+        row.state = TargetState::Down;
+        row.cause = Some("TCP.REFUSED".to_string());
+        row.cause_message = Some("the connection to 1.1.1.1:443 was refused".to_string());
+
+        let rendered = events(&[row], Format::Table);
+        let header = rendered.lines().next().unwrap_or_default();
+        assert!(
+            header.contains("CAUSE"),
+            "the column has a header: {header}"
+        );
+        assert!(
+            rendered.contains("TCP.REFUSED"),
+            "the code is printed under it: {rendered}"
+        );
+
+        let mut for_json = event_row();
+        for_json.state = TargetState::Down;
+        for_json.cause = Some("TCP.REFUSED".to_string());
+        for_json.cause_message = Some("the connection to 1.1.1.1:443 was refused".to_string());
+        let json = events(&[for_json], Format::Json);
+        assert!(
+            json.contains("\"causeMessage\":\"the connection to 1.1.1.1:443 was refused\""),
+            "the JSON carries the message as well as the code: {json}"
+        );
+
+        let mut quiet = event_row();
+        quiet.cause = None;
+        assert!(
+            events(&[quiet], Format::Table).contains("-"),
+            "an event without a cause states a dash, like the other empty columns"
+        );
     }
 }

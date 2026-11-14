@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use socket2::{Domain, Protocol, Socket, Type};
 
 use super::interface as net_interface;
-use super::{Endpoint, Probe, ProbeError, Verdict};
+use super::{Code, Details, Endpoint, Failure, Probe, ProbeError, Verdict};
 
 /// Opens one TCP connection per probe cycle.
 #[derive(Default)]
@@ -31,10 +31,14 @@ impl Probe for TcpProbe {
         timeout: Duration,
     ) -> Result<Verdict, ProbeError> {
         let Endpoint::Tcp { host, port } = endpoint else {
-            return Err(ProbeError::local(format!(
-                "the tcp prober cannot check a {} target",
-                endpoint.method()
-            )));
+            return Err(ProbeError::of(
+                Code::ProbeWrongMethod,
+                &Details {
+                    method: Some("tcp"),
+                    other: Some(endpoint.method().as_str()),
+                    ..Details::default()
+                },
+            ));
         };
 
         let address = resolve(host, *port)?;
@@ -43,8 +47,8 @@ impl Probe for TcpProbe {
             Ok(()) => Ok(Verdict::Up {
                 rtt: started.elapsed(),
             }),
-            Err(Unreachable::Down) => Ok(Verdict::Down),
-            Err(Unreachable::Local(reason)) => Err(ProbeError::local(reason)),
+            Err(Unreachable::Down(failure)) => Ok(Verdict::Down(failure)),
+            Err(Unreachable::Local(error)) => Err(error),
         }
     }
 }
@@ -55,21 +59,35 @@ fn resolve(host: &str, port: u16) -> Result<SocketAddr, ProbeError> {
         return Ok(SocketAddr::new(address, port));
     }
 
-    let mut addresses = (host, port)
-        .to_socket_addrs()
-        .map_err(|error| ProbeError::local(format!("cannot resolve '{host}': {error}")))?;
-    addresses
-        .next()
-        .ok_or_else(|| ProbeError::local(format!("'{host}' resolves to no address")))
+    let mut addresses = (host, port).to_socket_addrs().map_err(|error| {
+        ProbeError::of(
+            Code::TcpResolve,
+            &Details {
+                host: Some(host),
+                reason: Some(&error.to_string()),
+                ..Details::default()
+            },
+        )
+    })?;
+    addresses.next().ok_or_else(|| {
+        ProbeError::of(
+            Code::TcpResolve,
+            &Details {
+                host: Some(host),
+                reason: Some("it resolves to no address"),
+                ..Details::default()
+            },
+        )
+    })
 }
 
 /// Why a connection did not open.
 #[derive(Debug)]
 enum Unreachable {
-    /// The target answered with a refusal, or stayed silent until the timeout.
-    Down,
+    /// The target answered with a refusal, a reset, or stayed silent until the timeout.
+    Down(Failure),
     /// This host could not perform the check at all.
-    Local(String),
+    Local(ProbeError),
 }
 
 /// One socket per probe cycle, so the interface can be bound before connecting and the
@@ -81,11 +99,20 @@ fn connect(
 ) -> Result<(), Unreachable> {
     let socket = socket(address)?;
     if let Some(name) = interface {
-        net_interface::bind_socket(&socket, name).map_err(Unreachable::Local)?;
+        net_interface::bind_socket(&socket, name).map_err(|reason| {
+            Unreachable::Local(ProbeError::of(
+                Code::TcpInterface,
+                &Details {
+                    interface: Some(name),
+                    reason: Some(&reason),
+                    ..Details::default()
+                },
+            ))
+        })?;
     }
     match socket.connect_timeout(&address.into(), timeout) {
         Ok(()) => Ok(()),
-        Err(error) => outcome(&socket, &error),
+        Err(error) => outcome(&socket, &error, address, timeout),
     }
 }
 
@@ -96,8 +123,18 @@ fn socket(address: SocketAddr) -> Result<Socket, Unreachable> {
     } else {
         Domain::IPV6
     };
-    Socket::new(domain, Type::STREAM, Some(Protocol::TCP))
-        .map_err(|error| Unreachable::Local(format!("cannot create the socket: {error}")))
+    Socket::new(domain, Type::STREAM, Some(Protocol::TCP)).map_err(|error| {
+        let host = address.ip().to_string();
+        Unreachable::Local(ProbeError::of(
+            Code::TcpSocket,
+            &Details {
+                host: Some(&host),
+                port: Some(address.port()),
+                reason: Some(&error.to_string()),
+                ..Details::default()
+            },
+        ))
+    })
 }
 
 /// A refusal or a timeout is the answer of the target; every other error is ours.
@@ -110,17 +147,42 @@ fn socket(address: SocketAddr) -> Result<Socket, Unreachable> {
 /// must never be recorded as "the target is down". A connect interrupted by a signal stays a
 /// local failure for the same reason: retrying it needs a fresh socket, because the state of
 /// an interrupted one is unspecified, and a transient condition is never a verdict.
-fn outcome(socket: &Socket, error: &io::Error) -> Result<(), Unreachable> {
+fn outcome(
+    socket: &Socket,
+    error: &io::Error,
+    address: SocketAddr,
+    timeout: Duration,
+) -> Result<(), Unreachable> {
     if socket.peer_addr().is_ok() {
         return Ok(());
     }
-    match error.kind() {
-        io::ErrorKind::ConnectionRefused
-        | io::ErrorKind::TimedOut
-        | io::ErrorKind::ConnectionReset
-        | io::ErrorKind::ConnectionAborted => Err(Unreachable::Down),
-        _ => Err(Unreachable::Local(format!("cannot connect: {error}"))),
-    }
+    let code = match error.kind() {
+        io::ErrorKind::ConnectionRefused => Code::TcpRefused,
+        io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted => Code::TcpReset,
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => Code::TcpTimeout,
+        _ => {
+            let host = address.ip().to_string();
+            return Err(Unreachable::Local(ProbeError::of(
+                Code::TcpConnect,
+                &Details {
+                    host: Some(&host),
+                    port: Some(address.port()),
+                    reason: Some(&error.to_string()),
+                    ..Details::default()
+                },
+            )));
+        }
+    };
+    let host = address.ip().to_string();
+    Err(Unreachable::Down(Failure::new(
+        code,
+        &Details {
+            host: Some(&host),
+            port: Some(address.port()),
+            timeout: Some(timeout),
+            ..Details::default()
+        },
+    )))
 }
 
 #[cfg(test)]
@@ -139,6 +201,14 @@ mod tests {
 
     fn timeout() -> Duration {
         Duration::from_millis(1_000)
+    }
+
+    /// The code of a `down` verdict, so an assertion states what the target answered.
+    fn code_of(verdict: &Verdict) -> &'static str {
+        match verdict {
+            Verdict::Down(failure) => failure.code(),
+            other => panic!("expected a down verdict, got {other:?}"),
+        }
     }
 
     /// A listener that keeps the accepted connection open until the probe has finished: a
@@ -182,7 +252,7 @@ mod tests {
             .probe(&tcp("127.0.0.1", port), None, timeout())
             .expect("a refusal is a verdict");
 
-        assert_eq!(verdict, Verdict::Down);
+        assert_eq!(code_of(&verdict), "TCP.REFUSED");
     }
 
     #[test]
@@ -191,7 +261,8 @@ mod tests {
             .probe(&tcp("network-monitor.invalid", 80), None, timeout())
             .expect_err("a name that does not resolve is our failure");
 
-        assert!(error.to_string().contains("resolve"), "unexpected: {error}");
+        assert_eq!(error.code(), "TCP.RESOLVE");
+        assert!(error.message().contains("resolve"), "unexpected: {error}");
     }
 
     #[test]
@@ -199,7 +270,11 @@ mod tests {
         let endpoint = Endpoint::Icmp {
             address: std::net::Ipv4Addr::LOCALHOST,
         };
-        assert!(TcpProbe::new().probe(&endpoint, None, timeout()).is_err());
+        let error = TcpProbe::new()
+            .probe(&endpoint, None, timeout())
+            .expect_err("a prober checks its own method");
+        assert_eq!(error.code(), "PROBE.WRONG_METHOD");
+        assert_eq!(error.message(), "the tcp prober cannot check a icmp target");
     }
 
     #[test]
@@ -207,19 +282,22 @@ mod tests {
         let address: SocketAddr = ([127, 0, 0, 1], 9).into();
         let failed = socket(address).expect("a socket that never connected");
 
-        for kind in [
-            io::ErrorKind::ConnectionRefused,
-            io::ErrorKind::TimedOut,
-            io::ErrorKind::ConnectionReset,
-            io::ErrorKind::ConnectionAborted,
+        for (kind, code) in [
+            (io::ErrorKind::ConnectionRefused, "TCP.REFUSED"),
+            (io::ErrorKind::TimedOut, "TCP.TIMEOUT"),
+            (io::ErrorKind::WouldBlock, "TCP.TIMEOUT"),
+            (io::ErrorKind::ConnectionReset, "TCP.RESET"),
+            (io::ErrorKind::ConnectionAborted, "TCP.RESET"),
         ] {
-            assert!(
-                matches!(
-                    outcome(&failed, &io::Error::from(kind)),
-                    Err(Unreachable::Down)
-                ),
-                "{kind:?} must be a verdict"
-            );
+            match outcome(
+                &failed,
+                &io::Error::from(kind),
+                SocketAddr::from(([127, 0, 0, 1], 443)),
+                timeout(),
+            ) {
+                Err(Unreachable::Down(failure)) => assert_eq!(failure.code(), code, "{kind:?}"),
+                other => panic!("{kind:?} must be a verdict, got {other:?}"),
+            }
         }
         for kind in [
             io::ErrorKind::PermissionDenied,
@@ -227,13 +305,37 @@ mod tests {
             io::ErrorKind::Interrupted,
             io::ErrorKind::Other,
         ] {
-            assert!(
-                matches!(
-                    outcome(&failed, &io::Error::from(kind)),
-                    Err(Unreachable::Local(_))
-                ),
-                "{kind:?} must be a local failure"
-            );
+            match outcome(
+                &failed,
+                &io::Error::from(kind),
+                SocketAddr::from(([127, 0, 0, 1], 443)),
+                timeout(),
+            ) {
+                Err(Unreachable::Local(error)) => {
+                    assert_eq!(error.code(), "TCP.CONNECT", "{kind:?}");
+                }
+                other => panic!("{kind:?} must be a local failure, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_interface_that_does_not_exist_states_its_code() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a free port");
+        let address = listener.local_addr().unwrap();
+
+        let error = connect(address, Some("no-such-device0"), timeout())
+            .expect_err("a device this host does not have cannot be bound");
+
+        match error {
+            Unreachable::Local(error) => {
+                assert_eq!(error.code(), "TCP.INTERFACE");
+                assert!(
+                    error.message().contains("no-such-device0"),
+                    "unexpected: {error}"
+                );
+            }
+            other => panic!("expected a local failure, got {other:?}"),
         }
     }
 
@@ -249,7 +351,7 @@ mod tests {
         let hang_up = io::Error::other("no error set after POLLHUP");
 
         assert!(
-            outcome(&connected, &hang_up).is_ok(),
+            outcome(&connected, &hang_up, address, timeout()).is_ok(),
             "a connected socket answers even when the platform raises a nameless error"
         );
     }
@@ -287,6 +389,6 @@ mod tests {
             .probe(&tcp("192.0.2.1", 81), None, Duration::from_millis(150))
             .expect("a timeout is a verdict");
 
-        assert_eq!(verdict, Verdict::Down);
+        assert_eq!(code_of(&verdict), "TCP.TIMEOUT");
     }
 }

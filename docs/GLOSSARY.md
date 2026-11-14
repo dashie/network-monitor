@@ -28,11 +28,14 @@ appears in a requirement, in a component name, or in a public interface.
 | **Target specification** | The command-line form of a target: `[method:]address[,key=value]…`, where a bare address is `icmp`. |
 | **Archive** | The gzipped CSV of every event, written by the page and read by `import`; one format, two directions. |
 | **Current `up` streak** | The time since the transition that turned a target `up`; it does not exist while the target is `down` or `unknown`, and it reaches back before the shown window when the target has been up that long. |
-| **Down episode** | One `down` transition and, if it happened, the transition back to `up`; its duration is the distance between the two, or from the transition to now while the target is still down. |
+| **Fault** | One recorded failure of a target: the `down` transition that started it, the cause it states, and — if it happened — the transition back to `up`. Its duration is the distance between the two, or from the transition to now while the target is still down. The page lists the last ten, the CSV has one row per event, and `query events` shows them. |
 | **Timeline segment** | An interval of constant state for one target, from one transition to the next or to the edge of the window. |
 | **Timeout** | The maximum time a probe waits for its answer; its expiry yields `down`. It is global unless a target states its own. |
 | **Up run** | A maximal stretch of `up` of one target inside a window; a run that the window opens or closes in the middle of counts as it appears. |
 | **Unknown state** | The state of a target before its first verdict has been recorded. |
 | **Unreachable (`down`)** | The state of a target whose probe got a definitive negative answer, or no answer within the timeout: no echo reply, a refusal, a missing name, or a status outside the expectation. |
-| **Verdict** | The outcome of one probe cycle: `up` with the time the check took, or `down`. A local failure is a `ProbeError`, not a verdict. |
+| **Cause** | The reason a check failed, as a code plus a standard message. Every failure of a probe cycle states one: the verdict it produces, or the local failure that prevents a verdict. |
+| **Cause code** | The short uppercase token that identifies a cause, prefixed with the layer that reported it: `ICMP.NO_REPLY`, `TCP.REFUSED`, `TCP.TIMEOUT`, `DNS.NXDOMAIN`, `DNS.NO_RECORD`, `DNS.TIMEOUT`, `DNS.UNRESOLVED`, `HTTP.UNEXPECTED_STATUS`, `HTTP.TLS`, and the codes of the local failures (`TCP.RESOLVE`, `HTTP.MALFORMED`, `PROBE.WRONG_METHOD`, …). It is what the database stores, a table shows, and `query` prints, so a log line can be filtered by it. |
+| **Cause message** | The one sentence a cause states, declared in the code as a template and rendered with the details of the occurrence — the host and port, the status and the expectation, the timeout, the text the platform returned. A detail a code does not supply reads `unknown`; a message is never built by hand at a call site. |
+| **Verdict** | The outcome of one probe cycle: `up` with the time the check took, or `down` with its cause. A local failure is a `ProbeError`, not a verdict, and is never persisted. |
 | **Web page** | The optional read-only HTML view of the timelines and of the per-target detail page, served either by `serve` or by `monitor --listen`. |

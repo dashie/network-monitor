@@ -37,6 +37,8 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0023 | One probe contract with four methods and a prefixed target key | accepted | 2026-11-14 | `Endpoint` per method, one module each, `method://endpoint` as the stored identity; no schema change |
 | ADR-0024 | Use rustls, a hand-written DNS codec and socket2 instead of an async stack | accepted | 2026-11-14 | `ring` provider with embedded roots, one UDP question decoded here, `socket2` for interface-bound TCP |
 
+| ADR-0025 | Give every failure a code and a message, record the cause of a fault, and call the rows faults | accepted | 2026-11-14 | `probe::failure` holds the closed set of codes and one template each; schema version 2 adds `cause` and `cause_message`; the CSV grows two trailing columns and `/export/faults.csv.gz` replaces `/export/disconnections.csv.gz`, which answers `308` |
+
 ## Records
 
 ## ADR-0001 — Adopt the documentation and repository baseline
@@ -908,3 +910,63 @@ linked; `aws-lc-rs` would add cmake and NASM to the build of the container image
 - `rustls` with `aws-lc-rs`: rejected, cmake and NASM in the image build.
 - Reading `/etc/resolv.conf` ourselves: deferred, it reintroduces platform code for a case the
   explicit resolver already covers.
+
+## ADR-0025 — Give every failure a code and a message, record the cause of a fault, and call the rows faults
+
+**Date:** 2026-11-14
+**Status:** accepted
+
+### Context
+
+A target that stopped answering was recorded as a bare fact. The transports knew why — `tcp` told a
+refusal from a reset from a timeout, `dns` read the RCODE, `http` held the status — and every one
+of those distinctions collapsed into `Verdict::Down`, a unit variant. Local failures were worse: a
+free-form `String` built with `format!` at thirty-one call sites, so two sites could describe the
+same condition with different words and no log line carried a token to search for.
+
+The vocabulary was wrong at the same time. The rows were called disconnections, which names one
+cause out of the eight the methods can report, reads badly next to a `DNS.NXDOMAIN`, and would read
+worse as soon as the table carried a row that is not a lost connection.
+
+### Decision
+
+1. Every failure of a probe cycle is a `Failure { code, message }` built from `probe::failure`. The
+   **code** comes from a closed set of 26 values, uppercase and prefixed with the layer that
+   reported it (`ICMP.NO_REPLY`, `TCP.REFUSED`, `DNS.NXDOMAIN`, `HTTP.UNEXPECTED_STATUS`,
+   `PROBE.WRONG_METHOD`). The **message** is one sentence per code, declared once as a template and
+   rendered with a `Details` record of the occurrence; a detail a code does not supply reads
+   `unknown`, so a reader never sees a placeholder.
+2. `Verdict::Down` carries the `Failure`; `ProbeError` carries one too, and keeps being never
+   persisted (INV-5). `Verdict` therefore stops being `Copy`.
+3. A recorded occurrence is a **`Fault`**: `Store::recent_faults`, the heading "Last 10 faults", the
+   export path and the file name all use that word.
+4. Schema version 2 adds `events.cause` and `events.cause_message`; the migration adds both columns
+   to a version 1 database and keeps every row, which reads `NULL` for the cause.
+5. The CSV grows the same two columns, at the end, so an archive written before this change still
+   imports. `/export/faults.csv.gz` replaces `/export/disconnections.csv.gz`, and the old path
+   answers `308` for one release.
+6. The page reveals the message of a fault in a row of its own, opened by a click on the fault row.
+   This ends the "no client-side interaction beyond following a link" rule of FR-17; a browser
+   without JavaScript keeps the message in the `title`.
+
+### Consequences
+
+- An operator reads one vocabulary everywhere: a page row, a log line, a CSV column, and a `query`
+  output all state the same code.
+- The message is stored as it was rendered, not re-rendered from the current configuration, so
+  history states what the probe reported with the timeout in force at that moment. Changing a
+  template does not rewrite the past.
+- The migration stays in the writable open. A read-only process that finds a version 1 database
+  reads it as it is, selecting `NULL` in place of the two columns it lacks, so `serve` and
+  `query` never write, can run against a snapshot or a volume mounted read-only, and the page can
+  never alter the history (`INV-10`, `BR-8`). The cost is a read path that knows two shapes of the
+  same table: the two cause expressions are chosen from the version the open found. A 0.2 database
+  read by `serve` or `query` therefore states no cause until a `monitor` or an `import` has
+  upgraded the file, which is what the user guide says.
+- A database written by 0.3 is refused by 0.2 rather than misread, which the user guide states in
+  its upgrade section.
+- The three codes the plan's table did not foresee (`ICMP.INTERFACE`, `TCP.CONNECT`,
+  `DNS.SERVER_FAILURE`) exist because forcing those failures into a neighbour code would have
+  produced a message that lied about what happened.
+- The page gains its first control besides the links, and with it a third script of about fifteen
+  lines.

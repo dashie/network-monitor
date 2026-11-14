@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use network_monitor::config::{Config, FileConfig, FileTarget, Overrides};
 use network_monitor::monitor;
-use network_monitor::probe::fake::{up, FakeProbe};
-use network_monitor::probe::{Endpoint, Probe, ProbeError, Verdict};
+use network_monitor::probe::fake::{down, up, FakeProbe};
+use network_monitor::probe::{Code, Details, Endpoint, Probe, ProbeError};
 use network_monitor::shutdown::Shutdown;
 use network_monitor::store::{EventFilter, Store, TargetState};
 
@@ -27,7 +27,14 @@ fn timeout() -> Duration {
 fn a_local_error_is_not_a_state_change() {
     let probe = FakeProbe::scripted(vec![
         Ok(up()),
-        Err(ProbeError::local("the interface disappeared")),
+        Err(ProbeError::of(
+            Code::TcpInterface,
+            &Details {
+                interface: Some("eth1"),
+                reason: Some("the interface disappeared"),
+                ..Details::default()
+            },
+        )),
         Ok(up()),
     ]);
 
@@ -49,8 +56,8 @@ fn the_monitor_records_only_transitions() {
     let prober: Arc<dyn Probe> = Arc::new(FakeProbe::scripted(vec![
         Ok(up()),
         Ok(up()),
-        Ok(Verdict::Down),
-        Ok(Verdict::Down),
+        Ok(down()),
+        Ok(down()),
         Ok(up()),
     ]));
     let store = Arc::new(Mutex::new(Store::open_rw(&database).unwrap()));
@@ -95,7 +102,7 @@ fn a_restart_continues_from_the_stored_state() {
     let stop = Shutdown::new();
     let running = stop.clone();
     let second = test_config(&database);
-    let prober: Arc<dyn Probe> = Arc::new(FakeProbe::always(Verdict::Down));
+    let prober: Arc<dyn Probe> = Arc::new(FakeProbe::always(down()));
     let store = Arc::new(Mutex::new(Store::open_rw(&database).unwrap()));
     let handle = thread::spawn(move || monitor::run(&second, prober, store, &running, None));
     wait_for_events(&expected, 2, Duration::from_secs(5));

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 
-use super::{Endpoint, Probe, ProbeError, Scheme, Verdict};
+use super::{Code, Details, Endpoint, Failure, Probe, ProbeError, Scheme, Verdict};
 
 /// The largest response head accepted, so a chatty endpoint cannot grow the buffer.
 const MAX_HEAD: usize = 8 * 1024;
@@ -158,10 +158,14 @@ impl Probe for HttpProbe {
             expect,
         } = endpoint
         else {
-            return Err(ProbeError::local(format!(
-                "the http prober cannot check a {} target",
-                endpoint.method()
-            )));
+            return Err(ProbeError::of(
+                Code::ProbeWrongMethod,
+                &Details {
+                    method: Some("http"),
+                    other: Some(endpoint.method().as_str()),
+                    ..Details::default()
+                },
+            ));
         };
 
         let started = Instant::now();
@@ -169,20 +173,53 @@ impl Probe for HttpProbe {
             Ok(status) if expect.matches(status) => Ok(Verdict::Up {
                 rtt: started.elapsed(),
             }),
-            Ok(_) => Ok(Verdict::Down),
-            Err(Failure::Down) => Ok(Verdict::Down),
-            Err(Failure::Local(reason)) => Err(ProbeError::local(reason)),
+            Ok(status) => {
+                let url = endpoint.to_string();
+                let expected = expect.specs().join(", ");
+                Ok(Verdict::Down(Failure::new(
+                    Code::HttpUnexpectedStatus,
+                    &Details {
+                        url: Some(&url),
+                        status: Some(status),
+                        expect: Some(&expected),
+                        ..Details::default()
+                    },
+                )))
+            }
+            Err(Unreachable::Down(failure)) => Ok(Verdict::Down(failure)),
+            Err(Unreachable::Local(error)) => Err(error),
         }
     }
 }
 
 /// Why one exchange did not produce a status inside the expectation.
 #[derive(Debug)]
-enum Failure {
-    /// The endpoint answered with a refusal, timed out, or failed the TLS handshake.
-    Down,
+enum Unreachable {
+    /// The endpoint answered with a refusal, a reset, a timeout, or a failed TLS handshake.
+    Down(Failure),
     /// This host could not perform the check, or the answer is not an HTTP answer.
-    Local(String),
+    Local(ProbeError),
+}
+
+/// Where the exchange is happening, so every failure it reports can name it.
+#[derive(Debug, Clone, Copy)]
+struct Venue<'a> {
+    scheme: Scheme,
+    host: &'a str,
+    port: u16,
+    target: &'a str,
+}
+
+impl Venue<'_> {
+    /// The URL as the target key states it: the default port is left out.
+    fn url(&self) -> String {
+        let mut url = format!("{}://{}", self.scheme, self.host);
+        if self.port != self.scheme.default_port() {
+            url.push_str(&format!(":{}", self.port));
+        }
+        url.push_str(self.target);
+        url
+    }
 }
 
 fn exchange(
@@ -191,49 +228,70 @@ fn exchange(
     port: u16,
     target: &str,
     timeout: Duration,
-) -> Result<u16, Failure> {
+) -> Result<u16, Unreachable> {
+    let venue = Venue {
+        scheme,
+        host,
+        port,
+        target,
+    };
     let address = resolve(host, port)?;
-    let tcp = TcpStream::connect_timeout(&address, timeout).map_err(|error| failure(&error))?;
+    let tcp =
+        TcpStream::connect_timeout(&address, timeout).map_err(|error| failure(&error, venue))?;
     tcp.set_read_timeout(Some(timeout))
-        .map_err(|error| failure(&error))?;
+        .map_err(|error| failure(&error, venue))?;
     tcp.set_write_timeout(Some(timeout))
-        .map_err(|error| failure(&error))?;
+        .map_err(|error| failure(&error, venue))?;
 
     let request = request(target, host, port, scheme);
     match scheme {
         Scheme::Http => {
             let mut stream = tcp;
-            send(&mut stream, &request)?;
-            read_status(&mut stream)
+            send(&mut stream, &request, venue)?;
+            read_status(&mut stream, venue)
         }
         Scheme::Https => {
-            let mut stream = tls(tcp, host)?;
-            send(&mut stream, &request)?;
-            read_status(&mut stream)
+            let mut stream = tls(tcp, venue)?;
+            send(&mut stream, &request, venue)?;
+            read_status(&mut stream, venue)
         }
     }
 }
 
 /// Write the request and push it out: a TLS stream buffers until it is flushed.
-fn send(stream: &mut impl Write, request: &str) -> Result<(), Failure> {
+fn send(stream: &mut impl Write, request: &str, venue: Venue<'_>) -> Result<(), Unreachable> {
     stream
         .write_all(request.as_bytes())
         .and_then(|()| stream.flush())
-        .map_err(|error| failure(&error))
+        .map_err(|error| failure(&error, venue))
 }
 
 /// The address of the endpoint: a literal is used as written, a name is resolved.
-fn resolve(host: &str, port: u16) -> Result<SocketAddr, Failure> {
+fn resolve(host: &str, port: u16) -> Result<SocketAddr, Unreachable> {
     use std::net::{IpAddr, ToSocketAddrs};
     if let Ok(address) = host.parse::<IpAddr>() {
         return Ok(SocketAddr::new(address, port));
     }
-    let mut addresses = (host, port)
-        .to_socket_addrs()
-        .map_err(|error| Failure::Local(format!("cannot resolve '{host}': {error}")))?;
-    addresses
-        .next()
-        .ok_or_else(|| Failure::Local(format!("'{host}' resolves to no address")))
+    let mut addresses = (host, port).to_socket_addrs().map_err(|error| {
+        Unreachable::Local(ProbeError::of(
+            Code::HttpResolve,
+            &Details {
+                host: Some(host),
+                reason: Some(&error.to_string()),
+                ..Details::default()
+            },
+        ))
+    })?;
+    addresses.next().ok_or_else(|| {
+        Unreachable::Local(ProbeError::of(
+            Code::HttpResolve,
+            &Details {
+                host: Some(host),
+                reason: Some("it resolves to no address"),
+                ..Details::default()
+            },
+        ))
+    })
 }
 
 /// The request on the wire: no body, no cookies, no compression, connection closed after it.
@@ -254,69 +312,97 @@ fn request(target: &str, host: &str, port: u16, scheme: Scheme) -> String {
 }
 
 /// Read the head and take the status out of its first line.
-fn read_status(stream: &mut impl Read) -> Result<u16, Failure> {
+fn read_status(stream: &mut impl Read, venue: Venue<'_>) -> Result<u16, Unreachable> {
     let mut head = Vec::new();
     let mut chunk = [0u8; 512];
     loop {
-        let read = stream.read(&mut chunk).map_err(|error| failure(&error))?;
+        let read = stream
+            .read(&mut chunk)
+            .map_err(|error| failure(&error, venue))?;
         if read == 0 {
-            return Err(Failure::Local(
-                "the connection closed before a status line".to_string(),
+            return Err(malformed(
+                venue,
+                "the connection closed before a status line",
             ));
         }
         head.extend_from_slice(&chunk[..read]);
         if head.windows(4).any(|window| window == b"\r\n\r\n") {
-            return parse_status(&head);
+            return parse_status(&head, venue);
         }
         if head.len() > MAX_HEAD {
-            return Err(Failure::Local(format!(
-                "the response head is larger than {MAX_HEAD} bytes"
+            let url = venue.url();
+            return Err(Unreachable::Local(ProbeError::of(
+                Code::HttpHeadLimit,
+                &Details {
+                    url: Some(&url),
+                    expect: Some("8 KiB"),
+                    ..Details::default()
+                },
             )));
         }
     }
 }
 
 /// Parse the status from `HTTP/1.1 200 OK` and the first line of a head.
-fn parse_status(head: &[u8]) -> Result<u16, Failure> {
+fn parse_status(head: &[u8], venue: Venue<'_>) -> Result<u16, Unreachable> {
     let line_end = head
         .windows(2)
         .position(|window| window == b"\r\n")
-        .ok_or_else(|| Failure::Local("the status line is unterminated".to_string()))?;
+        .ok_or_else(|| malformed(venue, "the status line is unterminated"))?;
     let line = std::str::from_utf8(&head[..line_end])
-        .map_err(|_| Failure::Local("the status line is not text".to_string()))?;
+        .map_err(|_| malformed(venue, "the status line is not text"))?;
     let mut parts = line.split_whitespace();
     let protocol = parts.next().unwrap_or_default();
     if !protocol.starts_with("HTTP/") {
-        return Err(Failure::Local(format!(
-            "'{line}' is not an HTTP status line"
-        )));
+        return Err(malformed(
+            venue,
+            &format!("'{line}' is not an HTTP status line"),
+        ));
     }
     parts
         .next()
         .and_then(|code| code.parse::<u16>().ok())
         .filter(|status| (100..=599).contains(status))
-        .ok_or_else(|| Failure::Local(format!("'{line}' carries no status code")))
+        .ok_or_else(|| malformed(venue, &format!("'{line}' carries no status code")))
 }
 
 /// A TLS stream over an already connected socket, with the handshake completed here so a
 /// certificate problem is classified as `down` instead of surfacing mid-read.
-fn tls(tcp: TcpStream, host: &str) -> Result<StreamOwned<ClientConnection, TcpStream>, Failure> {
+fn tls(
+    tcp: TcpStream,
+    venue: Venue<'_>,
+) -> Result<StreamOwned<ClientConnection, TcpStream>, Unreachable> {
     let config = tls_config()?;
-    let server_name = ServerName::try_from(host.to_string())
-        .map_err(|_| Failure::Local(format!("'{host}' cannot be a TLS server name")))?;
-    let mut connection = ClientConnection::new(Arc::clone(config), server_name)
-        .map_err(|reason| Failure::Local(format!("cannot start TLS: {reason}")))?;
+    let server_name = ServerName::try_from(venue.host.to_string()).map_err(|_| {
+        Unreachable::Local(ProbeError::of(
+            Code::HttpTlsInit,
+            &Details {
+                reason: Some(&format!("'{}' is not a server name", venue.host)),
+                ..Details::default()
+            },
+        ))
+    })?;
+    let mut connection =
+        ClientConnection::new(Arc::clone(config), server_name).map_err(|reason| {
+            Unreachable::Local(ProbeError::of(
+                Code::HttpTlsInit,
+                &Details {
+                    reason: Some(&reason.to_string()),
+                    ..Details::default()
+                },
+            ))
+        })?;
     let mut tcp = tcp;
     while connection.is_handshaking() {
         connection
             .complete_io(&mut tcp)
-            .map_err(|error| failure(&error))?;
+            .map_err(|error| handshake(&error, venue))?;
     }
     Ok(StreamOwned::new(connection, tcp))
 }
 
 /// The TLS configuration, built once: verification against the embedded roots, HTTP/1.1 only.
-fn tls_config() -> Result<&'static Arc<ClientConfig>, Failure> {
+fn tls_config() -> Result<&'static Arc<ClientConfig>, Unreachable> {
     static CONFIG: OnceLock<Result<Arc<ClientConfig>, String>> = OnceLock::new();
     CONFIG
         .get_or_init(|| {
@@ -329,27 +415,94 @@ fn tls_config() -> Result<&'static Arc<ClientConfig>, Failure> {
             Ok(Arc::new(config))
         })
         .as_ref()
-        .map_err(|reason| Failure::Local(reason.clone()))
+        .map_err(|reason| {
+            Unreachable::Local(ProbeError::of(
+                Code::HttpTlsInit,
+                &Details {
+                    reason: Some(reason),
+                    ..Details::default()
+                },
+            ))
+        })
 }
 
-/// A refusal, a timeout, or a TLS alert is the answer of the endpoint; the rest is ours.
-fn failure(error: &io::Error) -> Failure {
-    match error.kind() {
-        io::ErrorKind::ConnectionRefused
-        | io::ErrorKind::TimedOut
-        | // A socket read timeout surfaces as `WouldBlock` on Unix.
-        io::ErrorKind::WouldBlock
-        | io::ErrorKind::ConnectionReset
+/// A refusal, a timeout, or a reset is the answer of the endpoint; the rest is ours.
+fn failure(error: &io::Error, venue: Venue<'_>) -> Unreachable {
+    let code = match error.kind() {
+        io::ErrorKind::ConnectionRefused => Code::TcpRefused,
+        io::ErrorKind::ConnectionReset
         | io::ErrorKind::ConnectionAborted
         | io::ErrorKind::UnexpectedEof
-        | io::ErrorKind::InvalidData => Failure::Down,
-        _ => Failure::Local(format!("cannot reach the endpoint: {error}")),
-    }
+        | io::ErrorKind::InvalidData => Code::TcpReset,
+        // A socket read timeout surfaces as `WouldBlock` on Unix.
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => Code::TcpTimeout,
+        _ => {
+            return Unreachable::Local(ProbeError::of(
+                Code::TcpConnect,
+                &Details {
+                    host: Some(venue.host),
+                    port: Some(venue.port),
+                    reason: Some(&error.to_string()),
+                    ..Details::default()
+                },
+            ))
+        }
+    };
+    Unreachable::Down(at(code, venue, &error.to_string()))
+}
+
+/// A TLS handshake that did not complete is the answer of the endpoint, never ours.
+fn handshake(error: &io::Error, venue: Venue<'_>) -> Unreachable {
+    Unreachable::Down(at(Code::HttpTls, venue, &error.to_string()))
+}
+
+/// An answer that is not an HTTP answer.
+fn malformed(venue: Venue<'_>, reason: &str) -> Unreachable {
+    let url = venue.url();
+    Unreachable::Local(ProbeError::of(
+        Code::HttpMalformed,
+        &Details {
+            url: Some(&url),
+            reason: Some(reason),
+            ..Details::default()
+        },
+    ))
+}
+
+/// A failure that names where it happened.
+fn at(code: Code, venue: Venue<'_>, reason: &str) -> Failure {
+    Failure::new(
+        code,
+        &Details {
+            host: Some(venue.host),
+            port: Some(venue.port),
+            reason: Some(reason),
+            ..Details::default()
+        },
+    )
 }
 
 #[cfg(test)]
 mod exchange_tests {
     use super::*;
+
+    /// Where a parser test believes it is.
+    fn venue() -> Venue<'static> {
+        Venue {
+            scheme: Scheme::Http,
+            host: "127.0.0.1",
+            port: 80,
+            target: "/",
+        }
+    }
+
+    /// The code of a `down` verdict, so an assertion states what the endpoint answered.
+    fn code_of(verdict: &Verdict) -> &'static str {
+        match verdict {
+            Verdict::Down(failure) => failure.code(),
+            other => panic!("expected a down verdict, got {other:?}"),
+        }
+    }
     use std::net::TcpListener;
     use std::sync::mpsc::{channel, Receiver};
     use std::thread;
@@ -454,7 +607,15 @@ mod exchange_tests {
             .probe(&http("127.0.0.1", port, "/"), None, Duration::from_secs(1))
             .expect("a local exchange");
 
-        assert_eq!(verdict, Verdict::Down);
+        assert_eq!(code_of(&verdict), "HTTP.UNEXPECTED_STATUS");
+        match &verdict {
+            Verdict::Down(failure) => assert_eq!(
+                failure.message(),
+                "http://127.0.0.1:PORT_NOW/ answered 500, outside 2xx, 3xx"
+                    .replace("PORT_NOW", &port.to_string())
+            ),
+            other => panic!("expected a down verdict, got {other:?}"),
+        }
     }
 
     #[test]
@@ -480,7 +641,7 @@ mod exchange_tests {
             .probe(&http("127.0.0.1", port, "/"), None, Duration::from_secs(1))
             .expect("a refusal is a verdict");
 
-        assert_eq!(verdict, Verdict::Down);
+        assert_eq!(code_of(&verdict), "TCP.REFUSED");
     }
 
     #[test]
@@ -502,7 +663,60 @@ mod exchange_tests {
             )
             .expect("a timeout is a verdict");
 
-        assert_eq!(verdict, Verdict::Down);
+        assert_eq!(code_of(&verdict), "TCP.TIMEOUT");
+    }
+
+    /// A server that speaks plain bytes to a TLS client: the handshake cannot complete.
+    fn silent_tls_server() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a free port");
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                // Not a TLS record: the client rejects the answer of the endpoint.
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n");
+                thread::sleep(Duration::from_millis(200));
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn a_name_that_does_not_resolve_states_its_code() {
+        let error = HttpProbe::new()
+            .probe(
+                &http("network-monitor.invalid", 80, "/"),
+                None,
+                Duration::from_secs(1),
+            )
+            .expect_err("a name that does not resolve is our failure");
+
+        assert_eq!(error.code(), "HTTP.RESOLVE");
+    }
+
+    #[test]
+    fn a_handshake_that_fails_states_its_code() {
+        let port = silent_tls_server();
+        let endpoint = Endpoint::Http {
+            scheme: Scheme::Https,
+            host: "127.0.0.1".to_string(),
+            port,
+            target: "/".to_string(),
+            expect: crate::probe::StatusMatch::default(),
+        };
+
+        let verdict = HttpProbe::new()
+            .probe(&endpoint, None, Duration::from_secs(1))
+            .expect("a failed handshake is the answer of the endpoint, not our failure");
+
+        assert_eq!(code_of(&verdict), "HTTP.TLS");
+        match &verdict {
+            Verdict::Down(failure) => assert!(
+                failure.message().contains("TLS handshake with 127.0.0.1"),
+                "unexpected: {}",
+                failure.message()
+            ),
+            other => panic!("expected a down verdict, got {other:?}"),
+        }
     }
 
     #[test]
@@ -513,9 +727,12 @@ mod exchange_tests {
             .probe(&http("127.0.0.1", port, "/"), None, Duration::from_secs(1))
             .expect_err("a malformed answer cannot be a verdict");
 
+        assert_eq!(error.code(), "HTTP.MALFORMED");
         assert!(
-            error.to_string().contains("status line"),
-            "unexpected: {error}"
+            error
+                .message()
+                .starts_with(&format!("http://127.0.0.1:{port}/ answered")),
+            "the message names the URL, not the host: {error}"
         );
     }
 
@@ -528,22 +745,28 @@ mod exchange_tests {
             .probe(&http("127.0.0.1", port, "/"), None, Duration::from_secs(1))
             .expect_err("an endless head cannot be a verdict");
 
+        assert_eq!(error.code(), "HTTP.HEAD_LIMIT");
         assert!(
-            error.to_string().contains("larger than"),
-            "unexpected: {error}"
+            error
+                .message()
+                .starts_with(&format!("http://127.0.0.1:{port}/ sent a head")),
+            "the message names the URL, not the host: {error}"
         );
     }
 
     #[test]
     fn the_status_is_read_from_the_first_line() {
         assert_eq!(
-            parse_status(b"HTTP/1.1 204 No Content\r\n\r\n").unwrap(),
+            parse_status(b"HTTP/1.1 204 No Content\r\n\r\n", venue()).unwrap(),
             204
         );
-        assert_eq!(parse_status(b"HTTP/1.0 301 Moved\r\n\r\n").unwrap(), 301);
-        assert!(parse_status(b"HTTP/1.1\r\n\r\n").is_err());
-        assert!(parse_status(b"HTTP/1.1 999 Nope\r\n\r\n").is_err());
-        assert!(parse_status(b"HTTP/1.1 200 OK").is_err());
+        assert_eq!(
+            parse_status(b"HTTP/1.0 301 Moved\r\n\r\n", venue()).unwrap(),
+            301
+        );
+        assert!(parse_status(b"HTTP/1.1\r\n\r\n", venue()).is_err());
+        assert!(parse_status(b"HTTP/1.1 999 Nope\r\n\r\n", venue()).is_err());
+        assert!(parse_status(b"HTTP/1.1 200 OK", venue()).is_err());
     }
 
     #[test]

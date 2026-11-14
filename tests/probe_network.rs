@@ -22,7 +22,7 @@ fn timeout() -> Duration {
     Duration::from_secs(5)
 }
 
-fn is_up(verdict: Verdict) -> bool {
+fn is_up(verdict: &Verdict) -> bool {
     matches!(verdict, Verdict::Up { .. })
 }
 
@@ -59,7 +59,7 @@ fn a_public_port_answers() {
         .expect("a local socket and a route can be had");
 
     assert!(
-        is_up(verdict),
+        is_up(&verdict),
         "expected 1.1.1.1:443 to answer, got {verdict:?}"
     );
 }
@@ -73,7 +73,7 @@ fn a_public_name_resolves_through_a_given_server() {
         .expect("a UDP socket and a route can be had");
 
     assert!(
-        is_up(verdict),
+        is_up(&verdict),
         "expected {server} to resolve the name, got {verdict:?}"
     );
 }
@@ -86,7 +86,7 @@ fn a_public_name_resolves_through_the_system_resolver() {
         .expect("the system resolver answers or fails, it never errors");
 
     assert!(
-        is_up(verdict),
+        is_up(&verdict),
         "expected example.com to resolve, got {verdict:?}"
     );
 }
@@ -103,7 +103,10 @@ fn a_name_that_does_not_exist_is_down_without_a_verdict_error() {
         )
         .expect("a definitive answer is a verdict, not an error");
 
-    assert_eq!(verdict, Verdict::Down, "expected NXDOMAIN to be down");
+    match &verdict {
+        Verdict::Down(failure) => assert_eq!(failure.code(), "DNS.NXDOMAIN"),
+        other => panic!("expected NXDOMAIN to be down, got {other:?}"),
+    }
 }
 
 #[test]
@@ -114,7 +117,7 @@ fn a_public_https_endpoint_answers_over_the_embedded_roots() {
         .expect("a TLS handshake against the embedded roots");
 
     assert!(
-        is_up(verdict),
+        is_up(&verdict),
         "expected example.com to answer, got {verdict:?}"
     );
 }

@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use super::{Endpoint, Probe, ProbeError, Verdict};
+use super::{Code, Details, Endpoint, Failure, Probe, ProbeError, Verdict};
 
 /// One request the fake received, so a test can assert what the monitor asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,8 +37,8 @@ impl FakeProbe {
     /// Replays the script, then repeats the last scripted item.
     pub fn scripted(items: Vec<Result<Verdict, ProbeError>>) -> Self {
         let fallback = match items.last() {
-            Some(Ok(verdict)) => *verdict,
-            _ => Verdict::Down,
+            Some(Ok(verdict)) => verdict.clone(),
+            _ => down(),
         };
         FakeProbe {
             script: Mutex::new(items.into()),
@@ -82,7 +82,7 @@ impl Probe for FakeProbe {
 
         let mut script = self.script.lock().expect("the script lock is not poisoned");
         match script.len() {
-            0 => Ok(self.fallback),
+            0 => Ok(self.fallback.clone()),
             1 => script.front().cloned().expect("the script is not empty"),
             _ => script.pop_front().expect("the script is not empty"),
         }
@@ -94,6 +94,23 @@ pub fn up() -> Verdict {
     Verdict::Up {
         rtt: Duration::from_micros(1_234),
     }
+}
+
+/// A "down" verdict whose cause is the one a silent target produces.
+pub fn down() -> Verdict {
+    down_with(Code::TcpTimeout)
+}
+
+/// A "down" verdict with a stated cause, for a test that asserts the code.
+pub fn down_with(code: Code) -> Verdict {
+    Verdict::Down(Failure::new(
+        code,
+        &Details {
+            host: Some("1.1.1.1"),
+            port: Some(443),
+            ..Details::default()
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -113,29 +130,17 @@ mod tests {
 
     #[test]
     fn replays_the_script_then_repeats_the_last_item() {
-        let probe = FakeProbe::from_verdicts(vec![up(), Verdict::Down]);
+        let probe = FakeProbe::from_verdicts(vec![up(), down()]);
         assert_eq!(probe.probe(&endpoint(), None, timeout()).unwrap(), up());
-        assert_eq!(
-            probe.probe(&endpoint(), None, timeout()).unwrap(),
-            Verdict::Down
-        );
-        assert_eq!(
-            probe.probe(&endpoint(), None, timeout()).unwrap(),
-            Verdict::Down
-        );
+        assert_eq!(probe.probe(&endpoint(), None, timeout()).unwrap(), down());
+        assert_eq!(probe.probe(&endpoint(), None, timeout()).unwrap(), down());
     }
 
     #[test]
     fn always_returns_the_fallback() {
-        let probe = FakeProbe::always(Verdict::Down);
-        assert_eq!(
-            probe.probe(&endpoint(), None, timeout()).unwrap(),
-            Verdict::Down
-        );
-        assert_eq!(
-            probe.probe(&endpoint(), None, timeout()).unwrap(),
-            Verdict::Down
-        );
+        let probe = FakeProbe::always(down());
+        assert_eq!(probe.probe(&endpoint(), None, timeout()).unwrap(), down());
+        assert_eq!(probe.probe(&endpoint(), None, timeout()).unwrap(), down());
     }
 
     #[test]

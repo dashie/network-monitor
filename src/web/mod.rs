@@ -33,7 +33,7 @@ const MIN_SPAN_MS: i64 = 5 * 60_000;
 const MAX_SPAN_MS: i64 = 30 * DAY_MS;
 const MAX_CONNECTIONS: usize = 32;
 /// How many disconnections the timeline page lists below the chart.
-const RECENT_DOWNS: u32 = 10;
+const RECENT_FAULTS: u32 = 10;
 
 /// The icon of the application, embedded so the executable stays self-contained: the
 /// masthead mark, the favicon, and the PNG behind both for the browsers without SVG
@@ -198,7 +198,7 @@ fn handle(mut stream: TcpStream, database: &Path, compression: Compression) {
                 }
             };
 
-            let downs = match store.recent_downs(RECENT_DOWNS) {
+            let downs = match store.recent_faults(RECENT_FAULTS) {
                 Ok(downs) => downs,
                 Err(error) => {
                     query_failed(&mut stream, &error, include_body);
@@ -283,7 +283,7 @@ fn handle(mut stream: TcpStream, database: &Path, compression: Compression) {
                 }
             };
 
-            let recent = match store.recent_downs_for(&target.target, RECENT_DOWNS) {
+            let recent = match store.recent_faults_for(&target.target, RECENT_FAULTS) {
                 Ok(recent) => recent,
                 Err(error) => {
                     query_failed(&mut stream, &error, include_body);
@@ -294,7 +294,12 @@ fn handle(mut stream: TcpStream, database: &Path, compression: Compression) {
             let body = detail::target_page(&target, &days, &segments, &recent, now, period_days);
             respond_page(&mut stream, &body, include_body, gzip);
         }
+        // The path the page used before the rows were called faults. Kept for one
+        // release, so a bookmark and a script written against 0.2 keep working.
         "/export/disconnections.csv.gz" => {
+            respond_redirect(&mut stream, "/export/faults.csv.gz");
+        }
+        "/export/faults.csv.gz" => {
             let store = match open_store(&mut stream, database, include_body) {
                 Some(store) => store,
                 None => return,
@@ -395,6 +400,22 @@ fn respond_bytes(
     if include_body && !body.is_empty() {
         let _ = stream.write_all(body);
     }
+    let _ = stream.flush();
+}
+
+/// A permanent redirect, so an address that moved keeps working.
+///
+/// The response carries no `Cache-Control`: a `308` is meant to be remembered, and the
+/// page's `no-store` would tell a cache to forget it.
+fn respond_redirect(stream: &mut TcpStream, location: &str) {
+    let head = format!(
+        "HTTP/1.1 308 Permanent Redirect\r\n\
+         Location: {location}\r\n\
+         Content-Length: 0\r\n\
+         X-Content-Type-Options: nosniff\r\n\
+         Connection: close\r\n\r\n"
+    );
+    let _ = stream.write_all(head.as_bytes());
     let _ = stream.flush();
 }
 
@@ -547,7 +568,7 @@ fn end_chunked(stream: &mut TcpStream) {
 fn export_name(now_ms: i64) -> String {
     let stamp = crate::time::format_rfc3339(now_ms);
     format!(
-        "disconnections-{}{}{}.csv.gz",
+        "faults-{}{}{}.csv.gz",
         &stamp[0..4],
         &stamp[5..7],
         &stamp[8..10]

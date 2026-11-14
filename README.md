@@ -35,7 +35,7 @@ sudo ./target/release/network-monitor monitor --config ./network-monitor.toml \
 
 # Restore the history from the file that page downloaded; back up the database first
 # (docs/DEVELOPER-GUIDE.md#back-up-before-you-import)
-./target/release/network-monitor import ./disconnections-20261109.csv.gz \
+./target/release/network-monitor import ./faults-20261109.csv.gz \
   --database ./network-monitor.db
 
 # Run the test suite (no privileges needed: the ICMP prober is replaced by a fake)
@@ -80,7 +80,7 @@ label = "example-health"
 
 ## Status
 
-**Alpha.** The feature set in [docs/PRODUCT.md](docs/PRODUCT.md) is implemented and covered by the test suite: layered configuration with live reload, four probe methods — ICMP, TCP, DNS, and HTTP/HTTPS — with per-interface binding for the first two, event-only SQLite persistence, querying while monitoring runs, retention, and a read-only web page with 24 h state bands, per-target statistics, the latest disconnections, and a 30-day per-target view. The container image builds and probes with only `NET_RAW` added; HTTPS verification uses roots compiled into the binary.
+**Alpha.** The feature set in [docs/PRODUCT.md](docs/PRODUCT.md) is implemented and covered by the test suite: layered configuration with live reload, four probe methods — ICMP, TCP, DNS, and HTTP/HTTPS — with per-interface binding for the first two, event-only SQLite persistence, querying while monitoring runs, retention, and a read-only web page with 24 h state bands, per-target statistics, the latest faults with the cause of each, and a 30-day per-target view. The container image builds and probes with only `NET_RAW` added; HTTPS verification uses roots compiled into the binary.
 
 Not done yet: the Windows raw-socket path is written but not exercised on a Windows host, IPv6 targets are deferred, HTTP checks do not follow redirects, and no binary is published as a release.
 

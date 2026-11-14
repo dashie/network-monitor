@@ -59,14 +59,14 @@ pub fn write_csv_gz<W: Write>(out: W, store: &Store) -> Result<(), ExportError> 
 
 /// The header of the CSV file. The import reads exactly these columns.
 fn header() -> String {
-    "target,label,interface,state,occurred_at,rtt_us\n".to_string()
+    "target,label,interface,state,occurred_at,rtt_us,cause,cause_message\n".to_string()
 }
 
-/// One CSV row: the identity of the target, what happened, when, and the round-trip
-/// time when the event is a return to `up`.
+/// One CSV row: the identity of the target, what happened, when, the round-trip time
+/// when the event is a return to `up`, and why it went down.
 fn row(event: &ExportedEvent) -> String {
     format!(
-        "{},{},{},{},{},{}\n",
+        "{},{},{},{},{},{},{},{}\n",
         field(&event.target),
         field(event.label.as_deref().unwrap_or_default()),
         field(event.interface.as_deref().unwrap_or_default()),
@@ -75,7 +75,9 @@ fn row(event: &ExportedEvent) -> String {
         event
             .rtt_us
             .map(|rtt_us| rtt_us.to_string())
-            .unwrap_or_default()
+            .unwrap_or_default(),
+        field(event.cause.as_deref().unwrap_or_default()),
+        field(event.cause_message.as_deref().unwrap_or_default())
     )
 }
 
@@ -116,6 +118,16 @@ mod tests {
             } else {
                 None
             },
+            cause: if state == TargetState::Down {
+                Some("TCP.REFUSED".to_string())
+            } else {
+                None
+            },
+            cause_message: if state == TargetState::Down {
+                Some("the connection to 1.1.1.1:443 was refused".to_string())
+            } else {
+                None
+            },
         }
     }
 
@@ -141,10 +153,13 @@ mod tests {
             state: TargetState::Down,
             occurred_at_ms: 90_000,
             rtt_us: None,
+            cause: Some("TCP.REFUSED".to_string()),
+            cause_message: Some("the connection to 1.1.1.1:443 was refused".to_string()),
         };
         assert_eq!(
             row(&event),
-            "1.1.1.1,cloudflare,eth0,down,1970-01-01T00:01:30.000Z,\n"
+            "1.1.1.1,cloudflare,eth0,down,1970-01-01T00:01:30.000Z,,TCP.REFUSED,\
+             the connection to 1.1.1.1:443 was refused\n"
         );
     }
 
@@ -158,8 +173,33 @@ mod tests {
             state: TargetState::Up,
             occurred_at_ms: 90_000,
             rtt_us: Some(12_500),
+            cause: None,
+            cause_message: None,
         };
-        assert_eq!(row(&event), "1.1.1.1,,,up,1970-01-01T00:01:30.000Z,12500\n");
+        assert_eq!(
+            row(&event),
+            "1.1.1.1,,,up,1970-01-01T00:01:30.000Z,12500,,\n"
+        );
+    }
+
+    #[test]
+    fn a_hostile_cause_message_is_quoted() {
+        let event = ExportedEvent {
+            id: 3,
+            target: "1.1.1.1".to_string(),
+            label: None,
+            interface: None,
+            state: TargetState::Down,
+            occurred_at_ms: 90_000,
+            rtt_us: None,
+            cause: Some("TCP.REfUSED".to_string()),
+            cause_message: Some("a, b \"c\"".to_string()),
+        };
+        let line = row(&event);
+        assert!(
+            line.contains(",\"a, b \"\"c\"\"\"\n"),
+            "the message is quoted like every other field: {line}"
+        );
     }
 
     #[test]
@@ -185,22 +225,26 @@ mod tests {
         let csv = archive_of(&store);
         let lines: Vec<&str> = csv.lines().collect();
 
-        assert_eq!(lines[0], "target,label,interface,state,occurred_at,rtt_us");
+        assert_eq!(
+            lines[0],
+            "target,label,interface,state,occurred_at,rtt_us,cause,cause_message"
+        );
         assert_eq!(
             lines[1],
-            "1.1.1.1,probe,eth0,up,1970-01-01T00:00:01.000Z,12000"
+            "1.1.1.1,probe,eth0,up,1970-01-01T00:00:01.000Z,12000,,"
         );
         assert_eq!(
             lines[2],
-            "1.1.1.1,probe,eth0,down,1970-01-01T00:00:02.000Z,"
+            "1.1.1.1,probe,eth0,down,1970-01-01T00:00:02.000Z,,TCP.REFUSED,\
+             the connection to 1.1.1.1:443 was refused"
         );
         assert_eq!(
             lines[3],
-            "1.1.1.1,probe,eth0,up,1970-01-01T00:00:03.000Z,12000"
+            "1.1.1.1,probe,eth0,up,1970-01-01T00:00:03.000Z,12000,,"
         );
         assert_eq!(
             lines[4],
-            "8.8.8.8,probe,eth0,up,1970-01-01T00:00:02.500Z,12000"
+            "8.8.8.8,probe,eth0,up,1970-01-01T00:00:02.500Z,12000,,"
         );
         assert_eq!(lines.len(), 5, "every event is a row");
     }

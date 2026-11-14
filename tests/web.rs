@@ -133,6 +133,8 @@ fn event(target: &str, previous: TargetState, state: TargetState, at: i64) -> Ev
         state,
         occurred_at_ms: at,
         rtt_us: None,
+        cause: None,
+        cause_message: None,
     }
 }
 
@@ -231,13 +233,12 @@ fn serves_the_page_with_a_band_per_state() {
     );
     assert!(!response.contains("wheel"), "the timeline has no zoom");
     assert!(
-        response.contains("Last 10 disconnections"),
-        "the page lists the latest disconnections"
+        response.contains("Last 10 faults"),
+        "the page lists the latest faults"
     );
     assert!(
-        response.contains(
-            "<a class=\"download\" href=\"/export/disconnections.csv.gz\">Download History</a>"
-        ),
+        response
+            .contains("<a class=\"download\" href=\"/export/faults.csv.gz\">Download History</a>"),
         "the page offers the full export under a plain label"
     );
     assert!(
@@ -300,11 +301,11 @@ fn the_history_can_be_downloaded_as_a_gzipped_csv() {
     let (_directory, database) = seeded_database();
     let server = start(&database);
 
-    let (status, head, body) = server.get_raw("/export/disconnections.csv.gz");
+    let (status, head, body) = server.get_raw("/export/faults.csv.gz");
     assert_eq!(status, 200);
     assert!(head.contains("Content-Type: application/gzip"));
     assert!(head.contains("Transfer-Encoding: chunked"), "streamed");
-    assert!(head.contains("attachment; filename=\"disconnections-"));
+    assert!(head.contains("attachment; filename=\"faults-"));
     assert!(head.contains(".csv.gz\""));
 
     let mut csv = String::new();
@@ -312,7 +313,9 @@ fn the_history_can_be_downloaded_as_a_gzipped_csv() {
         .read_to_string(&mut csv)
         .expect("the response decompresses");
 
-    assert!(csv.starts_with("target,label,interface,state,occurred_at,rtt_us\n"));
+    assert!(
+        csv.starts_with("target,label,interface,state,occurred_at,rtt_us,cause,cause_message\n")
+    );
     assert!(csv.contains("1.1.1.1"), "got {csv}");
     assert!(
         csv.contains(",up,"),
@@ -353,7 +356,7 @@ fn a_page_is_gzipped_when_the_client_accepts_it_and_only_then() {
         "the body decompresses to the page"
     );
     assert!(decoded.contains("Network Monitor"));
-    assert!(decoded.contains("Last 10 disconnections"));
+    assert!(decoded.contains("Last 10 faults"));
     assert!(
         compressed.len() * 2 < plain.len(),
         "the page is much smaller: {} against {}",
@@ -401,12 +404,27 @@ fn the_archive_is_not_compressed_twice() {
     let server = start(&database);
 
     let (status, head, _body) =
-        server.get_bytes_with("/export/disconnections.csv.gz", "Accept-Encoding: gzip\r\n");
+        server.get_bytes_with("/export/faults.csv.gz", "Accept-Encoding: gzip\r\n");
     assert_eq!(status, 200);
     assert!(
         !head.contains("Content-Encoding"),
         "the archive is already a gzip file, not a compressed response body"
     );
+}
+
+#[test]
+fn the_old_export_path_still_answers_and_points_at_the_new_one() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, head, body) = server.get_bytes_with("/export/disconnections.csv.gz", "");
+    assert_eq!(status, 308, "the address moved, it was not dropped");
+    assert!(head.contains("Location: /export/faults.csv.gz"));
+    assert!(
+        !head.contains("Cache-Control"),
+        "a permanent redirect is meant to be remembered, not forbidden to cache"
+    );
+    assert!(body.is_empty(), "a redirect carries no body");
 }
 
 #[test]
@@ -444,7 +462,7 @@ fn every_row_shows_its_statistics_and_links_to_its_detail_page() {
         detail.contains("<svg"),
         "one bar per day of the last 30 days"
     );
-    assert!(detail.contains("1 disconnections"));
+    assert!(detail.contains("1 faults"));
     assert!(
         detail.contains("Disconnections per day") && detail.contains("Day by day"),
         "the chart and the table are titled"

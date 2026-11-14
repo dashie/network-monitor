@@ -265,12 +265,42 @@ piped.
 
 - `/` — one lane per target over the selected window (1 h by default; 1, 2, 4, 6, 12, 24 h).
   A lane states the drops, the average `up` run with its spread, the longest run, and how long
-  the target has been up without a drop. Below the chart, the last 10 disconnections, each named as its lane is: the label when the target has one, in which case the untitled column beside it repeats the key, and the key alone otherwise.
+  the target has been up without a drop. Below the chart opens a table of the last 10 faults,
+  under a rule that marks where it begins: a row names the target as its lane does — the label,
+  with the key in smaller type under it, or the key alone when the target has no label — and
+  states the start, the cause of the fault, and — in the last column — the duration, with
+  "and counting" on a line of its own while the target is still down. The four columns keep a
+  stated share of the width (15, 30, 45 and 10 per cent) and every row is the same height.
 - `/target?target=<key>&days=30d` — one target for 30, 60, 90, 180, or 360 days: a bar per day,
-  the last 10 disconnections of that target in the same table as the timeline page, and a per-day
-  table.
-- `Download History` — the whole history as a gzipped CSV.
+  the last 10 faults of that target in the same table as the timeline page, and a per-day table.
+- `Download History` — the whole history as a gzipped CSV, from `/export/faults.csv.gz`. The
+  address the page used before this version, `/export/disconnections.csv.gz`, still answers and
+  redirects to it.
 - `/healthz` — `ok` while the process runs.
+
+**Selecting a fault opens its cause underneath the row** — one fault at a time. The message is
+the standard sentence of that failure, with the details of the occurrence in it, for example
+"the connection to 9.9.9.9:443 was refused". A browser without JavaScript shows the same message
+on hover. A row recorded before this version states no cause and opens nothing.
+
+The causes an operator will meet, by the layer that reported them:
+
+| Code | What happened |
+|---|---|
+| `ICMP.NO_REPLY` | No echo reply before the timeout |
+| `TCP.REFUSED` | The port answered with a refusal: nothing listens there |
+| `TCP.RESET` | The connection was closed by the peer |
+| `TCP.TIMEOUT` | No answer before the timeout: the packet is likely filtered |
+| `DNS.NXDOMAIN` | The server answered that the name does not exist |
+| `DNS.NO_RECORD` | The name exists without a record of the requested type |
+| `DNS.TIMEOUT` | The server did not answer before the timeout |
+| `DNS.UNRESOLVED` | The system resolver could not resolve the name |
+| `HTTP.UNEXPECTED_STATUS` | The endpoint answered a status outside the expectation |
+| `HTTP.TLS` | The certificate handshake failed |
+
+A local failure — the machine could not perform the check — never reaches the page: it has a code
+of its own in the log (`TCP.RESOLVE`, `TCP.INTERFACE`, `HTTP.MALFORMED`, `PROBE.WRONG_METHOD`, …),
+and the log line reads `probe failed: CODE — message`, so a code can be searched for.
 
 The pages are gzipped when the browser asks for it — it always does, and the saving is about
 80 % — and sent plain otherwise, or always plain with `--compression off` when a proxy in front
@@ -280,8 +310,10 @@ The page reloads itself every 30 s and formats the instants in your browser's ti
 **no authentication**: anyone who can reach the port reads the history. Keep the default bind
 (`127.0.0.1`) or firewall the port.
 
-The CSV columns are `target,label,interface,state,occurred_at,rtt_us`; `target` is the key.
-The same file is what `import` reads back.
+The CSV columns are `target,label,interface,state,occurred_at,rtt_us,cause,cause_message`;
+`target` is the key, and the last two state the code and the message of the cause, empty on a
+return to `up`. The same file is what `import` reads back, and an archive written before the
+cause columns existed — six columns, ending after `rtt_us` — imports with no cause.
 
 ## Operations
 
@@ -290,13 +322,13 @@ The same file is what `import` reads back.
 ```bash
 sqlite3 network-monitor.db ".backup 'backup.db'"      # while it runs
 network-monitor query events --format json > dump.json
-curl -sO http://nas:8642/export/disconnections.csv.gz  # snapshot from the page
+curl -sO http://nas:8642/export/faults.csv.gz   # snapshot from the page
 ```
 
 Restoring: stop the process, put the database back, start it. Restoring from the CSV:
 
 ```bash
-network-monitor import disconnections-20261109.csv.gz --database ./events.db
+network-monitor import faults-20261109.csv.gz --database ./events.db
 ```
 
 Import merges by default; `--replace-window` replaces what the archive covers and keeps the
@@ -307,11 +339,21 @@ import reads plain `http://` URLs; download an `https` archive with `curl` first
 
 1. Export or back up the database.
 2. Replace the binary or the image and restart.
-3. The schema is migrated on open. **From 0.1 to 0.2** the identity of every target changes to
-   the `method` form: the first writable open rewrites bare addresses to `icmp://…` once. An
-   older binary started against that database afterwards keys its ICMP targets again by bare
-   address, so the same target can appear twice — keep the backup from step 1 until the
-   upgrade is confirmed.
+3. The schema is migrated by the first writable open, `monitor` or `import`. **From 0.1 to
+   0.2** the identity of every target changes to the `method` form: that open also rewrites
+   bare addresses to `icmp://…` once. An older binary started against that database afterwards
+   keys its ICMP targets again by bare address, so the same target can appear twice — keep the
+   backup from step 1 until the upgrade is confirmed.
+4. **From 0.2 to 0.3** the schema becomes version 2: the first `monitor` or `import` adds the
+   two cause columns and keeps every event, whose cause reads empty. A 0.2 binary then refuses
+   that database (it states the schema is newer) instead of misreading it, so upgrade every
+   process that opens the same file. The export moves to `/export/faults.csv.gz` and the file is
+   named `faults-YYYYMMDD.csv.gz`; the old address still answers. An archive exported by 0.2
+   imports into 0.3 unchanged.
+
+`serve` and `query` never write, so they open a 0.2 database as it is: its rows state no cause
+until a `monitor` or an `import` has upgraded the file. That also means the page runs against a
+snapshot, a backup, or a volume mounted read-only.
 
 ### Retention, logs, signals
 

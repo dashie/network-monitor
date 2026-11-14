@@ -10,7 +10,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
 
-use super::{Endpoint, Probe, ProbeError, RecordType, Verdict};
+use super::{Code, Details, Endpoint, Failure, Probe, ProbeError, RecordType, Verdict};
 
 /// The largest response accepted, so a hostile server cannot grow the buffer.
 const MAX_RESPONSE: usize = 4_096;
@@ -40,10 +40,14 @@ impl Probe for DnsProbe {
             record,
         } = endpoint
         else {
-            return Err(ProbeError::local(format!(
-                "the dns prober cannot check a {} target",
-                endpoint.method()
-            )));
+            return Err(ProbeError::of(
+                Code::ProbeWrongMethod,
+                &Details {
+                    method: Some("dns"),
+                    other: Some(endpoint.method().as_str()),
+                    ..Details::default()
+                },
+            ));
         };
 
         match resolver {
@@ -58,8 +62,10 @@ impl Probe for DnsProbe {
 pub enum Response {
     /// At least one record of the requested type came back.
     Resolved,
-    /// The name does not exist, or exists without a record of that type.
-    Unresolved,
+    /// The server answered that the name does not exist.
+    NoSuchName,
+    /// The name exists and carries no record of the requested type.
+    NoRecord,
     /// The server answered that it could not answer.
     Refused(&'static str),
     /// The bytes cannot be used as an answer of this query.
@@ -79,11 +85,17 @@ fn resolve_with_the_system(name: &str, record: RecordType) -> Result<Verdict, Pr
         // this host cannot resolve is therefore `down`; a target that needs the
         // distinction names its resolver and gets the RCODE-based answer.
         Err(error) if error.kind() == io::ErrorKind::InvalidInput => {
-            return Err(ProbeError::local(format!(
-                "cannot ask the system resolver for '{name}': {error}"
-            )))
+            return Err(ProbeError::of(
+                Code::DnsSocket,
+                &Details {
+                    server: Some(SYSTEM_RESOLVER),
+                    name: Some(name),
+                    reason: Some(&error.to_string()),
+                    ..Details::default()
+                },
+            ))
         }
-        Err(_) => return Ok(Verdict::Down),
+        Err(_) => return Ok(Verdict::Down(unresolved(name))),
     };
 
     let found = addresses.iter().any(|address| match record {
@@ -96,7 +108,15 @@ fn resolve_with_the_system(name: &str, record: RecordType) -> Result<Verdict, Pr
             rtt: started.elapsed(),
         }
     } else {
-        Verdict::Down
+        // The name resolves, but not to the family the question asked for.
+        Verdict::Down(Failure::new(
+            Code::DnsNoRecord,
+            &Details {
+                name: Some(name),
+                server: Some(SYSTEM_RESOLVER),
+                ..Details::default()
+            },
+        ))
     })
 }
 
@@ -113,19 +133,25 @@ fn query(
     } else {
         SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
     };
-    let socket = UdpSocket::bind(bind)
-        .map_err(|error| ProbeError::local(format!("cannot open the socket: {error}")))?;
-    socket
-        .connect(server)
-        .map_err(|error| ProbeError::local(format!("cannot reach {server}: {error}")))?;
+    let reach = |error: &io::Error| {
+        ProbeError::of(
+            Code::DnsSocket,
+            &Details {
+                server: Some(&server.to_string()),
+                name: Some(name),
+                reason: Some(&error.to_string()),
+                ..Details::default()
+            },
+        )
+    };
+    let socket = UdpSocket::bind(bind).map_err(|error| reach(&error))?;
+    socket.connect(server).map_err(|error| reach(&error))?;
     socket
         .set_read_timeout(Some(timeout))
-        .map_err(|error| ProbeError::local(format!("cannot set the timeout: {error}")))?;
+        .map_err(|error| reach(&error))?;
 
     let started = Instant::now();
-    socket
-        .send(&message)
-        .map_err(|error| ProbeError::local(format!("cannot send the query: {error}")))?;
+    socket.send(&message).map_err(|error| reach(&error))?;
 
     let mut buffer = [0u8; MAX_RESPONSE];
     let size = match socket.recv(&mut buffer) {
@@ -136,12 +162,26 @@ fn query(
                 io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
             ) =>
         {
-            return Ok(Verdict::Down)
+            return Ok(Verdict::Down(Failure::new(
+                Code::DnsTimeout,
+                &Details {
+                    name: Some(name),
+                    server: Some(&server.to_string()),
+                    timeout: Some(timeout),
+                    ..Details::default()
+                },
+            )))
         }
         Err(error) => {
-            return Err(ProbeError::local(format!(
-                "no answer from {server}: {error}"
-            )))
+            return Err(ProbeError::of(
+                Code::DnsSocket,
+                &Details {
+                    server: Some(&server.to_string()),
+                    name: Some(name),
+                    reason: Some(&error.to_string()),
+                    ..Details::default()
+                },
+            ))
         }
     };
 
@@ -149,14 +189,60 @@ fn query(
         Response::Resolved => Ok(Verdict::Up {
             rtt: started.elapsed(),
         }),
-        Response::Unresolved => Ok(Verdict::Down),
-        Response::Refused(reason) => Err(ProbeError::local(format!(
-            "{server} could not answer: {reason}"
-        ))),
-        Response::Unusable(reason) => Err(ProbeError::local(format!(
-            "the answer of {server} is unusable: {reason}"
-        ))),
+        Response::NoSuchName => Ok(Verdict::Down(answer(name, Code::DnsNxDomain, server))),
+        Response::NoRecord => Ok(Verdict::Down(answer(name, Code::DnsNoRecord, server))),
+        Response::Refused(reason) => Err(server_failure(name, server, reason)),
+        Response::Unusable(reason) => Err(ProbeError::of(
+            Code::DnsUnusable,
+            &Details {
+                server: Some(&server.to_string()),
+                name: Some(name),
+                reason: Some(reason),
+                ..Details::default()
+            },
+        )),
     }
+}
+
+/// What a name that does not resolve through the system resolver is called.
+const SYSTEM_RESOLVER: &str = "the system resolver";
+
+/// A name the system resolver cannot resolve.
+fn unresolved(name: &str) -> Failure {
+    Failure::new(
+        Code::DnsUnresolved,
+        &Details {
+            name: Some(name),
+            ..Details::default()
+        },
+    )
+}
+
+/// The answer of one server about one name: the name does not exist, or carries no record
+/// of the requested type.
+fn answer(name: &str, code: Code, server: SocketAddr) -> Failure {
+    let server = server.to_string();
+    Failure::new(
+        code,
+        &Details {
+            name: Some(name),
+            server: Some(&server),
+            ..Details::default()
+        },
+    )
+}
+
+/// A server that answered that it could not answer.
+fn server_failure(name: &str, server: SocketAddr, reason: &str) -> ProbeError {
+    ProbeError::of(
+        Code::DnsServerFailure,
+        &Details {
+            server: Some(&server.to_string()),
+            name: Some(name),
+            reason: Some(reason),
+            ..Details::default()
+        },
+    )
 }
 
 /// A query identifier that changes with every call.
@@ -178,9 +264,14 @@ pub fn build_query(name: &str, record: RecordType, identifier: u16) -> Result<Ve
 
     for label in name.trim_end_matches('.').split('.') {
         if label.is_empty() || label.len() > 63 {
-            return Err(ProbeError::local(format!(
-                "'{name}' is not a name that can be asked"
-            )));
+            return Err(ProbeError::of(
+                Code::DnsBuild,
+                &Details {
+                    name: Some(name),
+                    reason: Some("a label is empty or longer than 63 bytes"),
+                    ..Details::default()
+                },
+            ));
         }
         message.push(label.len() as u8);
         message.extend_from_slice(label.as_bytes());
@@ -235,7 +326,8 @@ pub fn parse_response(message: &[u8], record: RecordType) -> Response {
     }
 
     match flags & 0x000f {
-        0 | 3 => Response::Unresolved,
+        0 => Response::NoRecord,
+        3 => Response::NoSuchName,
         2 => Response::Refused("the server failed (SERVFAIL)"),
         4 => Response::Refused("the server does not implement the query (NOTIMP)"),
         5 => Response::Refused("the server refused the query (REFUSED)"),
@@ -316,7 +408,8 @@ impl fmt::Display for Response {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Response::Resolved => formatter.write_str("resolved"),
-            Response::Unresolved => formatter.write_str("unresolved"),
+            Response::NoSuchName => formatter.write_str("no such name"),
+            Response::NoRecord => formatter.write_str("no record of that type"),
             Response::Refused(reason) | Response::Unusable(reason) => formatter.write_str(reason),
         }
     }
@@ -328,6 +421,14 @@ mod tests {
     use std::thread;
 
     /// A response to `query`, with the given rcode and answer records.
+    /// The code of a `down` verdict, so an assertion states what the server answered.
+    fn code_of(verdict: &Verdict) -> &'static str {
+        match verdict {
+            Verdict::Down(failure) => failure.code(),
+            other => panic!("expected a down verdict, got {other:?}"),
+        }
+    }
+
     fn response(query: &[u8], rcode: u8, answers: &[Vec<u8>]) -> Vec<u8> {
         let mut message = Vec::new();
         message.extend_from_slice(&query[0..2]);
@@ -388,6 +489,15 @@ mod tests {
     }
 
     #[test]
+    fn a_name_that_cannot_be_asked_states_its_code() {
+        for name in ["", "a.b..c", &"x".repeat(64)] {
+            let error = build_query(name, RecordType::A, 1)
+                .expect_err("a name that cannot be encoded is our failure");
+            assert_eq!(error.code(), "DNS.BUILD", "for {name:?}");
+        }
+    }
+
+    #[test]
     fn an_answer_of_the_requested_type_resolves() {
         let query = query_bytes("example.com", RecordType::A);
         let answer = response(&query, 0, &[a_record()]);
@@ -408,7 +518,7 @@ mod tests {
     fn a_record_of_the_wrong_family_does_not_resolve() {
         let query = query_bytes("example.com", RecordType::A);
         let answer = response(&query, 0, &[aaaa_record()]);
-        assert_eq!(parse_response(&answer, RecordType::A), Response::Unresolved);
+        assert_eq!(parse_response(&answer, RecordType::A), Response::NoRecord);
     }
 
     #[test]
@@ -422,7 +532,7 @@ mod tests {
     fn a_missing_name_is_unresolved() {
         let query = query_bytes("missing.example.com", RecordType::A);
         let answer = response(&query, 3, &[]);
-        assert_eq!(parse_response(&answer, RecordType::A), Response::Unresolved);
+        assert_eq!(parse_response(&answer, RecordType::A), Response::NoSuchName);
     }
 
     #[test]
@@ -530,8 +640,94 @@ mod tests {
         )
         .expect("a local exchange");
 
-        assert_eq!(verdict, Verdict::Down);
+        assert_eq!(code_of(&verdict), "DNS.NXDOMAIN");
         let _ = server.join();
+    }
+
+    /// The code of a local failure, so an assertion states what the server or this host did.
+    fn code_of_error(error: &ProbeError) -> &'static str {
+        error.code()
+    }
+
+    #[test]
+    fn a_record_of_another_type_answers_no_record() {
+        let (address, server) = local_server(|socket, query, from| {
+            let answer = response(query, 0, &[aaaa_record()]);
+            socket.send_to(&answer, from).unwrap();
+        });
+
+        let verdict = query(
+            "example.com",
+            RecordType::A,
+            address,
+            Duration::from_millis(500),
+        )
+        .expect("a local exchange");
+
+        assert_eq!(code_of(&verdict), "DNS.NO_RECORD");
+        let _ = server.join();
+    }
+
+    #[test]
+    fn a_server_that_fails_states_its_code() {
+        for rcode in [2u8, 4, 5] {
+            let (address, server) = local_server(move |socket, query, from| {
+                let answer = response(query, rcode, &[]);
+                socket.send_to(&answer, from).unwrap();
+            });
+
+            let error = query(
+                "example.com",
+                RecordType::A,
+                address,
+                Duration::from_millis(500),
+            )
+            .expect_err("a server that cannot answer is a local failure");
+
+            assert_eq!(code_of_error(&error), "DNS.SERVER_FAILURE", "rcode {rcode}");
+            assert!(
+                error.message().contains("could not answer"),
+                "unexpected: {error}"
+            );
+            let _ = server.join();
+        }
+    }
+
+    #[test]
+    fn a_truncated_answer_over_the_wire_states_its_code() {
+        let (address, server) = local_server(|socket, query, from| {
+            let mut answer = response(query, 0, &[a_record()]);
+            answer[2] |= 0x02; // TC
+            socket.send_to(&answer, from).unwrap();
+        });
+
+        let error = query(
+            "example.com",
+            RecordType::A,
+            address,
+            Duration::from_millis(500),
+        )
+        .expect_err("a truncated answer is not an answer");
+
+        assert_eq!(code_of_error(&error), "DNS.UNUSABLE");
+        let _ = server.join();
+    }
+
+    #[test]
+    fn a_socket_that_cannot_send_states_its_code() {
+        // Sending to the broadcast address is refused without `SO_BROADCAST`: the cheapest
+        // way to reach the socket failures of this transport without a network.
+        let server = SocketAddr::from((Ipv4Addr::BROADCAST, 53));
+
+        let error = query(
+            "example.com",
+            RecordType::A,
+            server,
+            Duration::from_millis(100),
+        )
+        .expect_err("a socket that cannot send is our failure");
+
+        assert_eq!(code_of_error(&error), "DNS.SOCKET");
     }
 
     #[test]
@@ -546,7 +742,7 @@ mod tests {
         )
         .expect("a timeout is a verdict");
 
-        assert_eq!(verdict, Verdict::Down);
+        assert_eq!(code_of(&verdict), "DNS.TIMEOUT");
         let _ = server.join();
     }
 
@@ -581,7 +777,7 @@ mod tests {
             )
             .expect("a name that does not exist is a verdict");
 
-        assert_eq!(verdict, Verdict::Down);
+        assert_eq!(code_of(&verdict), "DNS.UNRESOLVED");
     }
 
     #[test]

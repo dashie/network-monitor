@@ -52,6 +52,10 @@ pub struct Event {
     pub state: TargetState,
     pub occurred_at_ms: i64,
     pub rtt_us: Option<i64>,
+    /// The code of a disconnection, when the event is one.
+    pub cause: Option<String>,
+    /// The standard message of that cause, as it was rendered when it happened.
+    pub cause_message: Option<String>,
 }
 
 /// A transition read back from the database.
@@ -64,6 +68,10 @@ pub struct EventRow {
     pub state: TargetState,
     pub occurred_at_ms: i64,
     pub rtt_us: Option<i64>,
+    /// The code of a disconnection, when the event is one.
+    pub cause: Option<String>,
+    /// The standard message of that cause, as it was rendered.
+    pub cause_message: Option<String>,
 }
 
 /// The current state of a target.
@@ -130,12 +138,13 @@ pub struct ExportedEvent {
     pub state: TargetState,
     pub occurred_at_ms: i64,
     pub rtt_us: Option<i64>,
+    pub cause: Option<String>,
+    pub cause_message: Option<String>,
 }
 
-/// One disconnection: the moment a target went down and, if it came back, the moment
-/// it did.
+/// One fault: a target that went down, why, and — if it came back — when.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DownEpisode {
+pub struct Fault {
     /// Id of the `down` event, used to page through the history.
     pub event_id: i64,
     pub target: String,
@@ -144,16 +153,25 @@ pub struct DownEpisode {
     pub started_at_ms: i64,
     /// `None` while the target is still down.
     pub ended_at_ms: Option<i64>,
+    /// The code of the failure that started it; `None` on a row written before causes.
+    pub cause: Option<String>,
+    /// The standard message of that cause, as it was rendered.
+    pub cause_message: Option<String>,
 }
 
 const DAY_MS: i64 = 86_400_000;
 
-/// The columns of one disconnection: event id, target, label, start, end. The end is
-/// `NULL` while the target is still down. Shared by the page and the export.
-const DOWNS_SELECT: &str = "
+/// The columns of one fault: event id, target, label, start, end, and the two of the
+/// cause. The end is `NULL` while the target is still down. Shared by both pages.
+/// The schema version that added `events.cause` and `events.cause_message`. A read-only
+/// open of an older file selects `NULL` in their place.
+const CAUSE_COLUMNS: i64 = 2;
+
+const FAULTS_SELECT: &str = "
 SELECT e.id, e.target, t.label, e.occurred_at_ms,
        (SELECT MIN(n.occurred_at_ms) FROM events n
-         WHERE n.target = e.target AND n.occurred_at_ms > e.occurred_at_ms)
+         WHERE n.target = e.target AND n.occurred_at_ms > e.occurred_at_ms),
+       {cause}
 FROM events e
 LEFT JOIN targets t ON t.target = e.target
 WHERE e.state = 'down'";
@@ -241,6 +259,57 @@ pub enum StoreError {
 /// The event database of one process.
 pub struct Store {
     connection: Connection,
+    /// Whether the file carries the two cause columns. A read-only open of a database
+    /// written before them reads `NULL` in their place instead of migrating the file.
+    has_cause: bool,
+}
+
+/// A connection that cannot write, for every read-only entry point.
+fn read_only_connection(path: &Path) -> Result<Connection, StoreError> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|source| StoreError::Open {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    Ok(connection)
+}
+
+/// The schema version of an open database, refusing one this binary cannot read.
+fn checked_version(connection: &Connection, path: &Path) -> Result<i64, StoreError> {
+    let meta_exists: Option<String> = connection
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if meta_exists.is_none() {
+        return Err(StoreError::Uninitialized {
+            path: path.to_path_buf(),
+        });
+    }
+
+    let version: Option<i64> = connection
+        .query_row("SELECT version FROM schema_meta LIMIT 1", [], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    let Some(version) = version else {
+        return Err(StoreError::Uninitialized {
+            path: path.to_path_buf(),
+        });
+    };
+    if version > SCHEMA_VERSION {
+        return Err(StoreError::NewerSchema {
+            found: version,
+            supported: SCHEMA_VERSION,
+        });
+    }
+    Ok(version)
 }
 
 impl Store {
@@ -260,7 +329,10 @@ impl Store {
             path: path.to_path_buf(),
             source,
         })?;
-        let mut store = Store { connection };
+        let mut store = Store {
+            connection,
+            has_cause: true,
+        };
         store.connection.execute_batch(PRAGMAS)?;
         store.migrate()?;
         store.rewrite_legacy_target_keys()?;
@@ -275,47 +347,15 @@ impl Store {
             });
         }
 
-        let connection = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(|source| StoreError::Open {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        connection.busy_timeout(Duration::from_secs(5))?;
-
-        let meta_exists: Option<String> = connection
-            .query_row(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if meta_exists.is_none() {
-            return Err(StoreError::Uninitialized {
-                path: path.to_path_buf(),
-            });
-        }
-
-        let version: Option<i64> = connection
-            .query_row("SELECT version FROM schema_meta LIMIT 1", [], |row| {
-                row.get(0)
-            })
-            .optional()?;
-        let Some(version) = version else {
-            return Err(StoreError::Uninitialized {
-                path: path.to_path_buf(),
-            });
-        };
-        if version > SCHEMA_VERSION {
-            return Err(StoreError::NewerSchema {
-                found: version,
-                supported: SCHEMA_VERSION,
-            });
-        }
-
-        Ok(Store { connection })
+        let connection = read_only_connection(path)?;
+        // A database one version behind is read as it is: the two cause columns it lacks
+        // are selected as `NULL`, so a read-only process never writes to the file, and a
+        // page can run against a snapshot or a volume mounted read-only (INV-10).
+        let has_cause = checked_version(&connection, path)? >= CAUSE_COLUMNS;
+        Ok(Store {
+            connection,
+            has_cause,
+        })
     }
 
     fn migrate(&mut self) -> Result<(), StoreError> {
@@ -341,10 +381,41 @@ impl Store {
                     supported: SCHEMA_VERSION,
                 })
             }
-            Some(_) => {
-                // Version 1 has no migration steps yet; keep the table creation
-                // idempotent so a partially created database heals on open.
+            Some(found) => {
+                // Keep the table creation idempotent so a partially created database
+                // heals on open, then apply the steps the version still misses.
                 self.connection.execute_batch(TABLES)?;
+                if found < 2 {
+                    self.add_cause_columns()?;
+                }
+                if found < SCHEMA_VERSION {
+                    self.connection.execute(
+                        "UPDATE schema_meta SET version = ?1",
+                        params![SCHEMA_VERSION],
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Add the two cause columns to a version 1 database, keeping every event.
+    ///
+    /// `CREATE TABLE IF NOT EXISTS` cannot add a column to a table that exists, so the
+    /// step is written here: the rows that predate it read `NULL`.
+    fn add_cause_columns(&mut self) -> Result<(), StoreError> {
+        for column in ["cause", "cause_message"] {
+            let present: Option<i64> = self
+                .connection
+                .query_row(
+                    "SELECT 1 FROM pragma_table_info('events') WHERE name = ?1",
+                    params![column],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if present.is_none() {
+                self.connection
+                    .execute_batch(&format!("ALTER TABLE events ADD COLUMN {column} TEXT"))?;
             }
         }
         Ok(())
@@ -374,8 +445,9 @@ impl Store {
 
         transaction.execute(
             "INSERT INTO events
-                (target, interface, previous_state, state, occurred_at_ms, rtt_us)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                (target, interface, previous_state, state, occurred_at_ms, rtt_us,
+                 cause, cause_message)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 event.target,
                 event.interface,
@@ -383,6 +455,8 @@ impl Store {
                 event.state.as_str(),
                 event.occurred_at_ms,
                 event.rtt_us,
+                event.cause,
+                event.cause_message,
             ],
         )?;
 
@@ -425,8 +499,9 @@ impl Store {
         {
             let mut insert = transaction.prepare(
                 "INSERT INTO events
-                    (target, interface, previous_state, state, occurred_at_ms, rtt_us)
-                 SELECT ?1, ?2, ?3, ?4, ?5, ?6
+                    (target, interface, previous_state, state, occurred_at_ms, rtt_us,
+                     cause, cause_message)
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
                   WHERE NOT EXISTS (
                      SELECT 1 FROM events
                       WHERE target = ?1 AND state = ?4 AND occurred_at_ms = ?5
@@ -456,6 +531,8 @@ impl Store {
                     event.state.as_str(),
                     event.occurred_at_ms,
                     event.rtt_us,
+                    event.cause,
+                    event.cause_message,
                 ])? as u32;
                 project.execute(params![
                     event.target,
@@ -579,16 +656,32 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    /// The faults query, with the cause columns it can read from this file.
+    fn faults_select(&self) -> String {
+        FAULTS_SELECT.replace("{cause}", self.cause_columns())
+    }
+
+    /// The cause columns of a read, or `NULL` in their place on a file that predates them.
+    fn cause_columns(&self) -> &'static str {
+        if self.has_cause {
+            "cause, cause_message"
+        } else {
+            "NULL, NULL"
+        }
+    }
+
     /// Recorded transitions, newest first.
     pub fn events(&self, filter: &EventFilter) -> Result<Vec<EventRow>, StoreError> {
-        let mut statement = self.connection.prepare(
-            "SELECT id, target, interface, previous_state, state, occurred_at_ms, rtt_us
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT id, target, interface, previous_state, state, occurred_at_ms, rtt_us,
+                    {cause}
              FROM events
              WHERE (?1 IS NULL OR target = ?1)
                AND (?2 IS NULL OR occurred_at_ms >= ?2)
              ORDER BY occurred_at_ms DESC, id DESC
              LIMIT COALESCE(?3, -1)",
-        )?;
+            cause = self.cause_columns(),
+        ))?;
         let rows = statement.query_map(
             params![filter.target, filter.since_ms, filter.limit],
             |row| {
@@ -603,6 +696,8 @@ impl Store {
                     state: TargetState::parse(&state).unwrap_or(TargetState::Unknown),
                     occurred_at_ms: row.get(5)?,
                     rtt_us: row.get(6)?,
+                    cause: row.get(7)?,
+                    cause_message: row.get(8)?,
                 })
             },
         )?;
@@ -685,7 +780,10 @@ impl Store {
         from_ms: i64,
         to_ms: i64,
     ) -> Result<Vec<DailyDrops>, StoreError> {
-        let query = format!("{DOWNS_SELECT} AND e.target = ?1 AND e.occurred_at_ms < ?2");
+        let query = format!(
+            "{} AND e.target = ?1 AND e.occurred_at_ms < ?2",
+            self.faults_select()
+        );
         let mut statement = self.connection.prepare(&query)?;
 
         let mut buckets: HashMap<i64, DailyDrops> = HashMap::new();
@@ -741,14 +839,16 @@ impl Store {
         after_id: i64,
         limit: u32,
     ) -> Result<Vec<ExportedEvent>, StoreError> {
-        let mut statement = self.connection.prepare(
-            "SELECT e.id, e.target, t.label, e.interface, e.state, e.occurred_at_ms, e.rtt_us
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT e.id, e.target, t.label, e.interface, e.state, e.occurred_at_ms, e.rtt_us,
+                    {cause}
                FROM events e
                LEFT JOIN targets t ON t.target = e.target
               WHERE e.id > ?1
               ORDER BY e.id
               LIMIT ?2",
-        )?;
+            cause = self.cause_columns(),
+        ))?;
 
         let rows = statement
             .query_map(params![after_id, limit], |row| {
@@ -761,72 +861,83 @@ impl Store {
                     state: TargetState::parse(&state).unwrap_or(TargetState::Unknown),
                     occurred_at_ms: row.get(5)?,
                     rtt_us: row.get(6)?,
+                    cause: row.get(7)?,
+                    cause_message: row.get(8)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
-    /// The most recent disconnections of every target, newest first.
-    pub fn recent_downs(&self, limit: u32) -> Result<Vec<DownEpisode>, StoreError> {
-        let query = format!("{DOWNS_SELECT} ORDER BY e.occurred_at_ms DESC, e.id DESC LIMIT ?1");
+    /// The most recent faults of every target, newest first.
+    pub fn recent_faults(&self, limit: u32) -> Result<Vec<Fault>, StoreError> {
+        let query = format!(
+            "{} ORDER BY e.occurred_at_ms DESC, e.id DESC LIMIT ?1",
+            self.faults_select()
+        );
         let mut statement = self.connection.prepare(&query)?;
 
         let rows = statement
             .query_map(params![limit], |row| {
-                Ok(DownEpisode {
+                Ok(Fault {
                     event_id: row.get(0)?,
                     target: row.get(1)?,
                     label: row.get(2)?,
                     started_at_ms: row.get(3)?,
                     ended_at_ms: row.get(4)?,
+                    cause: row.get(5)?,
+                    cause_message: row.get(6)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
-    /// The most recent disconnections of one target, newest first.
-    pub fn recent_downs_for(
-        &self,
-        target: &str,
-        limit: u32,
-    ) -> Result<Vec<DownEpisode>, StoreError> {
+    /// The most recent faults of one target, newest first.
+    pub fn recent_faults_for(&self, target: &str, limit: u32) -> Result<Vec<Fault>, StoreError> {
         let query = format!(
-            "{DOWNS_SELECT} AND e.target = ?1 ORDER BY e.occurred_at_ms DESC, e.id DESC LIMIT ?2"
+            "{} AND e.target = ?1 ORDER BY e.occurred_at_ms DESC, e.id DESC LIMIT ?2",
+            self.faults_select()
         );
         let mut statement = self.connection.prepare(&query)?;
 
         let rows = statement
             .query_map(params![target, limit], |row| {
-                Ok(DownEpisode {
+                Ok(Fault {
                     event_id: row.get(0)?,
                     target: row.get(1)?,
                     label: row.get(2)?,
                     started_at_ms: row.get(3)?,
                     ended_at_ms: row.get(4)?,
+                    cause: row.get(5)?,
+                    cause_message: row.get(6)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
-    /// One page of disconnections in chronological order, for a streamed export.
+    /// One page of faults in chronological order, for the streamed export.
     ///
     /// Paging keeps every read transaction short, so a slow download never holds the
     /// WAL checkpoints of the writer.
-    pub fn downs_after(&self, after_id: i64, limit: u32) -> Result<Vec<DownEpisode>, StoreError> {
-        let query = format!("{DOWNS_SELECT} AND e.id > ?1 ORDER BY e.id LIMIT ?2");
+    pub fn faults_after(&self, after_id: i64, limit: u32) -> Result<Vec<Fault>, StoreError> {
+        let query = format!(
+            "{} AND e.id > ?1 ORDER BY e.id LIMIT ?2",
+            self.faults_select()
+        );
         let mut statement = self.connection.prepare(&query)?;
 
         let rows = statement
             .query_map(params![after_id, limit], |row| {
-                Ok(DownEpisode {
+                Ok(Fault {
                     event_id: row.get(0)?,
                     target: row.get(1)?,
                     label: row.get(2)?,
                     started_at_ms: row.get(3)?,
                     ended_at_ms: row.get(4)?,
+                    cause: row.get(5)?,
+                    cause_message: row.get(6)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -925,6 +1036,8 @@ mod tests {
             state,
             occurred_at_ms: at,
             rtt_us: None,
+            cause: None,
+            cause_message: None,
         }
     }
 
@@ -1186,7 +1299,7 @@ mod tests {
     }
 
     #[test]
-    fn recent_downs_are_newest_first_and_keep_the_open_one() {
+    fn recent_faults_are_newest_first_and_keep_the_open_one() {
         let directory = tempdir().unwrap();
         let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
         store
@@ -1207,7 +1320,7 @@ mod tests {
             .record_transition(&event("1.1.1.1", TargetState::Up, TargetState::Down, 9_000))
             .unwrap();
 
-        let downs = store.recent_downs(10).unwrap();
+        let downs = store.recent_faults(10).unwrap();
         assert_eq!(downs.len(), 2);
         assert_eq!(downs[0].started_at_ms, 9_000);
         assert_eq!(downs[0].ended_at_ms, None, "the target is still down");
@@ -1217,13 +1330,21 @@ mod tests {
 
         let mut labelled = event("9.9.9.9", TargetState::Unknown, TargetState::Down, 12_000);
         labelled.label = Some("quad9".to_string());
+        labelled.cause = Some("TCP.REFUSED".to_string());
+        labelled.cause_message = Some("the connection to 9.9.9.9:443 was refused".to_string());
         store.record_transition(&labelled).unwrap();
 
-        let downs = store.recent_downs(10).unwrap();
+        let downs = store.recent_faults(10).unwrap();
         assert_eq!(downs[0].target, "9.9.9.9");
         assert_eq!(downs[0].label.as_deref(), Some("quad9"));
+        assert_eq!(downs[0].cause.as_deref(), Some("TCP.REFUSED"));
+        assert_eq!(
+            downs[0].cause_message.as_deref(),
+            Some("the connection to 9.9.9.9:443 was refused")
+        );
+        assert_eq!(downs[1].cause, None, "the earlier rows carry no cause");
 
-        assert_eq!(store.recent_downs(1).unwrap().len(), 1);
+        assert_eq!(store.recent_faults(1).unwrap().len(), 1);
     }
 
     #[test]
@@ -1253,19 +1374,19 @@ mod tests {
             ))
             .unwrap();
 
-        let downs = store.recent_downs_for("1.1.1.1", 10).unwrap();
+        let downs = store.recent_faults_for("1.1.1.1", 10).unwrap();
         assert_eq!(downs.len(), 1);
         assert_eq!(downs[0].target, "1.1.1.1");
         assert_eq!(downs[0].started_at_ms, 2_000);
         assert_eq!(downs[0].ended_at_ms, Some(5_000));
 
-        let downs = store.recent_downs_for("9.9.9.9", 10).unwrap();
+        let downs = store.recent_faults_for("9.9.9.9", 10).unwrap();
         assert_eq!(downs.len(), 1);
         assert_eq!(downs[0].started_at_ms, 9_000);
         assert_eq!(downs[0].ended_at_ms, None, "the target is still down");
 
         assert!(
-            store.recent_downs_for("8.8.8.8", 10).unwrap().is_empty(),
+            store.recent_faults_for("8.8.8.8", 10).unwrap().is_empty(),
             "a target without a drop lists none"
         );
     }
@@ -1334,6 +1455,183 @@ mod tests {
             .record_transition(&event("1.1.1.1", TargetState::Up, TargetState::Down, 2_000))
             .unwrap();
         assert_eq!(reader.states().unwrap()[0].state, TargetState::Down);
+    }
+
+    /// A database written by version 0.2: version 1, and no cause column.
+    fn version_one_database(path: &std::path::Path) {
+        let connection = rusqlite::Connection::open(path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_meta (version INTEGER NOT NULL);
+                 INSERT INTO schema_meta (version) VALUES (1);
+                 CREATE TABLE events (
+                     id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                     target         TEXT    NOT NULL,
+                     interface      TEXT,
+                     previous_state TEXT    NOT NULL,
+                     state          TEXT    NOT NULL,
+                     occurred_at_ms INTEGER NOT NULL,
+                     rtt_us         INTEGER
+                 );
+                 CREATE TABLE targets (
+                     target            TEXT PRIMARY KEY,
+                     interface         TEXT,
+                     label             TEXT,
+                     current_state     TEXT    NOT NULL,
+                     first_seen_at_ms  INTEGER NOT NULL,
+                     last_change_at_ms INTEGER NOT NULL,
+                     last_rtt_us       INTEGER
+                 );
+                 INSERT INTO events
+                     (target, previous_state, state, occurred_at_ms)
+                     VALUES ('icmp://1.1.1.1', 'unknown', 'down', 2000);",
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_version_one_database_gains_the_cause_columns_and_keeps_its_events() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("events.db");
+        version_one_database(&path);
+
+        let store = Store::open_rw(&path).unwrap();
+        let version: i64 = store
+            .connection
+            .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2, "the migration stamps the new version");
+
+        let faults = store.recent_faults(10).unwrap();
+        assert_eq!(faults.len(), 1, "the event written by 0.2 is still there");
+        assert_eq!(faults[0].target, "icmp://1.1.1.1");
+        assert_eq!(
+            faults[0].cause, None,
+            "a row that predates the column has none"
+        );
+        assert_eq!(faults[0].cause_message, None);
+
+        // Opening it again must not try to add the columns twice.
+        drop(store);
+        assert!(Store::open_rw(&path).is_ok());
+    }
+
+    #[test]
+    fn a_read_only_open_reads_a_database_without_the_cause_columns() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("events.db");
+        version_one_database(&path);
+
+        // `serve` and `query` open the database this way: every query reads the file as
+        // it is, `NULL` in place of the cause columns it lacks.
+        let store = Store::open_ro(&path).expect("an older database is read as it is");
+        let faults = store.recent_faults(10).unwrap();
+        assert_eq!(faults.len(), 1, "the event written by 0.2 is still there");
+        assert_eq!(faults[0].cause, None);
+        assert_eq!(faults[0].cause_message, None);
+
+        let events = store.events(&EventFilter::default()).unwrap();
+        assert_eq!(events.len(), 1, "the events query reads it too");
+        assert_eq!(events[0].cause, None);
+
+        let exported = store.events_after(0, 10).unwrap();
+        assert_eq!(exported.len(), 1, "so does the streamed export");
+        assert_eq!(exported[0].cause, None);
+
+        let version: i64 = store
+            .connection
+            .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 1, "a read-only open writes nothing at all");
+    }
+
+    #[test]
+    fn a_read_only_open_of_a_migrated_database_reads_the_cause() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("events.db");
+        version_one_database(&path);
+        Store::open_rw(&path).unwrap();
+
+        let store = Store::open_ro(&path).unwrap();
+        let events = store.events(&EventFilter::default()).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].cause, None,
+            "the row written before the columns has none"
+        );
+        let version: i64 = store
+            .connection
+            .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+    }
+
+    #[test]
+    fn a_read_only_open_leaves_the_history_as_it_is() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("events.db");
+        version_one_database(&path);
+        {
+            // A key of the version before methods existed, which a writable open rewrites.
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection
+                .execute_batch(
+                    "INSERT INTO events (target, previous_state, state, occurred_at_ms)
+                     VALUES ('9.9.9.9', 'unknown', 'down', 3000);",
+                )
+                .unwrap();
+        }
+
+        let store = Store::open_ro(&path).unwrap();
+        let keys = store
+            .connection
+            .prepare("SELECT target FROM events ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            keys,
+            ["icmp://1.1.1.1", "9.9.9.9"],
+            "a read-only open never rewrites a target key"
+        );
+        let version: i64 = store
+            .connection
+            .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 1, "and it does not touch the schema either");
+
+        // The first writable open is what converts the history.
+        drop(store);
+        Store::open_rw(&path).unwrap();
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let keys: Vec<String> = connection
+            .prepare("SELECT target FROM events ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(keys, ["icmp://1.1.1.1", "icmp://9.9.9.9"]);
+    }
+
+    #[test]
+    fn a_read_only_open_still_refuses_a_database_from_the_future() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("events.db");
+        {
+            let store = Store::open_rw(&path).unwrap();
+            store
+                .connection
+                .execute("UPDATE schema_meta SET version = 99", [])
+                .unwrap();
+        }
+
+        assert!(matches!(
+            Store::open_ro(&path),
+            Err(StoreError::NewerSchema { found: 99, .. })
+        ));
     }
 
     #[test]

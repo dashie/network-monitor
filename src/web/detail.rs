@@ -1,18 +1,18 @@
 //! Detail page of one target: one bar per day for the last 30 days, the last
-//! disconnections of the target, then the same numbers in a table, day by day.
+//! faults of the target, then the same numbers in a table, day by day.
 //!
-//! The numbers come from the disconnections stored in the database, bucketed by UTC
+//! The numbers come from the faults stored in the database, bucketed by UTC
 //! day. No chart library and no client-side data handling, like the timeline.
 
 use std::fmt::Write as _;
 
-use crate::store::{DailyDrops, DownEpisode, TargetStateRow, TimelineSegment};
+use crate::store::{DailyDrops, Fault, TargetStateRow, TimelineSegment};
 use crate::time::format_rfc3339;
 
 use super::encode;
 use super::page::{
-    downs_table, escape, footer, format_runs, format_span, runs_stats, up_for, ICON_LINKS,
-    LOCALIZE_SCRIPT, MARK, REFRESH_SECONDS, STYLE,
+    escape, faults_table, footer, format_runs, format_span, runs_stats, up_for, CAUSE_SCRIPT,
+    ICON_LINKS, LOCALIZE_SCRIPT, MARK, REFRESH_SECONDS, STYLE,
 };
 use super::stats;
 
@@ -40,13 +40,13 @@ pub fn parse_period(value: &str) -> Option<u32> {
 
 /// The whole page for one target. `segments` is the same target over the same 30 days:
 /// the run boundaries are not in the aggregated day buckets, so the per-day averages of
-/// the `up` runs are computed from the segments. `recent` is the last disconnections of
+/// the `up` runs are computed from the segments. `recent` is the last faults of
 /// the target, newest first.
 pub fn target_page(
     target: &TargetStateRow,
     days: &[DailyDrops],
     segments: &[TimelineSegment],
-    recent: &[DownEpisode],
+    recent: &[Fault],
     now_ms: i64,
     period_days: u32,
 ) -> String {
@@ -94,7 +94,7 @@ pub fn target_page(
          {periods}\
          </div>\n\
          <div class=\"stats\">\
-         <div class=\"stat\"><b>{total} disconnections</b><span>last {period}</span></div>\
+         <div class=\"stat\"><b>{total} faults</b><span>last {period}</span></div>\
          <div class=\"stat\"><b>{down_ms}</b><span>down time in the last {period}</span></div>\
          <div class=\"stat\" title=\"{avg_up_hint}\"><b>{avg_up}</b>\
          <span>avg up run in {period} · max {longest}</span></div>\
@@ -120,7 +120,7 @@ pub fn target_page(
             count => format!("mean of {count} up runs in the last {period}"),
         },
         bars = bars(days),
-        recent = downs_table(recent, now_ms),
+        recent = faults_table(recent, now_ms),
         table = days_table(days, segments, now_ms),
     );
 
@@ -148,7 +148,7 @@ fn period_links(target: &str, period_days: u32) -> String {
 
 /// The manual of the detail page, read at its foot.
 const PAGE_NOTES: [&str; 3] = [
-    "Each bar is one day of the period, as tall as the disconnections recorded in it.",
+    "Each bar is one day of the period, as tall as the faults recorded in it. Select a fault to read why it happened.",
     "Times follow the time zone of your browser; the page reloads every 30 seconds.",
     "The period changes the window; the table lists the same days with the down time and the average up run.",
 ];
@@ -172,12 +172,14 @@ fn layout(title: &str, body: &str) -> String {
 </main>
 <script>
 {localize}
+{cause}
 </script>
 </body>
 </html>
 "#,
         title = escape(title),
         localize = LOCALIZE_SCRIPT,
+        cause = CAUSE_SCRIPT,
         notes = footer(&PAGE_NOTES),
     )
 }
@@ -286,7 +288,7 @@ fn bars(days: &[DailyDrops]) -> String {
 fn days_table(days: &[DailyDrops], segments: &[TimelineSegment], now_ms: i64) -> String {
     let mut output = String::from(
         "<h2>Day by day</h2>\n<table>\n\
-         <thead><tr><th>day (UTC)</th><th class=\"num\">disconnections</th>\
+         <thead><tr><th>day (UTC)</th><th class=\"num\">faults</th>\
          <th class=\"num\">down time</th><th class=\"num\" \
          title=\"average up run of each day; the current day states the last 24 hours\">\
          avg up</th></tr></thead>\n\
@@ -407,7 +409,7 @@ mod tests {
         assert!(rendered.contains("data-format=\"day\" data-suffix=\": 2\">01-01: 2</title>"));
         assert!(rendered.contains("data-suffix=\": 5\">01-03: 5</title>"));
         assert!(rendered.contains("cloudflare"));
-        assert!(rendered.contains("7 disconnections"));
+        assert!(rendered.contains("7 faults"));
         assert!(rendered.contains("href=\"/\""));
     }
 
@@ -441,13 +443,15 @@ mod tests {
     }
 
     #[test]
-    fn the_last_disconnections_sit_above_the_day_by_day_table() {
-        let recent = [DownEpisode {
+    fn the_last_faults_sit_above_the_day_by_day_table() {
+        let recent = [Fault {
             event_id: 1,
             target: "1.1.1.1".to_string(),
             label: Some("cloudflare".to_string()),
             started_at_ms: 3_600_000,
             ended_at_ms: Some(4_320_000),
+            cause: None,
+            cause_message: None,
         }];
         let rendered = target_page(
             &target(),
@@ -459,8 +463,8 @@ mod tests {
         );
 
         let list = rendered
-            .find("Last 10 disconnections")
-            .expect("the page lists the last disconnections of the target");
+            .find("Last 10 faults")
+            .expect("the page lists the last faults of the target");
         let table = rendered.find("Day by day").expect("the day-by-day table");
         assert!(
             list < table,
@@ -468,9 +472,10 @@ mod tests {
         );
         assert!(
             rendered.contains(
-                "<td>cloudflare</td><td class=\"sub\">1.1.1.1</td>\
-                 <td><time datetime=\"1970-01-01T01:00:00.000Z\">1970-01-01 01:00:00 UTC</time></td>\
-                 <td class=\"num\">12m</td>"
+                "<td><span class=\"fault-name\">cloudflare</span>\
+                 <span class=\"fault-key\">1.1.1.1</span></td>\
+                 <td><time datetime=\"1970-01-01T01:00:00.000Z\">1970-01-01 01:00:00 UTC\
+                 </time></td><td class=\"cause-cell\"></td><td class=\"num\">12m</td>"
             ),
             "the row names the target and states how long it was down"
         );
@@ -479,7 +484,7 @@ mod tests {
     #[test]
     fn a_target_without_a_drop_still_states_the_empty_list() {
         let rendered = target_page(&target(), &[day(0, 0, 0)], &[], &[], NOW, 30);
-        assert!(rendered.contains("No disconnection recorded yet."));
+        assert!(rendered.contains("No fault recorded yet."));
     }
 
     #[test]
@@ -497,7 +502,7 @@ mod tests {
             "no class: the table takes the width of main, like the chart above it"
         );
         assert!(
-            rendered.contains("<th class=\"num\">disconnections</th>"),
+            rendered.contains("<th class=\"num\">faults</th>"),
             "the numbers are right-aligned by the shared rule"
         );
         assert!(
@@ -519,7 +524,7 @@ mod tests {
             2,
             "every quiet day states its zero at the baseline, next to the axis zero"
         );
-        assert!(rendered.contains("0 disconnections"));
+        assert!(rendered.contains("0 faults"));
     }
 
     #[test]
@@ -577,7 +582,7 @@ mod tests {
         let days: Vec<DailyDrops> = (0..90).map(|index| day(index, 1, 60_000)).collect();
         let rendered = target_page(&target(), &days, &[], &[], NOW, 90);
         assert!(rendered.contains("last 90 days"));
-        assert!(rendered.contains("90 disconnections"));
+        assert!(rendered.contains("90 faults"));
         assert!(rendered.contains("down time in the last 90 days"));
         assert!(rendered.contains("avg up run in 90 days"));
         assert!(
@@ -643,7 +648,7 @@ mod tests {
         let days = [day(0, 2, 90_000), day(1, 0, 0), day(2, 5, 600_000)];
         let rendered = target_page(&target(), &days, &[], &[], NOW, DEFAULT_PERIOD_DAYS);
         assert!(rendered.contains("<span class=\"badge up\">up</span>"));
-        assert!(rendered.contains("<b>7 disconnections</b>"));
+        assert!(rendered.contains("<b>7 faults</b>"));
         assert!(
             rendered.contains("<b>11m</b>"),
             "90 s and 10 min summed into one figure"

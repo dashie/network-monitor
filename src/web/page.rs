@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use crate::store::{DownEpisode, TargetState, TargetTimeline, TimelineSegment};
+use crate::store::{Fault, TargetState, TargetTimeline, TimelineSegment};
 use crate::time::format_rfc3339;
 
 use super::encode;
@@ -179,19 +179,82 @@ pub(crate) const STYLE: &str = r#"
   .swatch { width: 14px; height: 10px; border-radius: 2px; display: inline-block; }
   /* One table style for both pages: as wide as `main`, text left, numbers right.
      The numeric columns carry `.num`; no table is narrower than the chart above it. */
-  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  /* A table starts where the reader sees it start: a rule at the top of the header, room
+     above it, and a header that stays put while a long table scrolls, painted with the
+     page background so no row shows through it. */
+  .table-scroll { overflow-x: auto; }  /* a wide table scrolls itself, not the page */
+  table {
+    width: 100%;
+    margin: 22px 0 0;
+    border-collapse: collapse;
+    font-variant-numeric: tabular-nums;
+  }
   th, td { text-align: left; padding: 7px 18px 7px 0; }
   th {
+    position: sticky;
+    top: 0;
+    background: Canvas;
+    padding-top: 11px;
     font-size: 12px;
     font-weight: 600;
     letter-spacing: 0.05em;
     text-transform: uppercase;
     opacity: var(--muted);
+    border-top: 1px solid var(--rule);
     border-bottom: 1px solid var(--rule);
   }
+  /* Every fault row is as tall as the one with two lines under the target, so the table
+     reads as a grid instead of a ragged list. */
+  tr.fault { height: 52px; }
   tbody td { border-bottom: 1px solid var(--rule); }
+  .fault-name { display: block; line-height: 1.35; }
+  .fault-key {
+    display: block;
+    font-size: 11px;
+    line-height: 1.3;
+    opacity: 0.6;
+    font-variant-numeric: tabular-nums;
+  }
   tbody tr:last-child td { border-bottom: 0; }
   tbody tr:hover { background: rgba(127, 127, 127, 0.07); }
+  /* The cause of a fault is a control: the code opens the message under the row. */
+  tr.fault { cursor: pointer; }
+  /* The four columns keep their share of the width whatever they carry, so a long name never
+     squeezes the date and a short code never leaves a gap: 15, 30, 45 and 10 per cent. */
+  table.faults { table-layout: fixed; }
+  table.faults th:nth-child(1) { width: 15%; }
+  table.faults th:nth-child(2) { width: 30%; }
+  table.faults th:nth-child(3) { width: 45%; }
+  table.faults th:nth-child(4) { width: 10%; }
+  table.faults th.cause-head, table.faults td.cause-cell { text-align: right; }
+  table.faults .ongoing {
+    display: block;
+    font-size: 11px;
+    line-height: 1.3;
+    opacity: 0.6;
+  }
+  button.cause {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    opacity: 0.75;
+    border-bottom: 1px dotted var(--rule);
+    cursor: pointer;
+  }
+  button.cause:hover { opacity: 1; }
+  button.cause[aria-expanded="true"] { opacity: 1; border-bottom-color: currentColor; }
+  /* The message reads as part of its fault, not as a fault of its own. */
+  tr.cause-row td {
+    padding: 1px 0 13px;
+    font-size: 13px;
+    opacity: var(--muted);
+    border-bottom: 1px solid var(--rule);
+  }
+  tr.cause-row:hover { background: none; }
   /* The row of the day still running states a rolling window, not a calendar one. */
   td.current { background: rgba(127, 127, 127, 0.1); }
   .tag {
@@ -219,7 +282,7 @@ pub(crate) const REFRESH_SECONDS: u32 = 30;
 /// The manual of the timeline, read at the foot of the page: what a lane is, how time
 /// and reloads behave, and where the history goes.
 const PAGE_NOTES: [&str; 3] = [
-    "A lane is one target over the chosen window: a break in it is a disconnection.",
+    "A lane is one target over the chosen window: a break in it is a fault. Select a fault to read why it happened.",
     "Times follow the time zone of your browser; the page reloads every 30 seconds.",
     "Select a lane for the last 30 days of that target, or download the whole history as a gzipped CSV.",
 ];
@@ -274,7 +337,7 @@ const TICK_STEPS_MS: [i64; 10] = [
 /// Right edge of every statistics column of a lane, relative to the start of the block,
 /// with its header and what the column means.
 const COLUMNS: [(f64, &str, &str); 4] = [
-    (48.0, "DROPS", "disconnections in the window"),
+    (48.0, "DROPS", "faults in the window"),
     (122.0, "AVG UP", "average up run, with its spread"),
     (172.0, "MAX", "longest up run in the window"),
     (232.0, "UP FOR", "how long it has been up without a drop"),
@@ -301,6 +364,35 @@ impl Window {
 
 /// Follow a lane link from script: some engines ignore an `<a href>` that wraps SVG
 /// shapes.
+/// Opens the standard message of a fault under its own row, one fault at a time.
+///
+/// The button carries `aria-expanded` and the message lives in a real row, so the table
+/// stays a table for a screen reader; a browser without JavaScript keeps the `title`.
+pub(crate) const CAUSE_SCRIPT: &str = r#"(() => {
+  const rows = document.querySelectorAll('tr.fault');
+  const close = () => {
+    for (const row of document.querySelectorAll('tr.cause-row')) row.hidden = true;
+    for (const button of document.querySelectorAll('button.cause')) {
+      button.setAttribute('aria-expanded', 'false');
+    }
+  };
+  for (const row of rows) {
+    const button = row.querySelector('button.cause');
+    if (!button) continue;
+    const message = document.getElementById(button.getAttribute('aria-controls'));
+    if (!message) continue;
+    const toggle = () => {
+      const open = message.hidden;
+      close();
+      message.hidden = !open;
+      button.setAttribute('aria-expanded', String(open));
+    };
+    row.addEventListener('click', toggle);
+    button.addEventListener('click', event => event.stopPropagation());
+  }
+})();
+"#;
+
 const LANE_SCRIPT: &str = r#"document.getElementById('chart').addEventListener('click', event => {
   const link = event.target instanceof Element ? event.target.closest('a') : null;
   if (link === null) return;
@@ -334,12 +426,12 @@ for (const element of document.querySelectorAll('time[datetime], [data-datetime]
 /// scripts that follow a lane link and localise the instants.
 pub fn page(
     timelines: &[TargetTimeline],
-    downs: &[DownEpisode],
+    downs: &[Fault],
     up_since: &HashMap<String, i64>,
     window: Window,
 ) -> String {
     let body = chart(timelines, up_since, window);
-    let downs = downs_table(downs, window.to_ms);
+    let downs = faults_table(downs, window.to_ms);
 
     format!(
         r#"<!doctype html>
@@ -377,6 +469,7 @@ pub fn page(
 <script>
 {lane}
 {localize}
+{cause}
 </script>
 </body>
 </html>
@@ -388,6 +481,7 @@ pub fn page(
         notes = footer(&PAGE_NOTES),
         lane = LANE_SCRIPT,
         localize = LOCALIZE_SCRIPT,
+        cause = CAUSE_SCRIPT,
     )
 }
 
@@ -409,53 +503,86 @@ fn window_links(window: Window) -> String {
     output
 }
 
-/// The last disconnections, newest first, with how long each one lasted. Shared with the
-/// detail page, which lists the same table for one target.
-pub(super) fn downs_table(downs: &[DownEpisode], now_ms: i64) -> String {
+/// The last faults, newest first, with why each one started and how long it lasted.
+///
+/// Shared with the detail page, which lists the same table for one target. A row with a
+/// cause is a control: clicking it opens the standard message in a row of its own, and the
+/// `title` states it for a browser without JavaScript.
+pub(super) fn faults_table(faults: &[Fault], now_ms: i64) -> String {
     let mut output = String::from(
-        "<h2>Last 10 disconnections\
-         <a class=\"download\" href=\"/export/disconnections.csv.gz\">Download History</a>\
-         </h2>\n<table>\n\
-         <thead><tr><th>target</th><th></th><th>started</th><th class=\"num\">lasted</th></tr></thead>\n\
+        "<h2>Last 10 faults\
+         <a class=\"download\" href=\"/export/faults.csv.gz\">Download History</a>\
+         </h2>\n<div class=\"table-scroll\">\n<table class=\"faults\">\n\
+         <thead><tr><th>target</th><th>started</th><th class=\"cause-head\">cause</th>\
+         <th class=\"num lasted-head\">lasted</th></tr></thead>\n\
          <tbody>\n",
     );
 
-    if downs.is_empty() {
-        output.push_str("<tr><td colspan=\"4\">No disconnection recorded yet.</td></tr>\n");
+    if faults.is_empty() {
+        output.push_str("<tr><td colspan=\"4\">No fault recorded yet.</td></tr>\n");
     }
 
-    for episode in downs {
-        let (lasted, ongoing) = match episode.ended_at_ms {
-            Some(end) => (format_span(end - episode.started_at_ms), false),
-            None => (format_span(now_ms - episode.started_at_ms), true),
+    for (index, fault) in faults.iter().enumerate() {
+        let (lasted, ongoing) = match fault.ended_at_ms {
+            Some(end) => (format_span(end - fault.started_at_ms), false),
+            None => (format_span(now_ms - fault.started_at_ms), true),
         };
-        let name = episode
-            .label
-            .clone()
-            .unwrap_or_else(|| episode.target.clone());
-        // The key is the name when there is no label, and its own column when there is.
-        let key = match episode.label {
-            Some(_) => episode.target.as_str(),
-            None => "",
+        let name = fault.label.clone().unwrap_or_else(|| fault.target.clone());
+        // With a label the key sits under it, muted; without one the key is the name.
+        let key = match fault.label {
+            Some(_) => format!("<span class=\"fault-key\">{}</span>", escape(&fault.target)),
+            None => String::new(),
         };
+        let message = fault.cause_message.as_deref().unwrap_or_default();
+        let cause = match fault.cause.as_deref() {
+            Some(code) => format!(
+                "<button type=\"button\" class=\"cause\" aria-expanded=\"false\" \
+                 aria-controls=\"cause-{index}\" title=\"{}\">{}</button>",
+                escape(message),
+                escape(code)
+            ),
+            None => String::new(),
+        };
+
         let _ = writeln!(
             output,
-            "<tr><td>{}</td><td class=\"sub\">{}</td><td><time datetime=\"{}\">{}</time></td><td{}>{}{}</td></tr>",
-            escape(&name),
-            escape(key),
-            format_rfc3339(episode.started_at_ms),
-            utc_text(episode.started_at_ms),
-            if ongoing {
+            "<tr{expand}><td><span class=\"fault-name\">{name}</span>{key}</td>\
+             <td><time datetime=\"{at}\">{shown}</time></td>\
+             <td class=\"cause-cell\">{cause}</td><td{class}>{lasted}{tail}</td></tr>",
+            expand = if fault.cause.is_some() {
+                " class=\"fault\""
+            } else {
+                ""
+            },
+            name = escape(&name),
+            key = key,
+            cause = cause,
+            at = format_rfc3339(fault.started_at_ms),
+            shown = utc_text(fault.started_at_ms),
+            class = if ongoing {
                 " class=\"num down\""
             } else {
                 " class=\"num\""
             },
-            lasted,
-            if ongoing { " and counting" } else { "" }
+            lasted = lasted,
+            tail = if ongoing {
+                "<span class=\"ongoing\">and counting</span>"
+            } else {
+                ""
+            }
         );
+
+        if fault.cause.is_some() {
+            let _ = writeln!(
+                output,
+                "<tr class=\"cause-row\" id=\"cause-{index}\" hidden>\
+                 <td colspan=\"4\">{}</td></tr>",
+                escape(message)
+            );
+        }
     }
 
-    output.push_str("</tbody>\n</table>");
+    output.push_str("</tbody>\n</table>\n</div>");
     output
 }
 
@@ -836,21 +963,25 @@ mod tests {
     }
 
     #[test]
-    fn the_last_disconnections_are_listed_with_their_duration() {
+    fn the_last_faults_are_listed_with_their_duration() {
         let downs = [
-            DownEpisode {
+            Fault {
                 event_id: 2,
                 target: "1.1.1.1".to_string(),
                 label: None,
                 started_at_ms: 7_000_000,
                 ended_at_ms: None,
+                cause: None,
+                cause_message: None,
             },
-            DownEpisode {
+            Fault {
                 event_id: 1,
                 target: "8.8.8.8".to_string(),
                 label: None,
                 started_at_ms: 3_600_000,
                 ended_at_ms: Some(4_320_000),
+                cause: None,
+                cause_message: None,
             },
         ];
         let window = Window {
@@ -858,7 +989,7 @@ mod tests {
             to_ms: 7_200_000,
         };
         let rendered = page(&[timeline()], &downs, &no_streaks(), window);
-        assert!(rendered.contains("Last 10 disconnections"));
+        assert!(rendered.contains("Last 10 faults"));
         assert!(rendered.contains("12m"), "720 s down");
         assert!(
             rendered.contains("and counting"),
@@ -872,19 +1003,23 @@ mod tests {
     #[test]
     fn a_disconnection_names_its_target_like_the_lane_above() {
         let downs = [
-            DownEpisode {
+            Fault {
                 event_id: 2,
                 target: "tcp://1.1.1.1:443".to_string(),
                 label: Some("cloudflare-https".to_string()),
                 started_at_ms: 7_000_000,
                 ended_at_ms: None,
+                cause: None,
+                cause_message: None,
             },
-            DownEpisode {
+            Fault {
                 event_id: 1,
                 target: "icmp://8.8.8.8".to_string(),
                 label: None,
                 started_at_ms: 3_600_000,
                 ended_at_ms: Some(4_320_000),
+                cause: None,
+                cause_message: None,
             },
         ];
         let window = Window {
@@ -894,30 +1029,141 @@ mod tests {
         let rendered = page(&[timeline()], &downs, &no_streaks(), window);
 
         assert!(
-            rendered.contains("<td>cloudflare-https</td><td class=\"sub\">tcp://1.1.1.1:443</td>"),
-            "a labelled target is shown under its label, with the key in its own column"
+            rendered.contains(
+                "<td><span class=\"fault-name\">cloudflare-https</span>\
+                 <span class=\"fault-key\">tcp://1.1.1.1:443</span></td>"
+            ),
+            "a labelled target states the key under its label"
         );
         assert!(
-            rendered.contains("<td>icmp://8.8.8.8</td><td class=\"sub\"></td>"),
-            "an unlabelled target keeps the key in the first column, so the second is empty"
+            rendered.contains("<td><span class=\"fault-name\">icmp://8.8.8.8</span></td>"),
+            "an unlabelled target states the key alone, with nothing under it"
         );
     }
 
     #[test]
-    fn the_duration_column_uses_the_style_shared_with_the_detail_page() {
-        let downs = [DownEpisode {
+    fn a_fault_states_its_cause_and_opens_the_message_under_its_row() {
+        let downs = [Fault {
             event_id: 1,
-            target: "8.8.8.8".to_string(),
-            label: None,
+            target: "tcp://1.1.1.1:443".to_string(),
+            label: Some("cloudflare-https".to_string()),
             started_at_ms: 3_600_000,
             ended_at_ms: Some(4_320_000),
+            cause: Some("TCP.REFUSED".to_string()),
+            cause_message: Some("the connection to 1.1.1.1:443 was refused".to_string()),
         }];
         let window = Window {
             from_ms: 0,
             to_ms: 7_200_000,
         };
         let rendered = page(&[timeline()], &downs, &no_streaks(), window);
-        assert!(rendered.contains("<th class=\"num\">lasted</th>"));
+
+        assert!(
+            rendered.contains("<th class=\"cause-head\">cause</th>"),
+            "the cause closes the table"
+        );
+        let header = rendered
+            .lines()
+            .find(|line| line.contains("<thead>"))
+            .unwrap_or_default();
+        assert!(
+            header.find("cause").unwrap_or(0) < header.find("lasted").unwrap_or(0),
+            "the duration closes the table: {header}"
+        );
+        assert!(
+            rendered.contains(
+                "<button type=\"button\" class=\"cause\" aria-expanded=\"false\" \
+                 aria-controls=\"cause-0\" \
+                 title=\"the connection to 1.1.1.1:443 was refused\">TCP.REFUSED</button>"
+            ),
+            "the code is the control, the message the fallback: {rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "<tr class=\"cause-row\" id=\"cause-0\" hidden>\
+                 <td colspan=\"4\">the connection to 1.1.1.1:443 was refused</td></tr>"
+            ),
+            "the message has a row of its own, closed until it is asked for"
+        );
+        assert!(
+            rendered.contains("<tr class=\"fault\">"),
+            "the fault row is the one that toggles it"
+        );
+        assert!(
+            rendered.contains("querySelectorAll('tr.fault')"),
+            "the page ships the script that opens it"
+        );
+    }
+
+    #[test]
+    fn a_table_announces_where_it_begins_and_keeps_its_header() {
+        assert!(
+            STYLE.contains("th {\n    position: sticky;"),
+            "a long table keeps its header in place"
+        );
+        assert!(
+            STYLE.contains("border-top: 1px solid var(--rule);"),
+            "a rule marks the first row of the header"
+        );
+        assert!(
+            STYLE.contains("table {\n    width: 100%;\n    margin: 22px 0 0;"),
+            "room above the table separates it from what sits above it"
+        );
+        assert!(
+            STYLE.contains("background: Canvas;"),
+            "the sticky header is painted with the page background"
+        );
+        assert!(
+            !STYLE.contains("border-collapse: separate"),
+            "the rules stay the ones the theme already uses"
+        );
+    }
+
+    #[test]
+    fn a_fault_without_a_cause_opens_nothing() {
+        let downs = [Fault {
+            event_id: 1,
+            target: "1.1.1.1".to_string(),
+            label: None,
+            started_at_ms: 3_600_000,
+            ended_at_ms: Some(4_320_000),
+            cause: None,
+            cause_message: None,
+        }];
+        let window = Window {
+            from_ms: 0,
+            to_ms: 7_200_000,
+        };
+        let rendered = page(&[timeline()], &downs, &no_streaks(), window);
+
+        assert!(
+            rendered.contains("<td class=\"cause-cell\"></td>"),
+            "an empty cell"
+        );
+        assert!(
+            !rendered.contains("<tr class=\"cause-row\""),
+            "a row written before causes has no message to open"
+        );
+        assert!(!rendered.contains("<tr class=\"fault\">"));
+    }
+
+    #[test]
+    fn the_duration_column_uses_the_style_shared_with_the_detail_page() {
+        let downs = [Fault {
+            event_id: 1,
+            target: "8.8.8.8".to_string(),
+            label: None,
+            started_at_ms: 3_600_000,
+            ended_at_ms: Some(4_320_000),
+            cause: None,
+            cause_message: None,
+        }];
+        let window = Window {
+            from_ms: 0,
+            to_ms: 7_200_000,
+        };
+        let rendered = page(&[timeline()], &downs, &no_streaks(), window);
+        assert!(rendered.contains("<th class=\"num lasted-head\">lasted</th>"));
         assert!(rendered.contains("<td class=\"num\">12m</td>"));
         assert!(
             !STYLE.contains(".numeric"),
@@ -928,12 +1174,14 @@ mod tests {
 
     #[test]
     fn an_ongoing_disconnection_keeps_both_the_numeric_and_the_down_style() {
-        let downs = [DownEpisode {
+        let downs = [Fault {
             event_id: 1,
             target: "1.1.1.1".to_string(),
             label: None,
             started_at_ms: 7_000_000,
             ended_at_ms: None,
+            cause: None,
+            cause_message: None,
         }];
         let window = Window {
             from_ms: 0,
@@ -950,7 +1198,7 @@ mod tests {
             to_ms: 7_200_000,
         };
         let rendered = page(&[timeline()], &[], &no_streaks(), window);
-        assert!(rendered.contains("No disconnection recorded yet."));
+        assert!(rendered.contains("No fault recorded yet."));
     }
 
     #[test]
@@ -1017,7 +1265,7 @@ mod tests {
     }
 
     #[test]
-    fn statistics_count_only_disconnections_that_start_inside_the_window() {
+    fn statistics_count_only_faults_that_start_inside_the_window() {
         let segments = [
             TimelineSegment {
                 state: TargetState::Down,
@@ -1250,12 +1498,14 @@ mod tests {
 
     #[test]
     fn the_start_of_a_disconnection_is_localised_like_every_other_instant() {
-        let downs = [DownEpisode {
+        let downs = [Fault {
             event_id: 1,
             target: "8.8.8.8".to_string(),
             label: None,
             started_at_ms: 3_600_000,
             ended_at_ms: Some(4_320_000),
+            cause: None,
+            cause_message: None,
         }];
         let window = Window {
             from_ms: 0,

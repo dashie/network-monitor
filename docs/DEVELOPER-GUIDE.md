@@ -80,7 +80,7 @@ network-monitor/
 │   ├── reload.rs             configuration reload, invalid file, database change
 │   ├── store.rs              schema, concurrent read, retention, labels
 │   ├── cli.rs                exit codes and query output
-│   ├── web.rs                page, disconnection table, detail page, no writes
+│   ├── web.rs                page, faults table, detail page, no writes
 │   ├── import.rs             export round trip, plain CSV, stdin, URL, duplicates
 │   └── icmp_privileged.rs    real raw-socket probe, ignored unless root
 ├── assets/icon/          application icon: SVG master, its PNG renders, the favicon
@@ -407,17 +407,17 @@ docker -c qubo run -d --name network-monitor-web \
 ### Restoring the history after a redeploy
 
 The download comes back as a history: point `import` at the file, at the running page,
-or pipe it, and the disconnections are written into the target database.
+or pipe it, and the faults are written into the target database.
 
 ```bash
 # from the archive the page offered
-network-monitor import ./disconnections-20261109.csv.gz --database /var/lib/network-monitor/events.db
+network-monitor import ./faults-20261109.csv.gz --database /var/lib/network-monitor/events.db
 
 # straight from the page
-network-monitor import http://nas:8642/export/disconnections.csv.gz --database ./events.db
+network-monitor import http://nas:8642/export/faults.csv.gz --database ./events.db
 
 # from a pipe, with the format detected
-gunzip -c disconnections.csv.gz | network-monitor import - --database ./events.db
+gunzip -c faults.csv.gz | network-monitor import - --database ./events.db
 ```
 
 The format is detected from the first two bytes, so a plain CSV works as it is. The rows need no order: the chain is rebuilt from the timestamps at the end of the import, and an event that repeats the state before it is dropped and counted. Running
@@ -491,8 +491,8 @@ trim.
 The page links it, and the same archive can be fetched from a script:
 
 ```bash
-curl -O http://127.0.0.1:8642/export/disconnections.csv.gz
-gunzip -c disconnections-*.csv.gz | head
+curl -O http://127.0.0.1:8642/export/faults.csv.gz
+gunzip -c faults-*.csv.gz | head
 ```
 
 One row per event, with the columns the import reads:
@@ -576,17 +576,22 @@ cargo clippy --all-targets -- -D warnings
    down, what is a definitive answer of the target and what is a failure of this host
    (INV-5): a refusal, a missing name, or a timeout is a verdict, a permission error or a
    malformed answer is not.
-3. Keep the protocol pure and private where you can — the codec is a function of bytes — and
+3. Declare the codes and the messages of the new method in `probe/failure.rs`: one variant in
+   `Code` with its token and its template, one row in `Code::ALL`, and the details its prober
+   supplies. Never format a message at a call site — `Failure::new(Code, &Details)` is the only
+   way one is worded — and let the tests below prove that every template renders with the
+   details its code provides.
+4. Keep the protocol pure and private where you can — the codec is a function of bytes — and
    keep the platform-specific socket work in `probe/interface.rs`. Test the codec with fixed
    bytes and the exchange against a listener bound to `127.0.0.1:0`; a public endpoint belongs
    in an `#[ignore]` acceptance test.
-4. Add the field and the arm to `Prober` in `probe/mod.rs`; `monitor` must not change.
-5. Teach `config`: the keys of the new method in `FileTarget`, their validation in
+5. Add the field and the arm to `Prober` in `probe/mod.rs`; `monitor` must not change.
+6. Teach `config`: the keys of the new method in `FileTarget`, their validation in
    `TargetSpec::from_file`, the flag grammar in `TargetSpec::parse_spec`, and the rendering in
    `Config::to_toml` (`--show-config` must parse back into the same target).
-6. Run `cargo test --lib probe::<method>` for the transport alone, then the suite; add a
+7. Run `cargo test --lib probe::<method>` for the transport alone, then the suite; add a
    fake-driven monitor test only if the method changes the loop.
-7. Document it: an FR in [PRODUCT.md](./PRODUCT.md), the terms in
+8. Document it: the codes in the table of [USER-GUIDE.md](./USER-GUIDE.md), an FR in [PRODUCT.md](./PRODUCT.md), the terms in
    [GLOSSARY.md](./GLOSSARY.md), the component in [ARCHITECTURE.md](./ARCHITECTURE.md), and an
    ADR when the method brings a dependency or a decision that outlives the code.
 
@@ -597,8 +602,12 @@ alternatives and the effect on the static build (ADR-0024 is the example).
 
 1. Append a migration step in `store/schema.rs` and bump `schema_meta.version`; never edit an applied migration.
 2. Extend the read path in `store` and the rendering in `query` in the same change.
-3. Update the data model in [ARCHITECTURE.md](./ARCHITECTURE.md) and add an ADR when the change is hard to reverse.
-4. Test the migration against a fixture database of the previous version.
+3. Teach the read path the older shape too: a read-only open never migrates (INV-10), so a new
+   column is selected as `NULL` when the file predates it, through `Store::cause_columns` or the
+   same pattern. A writable open is what adds it.
+4. Update the data model in [ARCHITECTURE.md](./ARCHITECTURE.md) and add an ADR when the change is hard to reverse.
+5. Test the migration against a fixture database of the previous version, and test that a
+   read-only open of that fixture still answers with the new field empty.
 
 ### Adding a query output
 

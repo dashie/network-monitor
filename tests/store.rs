@@ -26,6 +26,8 @@ fn event(index: i64) -> Event {
         },
         occurred_at_ms: index,
         rtt_us: None,
+        cause: None,
+        cause_message: None,
     }
 }
 

@@ -5,11 +5,12 @@
 //! socket. That is the semantics of `ping -I <interface> <address>` without parsing a
 //! localised `ping` output (ADR-0003).
 
+use std::io;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
-use super::{Endpoint, Probe, ProbeError, Verdict};
+use super::{Code, Details, Endpoint, Failure, Probe, ProbeError, Verdict};
 
 /// Identifier carried in every echo request of this process.
 fn identifier() -> u16 {
@@ -41,10 +42,14 @@ impl Probe for IcmpProbe {
         timeout: Duration,
     ) -> Result<Verdict, ProbeError> {
         let Endpoint::Icmp { address } = endpoint else {
-            return Err(ProbeError::local(format!(
-                "the icmp prober cannot check a {} target",
-                endpoint.method()
-            )));
+            return Err(ProbeError::of(
+                Code::ProbeWrongMethod,
+                &Details {
+                    method: Some("icmp"),
+                    other: Some(endpoint.method().as_str()),
+                    ..Details::default()
+                },
+            ));
         };
 
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
@@ -115,12 +120,13 @@ pub(crate) fn is_expected_reply(message: &[u8], identifier: u16, sequence: u16) 
 /// expired. Each wait is shortened to what is left of `timeout`, so foreign traffic can
 /// delay the verdict by the gap between two packets and can never postpone it: a probe
 /// against a dead target still concludes in `timeout`, however busy the host is.
+/// The time the reply took, or `None` when the budget expired without one.
 fn await_reply<F>(
     identifier: u16,
     sequence: u16,
     timeout: Duration,
     mut receive: F,
-) -> Result<Verdict, ProbeError>
+) -> Result<Option<Duration>, ProbeError>
 where
     F: FnMut(Duration, &mut [u8]) -> Result<Option<usize>, ProbeError>,
 {
@@ -130,7 +136,7 @@ where
     loop {
         let wait = match timeout.checked_sub(started.elapsed()) {
             Some(wait) if !wait.is_zero() => wait,
-            _ => return Ok(Verdict::Down),
+            _ => return Ok(None),
         };
 
         let Some(received) = receive(wait, &mut buffer)? else {
@@ -139,10 +145,26 @@ where
 
         if let Some(message) = icmp_message(&buffer[..received]) {
             if is_expected_reply(message, identifier, sequence) {
-                return Ok(Verdict::Up {
-                    rtt: started.elapsed(),
-                });
+                return Ok(Some(started.elapsed()));
             }
+        }
+    }
+}
+
+/// The verdict of one exchange: a reply is `up`, an expired budget is `down` without one.
+fn conclusion(target: Ipv4Addr, timeout: Duration, reply: Option<Duration>) -> Verdict {
+    match reply {
+        Some(rtt) => Verdict::Up { rtt },
+        None => {
+            let address = target.to_string();
+            Verdict::Down(Failure::new(
+                Code::IcmpNoReply,
+                &Details {
+                    address: Some(&address),
+                    timeout: Some(timeout),
+                    ..Details::default()
+                },
+            ))
         }
     }
 }
@@ -154,7 +176,8 @@ mod platform {
     use std::time::Duration;
 
     use super::super::{ProbeError, Verdict};
-    use super::{await_reply, build_echo_request};
+    use super::socket_failure;
+    use super::{await_reply, build_echo_request, conclusion, interface_failure, io_failure};
 
     /// Closes the socket on every return path.
     struct Socket(libc::c_int);
@@ -176,15 +199,13 @@ mod platform {
     ) -> Result<Verdict, ProbeError> {
         let raw = unsafe { libc::socket(libc::AF_INET, libc::SOCK_RAW, libc::IPPROTO_ICMP) };
         if raw < 0 {
-            return Err(ProbeError::local(format!(
-                "cannot open a raw ICMP socket: {} (root or CAP_NET_RAW is required)",
-                io::Error::last_os_error()
-            )));
+            return Err(socket_failure(&io::Error::last_os_error()));
         }
         let socket = Socket(raw);
 
         if let Some(name) = interface {
-            crate::probe::interface::bind(socket.0, name).map_err(ProbeError::local)?;
+            crate::probe::interface::bind(socket.0, name)
+                .map_err(|reason| interface_failure(name, &reason))?;
         }
 
         let packet = build_echo_request(identifier, sequence);
@@ -200,15 +221,13 @@ mod platform {
             )
         };
         if sent < 0 {
-            return Err(ProbeError::local(format!(
-                "cannot send the echo request to {target}: {}",
-                io::Error::last_os_error()
-            )));
+            return Err(io_failure(&io::Error::last_os_error()));
         }
 
         await_reply(identifier, sequence, timeout, |wait, buffer| {
             receive_one(socket.0, target, wait, buffer)
         })
+        .map(|reply| conclusion(target, timeout, reply))
     }
 
     /// One wait for one packet: `None` when it was not ours or the wait expired.
@@ -239,9 +258,7 @@ mod platform {
                 io::ErrorKind::WouldBlock
                 | io::ErrorKind::TimedOut
                 | io::ErrorKind::Interrupted => Ok(None),
-                _ => Err(ProbeError::local(format!(
-                    "cannot receive the echo reply: {error}"
-                ))),
+                _ => Err(io_failure(&error)),
             };
         }
 
@@ -270,10 +287,7 @@ mod platform {
             )
         };
         if result != 0 {
-            return Err(ProbeError::local(format!(
-                "cannot set the receive timeout: {}",
-                io::Error::last_os_error()
-            )));
+            return Err(io_failure(&io::Error::last_os_error()));
         }
         Ok(())
     }
@@ -301,7 +315,8 @@ mod platform {
     use std::time::Duration;
 
     use super::super::{ProbeError, Verdict};
-    use super::{await_reply, build_echo_request};
+    use super::socket_failure;
+    use super::{await_reply, build_echo_request, conclusion, interface_failure, io_failure};
 
     const AF_INET: i32 = 2;
     const SOCK_RAW: i32 = 3;
@@ -347,6 +362,11 @@ mod platform {
         }
     }
 
+    /// The error the Windows socket layer reported.
+    fn windows_error(code: i32) -> std::io::Error {
+        std::io::Error::from_raw_os_error(code)
+    }
+
     fn start_winsock() {
         static START: Once = Once::new();
         START.call_once(|| unsafe {
@@ -366,14 +386,15 @@ mod platform {
 
         let raw = unsafe { socket(AF_INET, SOCK_RAW, IPPROTO_ICMP) };
         if raw == INVALID_SOCKET {
-            return Err(ProbeError::local(
-                "cannot open a raw ICMP socket: run the tool from an elevated shell",
-            ));
+            return Err(socket_failure(&std::io::Error::other(
+                "run the tool from an elevated shell",
+            )));
         }
         let socket = Socket(raw);
 
         if let Some(name) = interface {
-            crate::probe::interface::bind(socket.0, name).map_err(ProbeError::local)?;
+            crate::probe::interface::bind(socket.0, name)
+                .map_err(|reason| interface_failure(name, &reason))?;
         }
 
         let packet = build_echo_request(identifier, sequence);
@@ -390,14 +411,13 @@ mod platform {
         };
         if sent < 0 {
             let code = unsafe { WSAGetLastError() };
-            return Err(ProbeError::local(format!(
-                "cannot send the echo request to {target} (WSA error {code})"
-            )));
+            return Err(io_failure(&windows_error(code)));
         }
 
         await_reply(identifier, sequence, timeout, |wait, buffer| {
             receive_one(socket.0, target, wait, buffer)
         })
+        .map(|reply| conclusion(target, timeout, reply))
     }
 
     /// One wait for one packet: `None` when it was not ours or the wait expired.
@@ -418,7 +438,9 @@ mod platform {
             )
         };
         if result != 0 {
-            return Err(ProbeError::local("cannot set the receive timeout"));
+            return Err(io_failure(&std::io::Error::other(
+                "cannot set the receive timeout",
+            )));
         }
 
         let mut from = [0u8; 16];
@@ -439,9 +461,7 @@ mod platform {
             return if code == WSAETIMEDOUT || code == WSAEWOULDBLOCK {
                 Ok(None)
             } else {
-                Err(ProbeError::local(format!(
-                    "cannot receive the echo reply (WSA error {code})"
-                )))
+                Err(io_failure(&windows_error(code)))
             };
         }
 
@@ -467,6 +487,7 @@ mod platform {
     use std::time::Duration;
 
     use super::super::{ProbeError, Verdict};
+    use super::socket_failure;
 
     pub fn exchange(
         _target: Ipv4Addr,
@@ -475,10 +496,45 @@ mod platform {
         _identifier: u16,
         _sequence: u16,
     ) -> Result<Verdict, ProbeError> {
-        Err(ProbeError::local(
+        Err(socket_failure(&std::io::Error::other(
             "raw ICMP probing is not implemented for this operating system",
-        ))
+        )))
     }
+}
+
+/// A raw socket that could not be opened; the privilege is the usual reason.
+fn socket_failure(error: &io::Error) -> ProbeError {
+    ProbeError::of(
+        Code::IcmpSocket,
+        &Details {
+            // The template already states the privilege: repeating it here would say it twice.
+            reason: Some(&error.to_string()),
+            ..Details::default()
+        },
+    )
+}
+
+/// Sending or receiving on the socket failed for a reason that is not the target's silence.
+fn io_failure(error: &io::Error) -> ProbeError {
+    ProbeError::of(
+        Code::IcmpIo,
+        &Details {
+            reason: Some(&error.to_string()),
+            ..Details::default()
+        },
+    )
+}
+
+/// The socket exists but cannot be bound to the configured device.
+fn interface_failure(interface: &str, reason: &str) -> ProbeError {
+    ProbeError::of(
+        Code::IcmpInterface,
+        &Details {
+            interface: Some(interface),
+            reason: Some(reason),
+            ..Details::default()
+        },
+    )
 }
 
 fn exchange(
@@ -494,6 +550,26 @@ fn exchange(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_socket_helpers_state_their_code() {
+        // The privileged probe cannot run without root, so the mapping of the two helpers it
+        // reports through is pinned here.
+        let denied = std::io::Error::from_raw_os_error(0o1);
+        assert_eq!(socket_failure(&denied).code(), "ICMP.SOCKET");
+        assert_eq!(
+            socket_failure(&denied).message(),
+            "cannot open a raw ICMP socket: Operation not permitted (os error 1) \
+             (root or CAP_NET_RAW is required)"
+        );
+        assert_eq!(io_failure(&denied).code(), "ICMP.IO");
+        let bind = interface_failure("eth9", "no such device");
+        assert_eq!(bind.code(), "ICMP.INTERFACE");
+        assert_eq!(
+            bind.message(),
+            "cannot bind the probe to eth9: no such device"
+        );
+    }
 
     #[test]
     fn checksum_of_an_empty_buffer_is_all_ones() {
@@ -561,7 +637,7 @@ mod tests {
             Ok(None)
         });
 
-        assert_eq!(verdict, Ok(Verdict::Down));
+        assert_eq!(verdict, Ok(None), "no reply before the budget expires");
         assert!(
             started.elapsed() < timeout + Duration::from_millis(500),
             "the probe concludes on its own budget, not on the traffic around it"
@@ -581,7 +657,7 @@ mod tests {
             Ok(Some(packet.len()))
         });
         assert!(
-            matches!(verdict, Ok(Verdict::Up { .. })),
+            matches!(verdict, Ok(Some(_))),
             "the reply is taken on the first packet"
         );
     }
@@ -596,7 +672,7 @@ mod tests {
         });
         assert_eq!(
             verdict,
-            Ok(Verdict::Down),
+            Ok(None),
             "another sequence is ignored and the budget still ends the probe"
         );
     }
@@ -604,12 +680,10 @@ mod tests {
     #[test]
     fn a_socket_failure_is_reported_instead_of_looping() {
         let verdict = await_reply(42, 9, Duration::from_secs(1), |_wait, _buffer| {
-            Err(ProbeError::local("the socket went away"))
+            Err(io_failure(&io::Error::other("the socket went away")))
         });
-        assert!(
-            verdict.is_err(),
-            "an error ends the probe, it does not retry"
-        );
+        let error = verdict.expect_err("an error ends the probe, it does not retry");
+        assert_eq!(error.code(), "ICMP.IO");
     }
 
     #[test]

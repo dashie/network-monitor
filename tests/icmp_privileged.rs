@@ -72,7 +72,10 @@ fn the_timeout_of_the_request_bounds_the_wait() {
         .expect("a raw ICMP socket can be opened");
     let elapsed = fast.elapsed();
 
-    assert_eq!(verdict, Verdict::Down);
+    assert!(
+        matches!(&verdict, Verdict::Down(failure) if failure.code() == "ICMP.NO_REPLY"),
+        "expected no reply to be reported, got {verdict:?}"
+    );
     assert!(
         elapsed >= started,
         "the probe returned before its timeout: {elapsed:?}"
