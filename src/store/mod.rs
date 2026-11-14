@@ -830,42 +830,57 @@ impl Store {
         Ok(days)
     }
 
-    /// One page of the whole history in insertion order, for a streamed export.
+    /// One page of the history in insertion order, for a streamed export.
     ///
     /// Paging keeps every read transaction short, so a slow download never holds the
-    /// WAL checkpoints of the writer.
+    /// WAL checkpoints of the writer. `target` narrows the page to one target, which is
+    /// what the export of a detail page covers.
     pub fn events_after(
         &self,
+        target: Option<&str>,
         after_id: i64,
         limit: u32,
     ) -> Result<Vec<ExportedEvent>, StoreError> {
+        // The filter goes in the statement rather than in a `?3 IS NULL OR` clause, so the
+        // index on the target still narrows the scan.
+        let filter = if target.is_some() {
+            "AND e.target = ?3"
+        } else {
+            ""
+        };
         let mut statement = self.connection.prepare(&format!(
             "SELECT e.id, e.target, t.label, e.interface, e.state, e.occurred_at_ms, e.rtt_us,
                     {cause}
                FROM events e
                LEFT JOIN targets t ON t.target = e.target
-              WHERE e.id > ?1
+              WHERE e.id > ?1 {filter}
               ORDER BY e.id
               LIMIT ?2",
             cause = self.cause_columns(),
         ))?;
 
-        let rows = statement
-            .query_map(params![after_id, limit], |row| {
-                let state: String = row.get(4)?;
-                Ok(ExportedEvent {
-                    id: row.get(0)?,
-                    target: row.get(1)?,
-                    label: row.get(2)?,
-                    interface: row.get(3)?,
-                    state: TargetState::parse(&state).unwrap_or(TargetState::Unknown),
-                    occurred_at_ms: row.get(5)?,
-                    rtt_us: row.get(6)?,
-                    cause: row.get(7)?,
-                    cause_message: row.get(8)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+        let event = |row: &rusqlite::Row| -> rusqlite::Result<ExportedEvent> {
+            let state: String = row.get(4)?;
+            Ok(ExportedEvent {
+                id: row.get(0)?,
+                target: row.get(1)?,
+                label: row.get(2)?,
+                interface: row.get(3)?,
+                state: TargetState::parse(&state).unwrap_or(TargetState::Unknown),
+                occurred_at_ms: row.get(5)?,
+                rtt_us: row.get(6)?,
+                cause: row.get(7)?,
+                cause_message: row.get(8)?,
+            })
+        };
+        let rows = match target {
+            Some(target) => statement
+                .query_map(params![after_id, limit, target], event)?
+                .collect::<Result<Vec<_>, _>>()?,
+            None => statement
+                .query_map(params![after_id, limit], event)?
+                .collect::<Result<Vec<_>, _>>()?,
+        };
         Ok(rows)
     }
 
@@ -1080,6 +1095,32 @@ mod tests {
 
         let states = store.load_states().unwrap();
         assert_eq!(states.get("1.1.1.1"), Some(&TargetState::Up));
+    }
+
+    /// The export of a detail page covers one target and nothing else.
+    #[test]
+    fn a_paged_export_names_the_target_it_reads() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        for (target, state, at) in [
+            ("1.1.1.1", TargetState::Up, 1_000),
+            ("8.8.8.8", TargetState::Up, 2_000),
+            ("1.1.1.1", TargetState::Down, 3_000),
+        ] {
+            store
+                .record_transition(&event(target, TargetState::Unknown, state, at))
+                .unwrap();
+        }
+
+        let every = store.events_after(None, i64::MIN, 10).unwrap();
+        assert_eq!(every.len(), 3, "the whole history when no target is named");
+
+        let only = store.events_after(Some("1.1.1.1"), i64::MIN, 10).unwrap();
+        assert_eq!(only.len(), 2);
+        assert!(only.iter().all(|event| event.target == "1.1.1.1"));
+
+        let after = store.events_after(Some("1.1.1.1"), only[0].id, 10).unwrap();
+        assert_eq!(after.len(), 1, "the page still starts after the last id");
     }
 
     #[test]
@@ -1534,7 +1575,7 @@ mod tests {
         assert_eq!(events.len(), 1, "the events query reads it too");
         assert_eq!(events[0].cause, None);
 
-        let exported = store.events_after(0, 10).unwrap();
+        let exported = store.events_after(None, 0, 10).unwrap();
         assert_eq!(exported.len(), 1, "so does the streamed export");
         assert_eq!(exported[0].cause, None);
 

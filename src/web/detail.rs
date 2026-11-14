@@ -102,7 +102,14 @@ pub fn target_page(
         .replace("{longest}", &longest)
         .replace("{avg_up_hint}", &avg_up_hint)
         .replace("{bars}", &bars(days))
-        .replace("{recent}", &faults_table(recent, now_ms))
+        .replace(
+            "{recent}",
+            &faults_table(
+                recent,
+                now_ms,
+                &format!("?target={}", encode(&target.target)),
+            ),
+        )
         .replace("{table}", &days_table(days, segments, now_ms))
 }
 

@@ -301,15 +301,44 @@ fn handle(mut stream: TcpStream, database: &Path, compression: Compression) {
             respond_redirect(&mut stream, "/export/faults.csv.gz");
         }
         "/export/faults.csv.gz" => {
+            let params = parse_query(query);
             let store = match open_store(&mut stream, database, include_body) {
                 Some(store) => store,
                 None => return,
             };
 
+            // A target in the query is the download of its detail page: the file carries
+            // the history of that target only and says whose it is.
+            let target = match params.target.as_deref() {
+                Some(needle) if !needle.is_empty() => match store.find_target(needle) {
+                    Ok(Some(target)) => Some(target),
+                    Ok(None) => {
+                        respond(
+                            &mut stream,
+                            404,
+                            "text/plain; charset=utf-8",
+                            "unknown target\n",
+                            include_body,
+                        );
+                        return;
+                    }
+                    Err(error) => {
+                        query_failed(&mut stream, &error, include_body);
+                        return;
+                    }
+                },
+                _ => None,
+            };
+
             let exported_at = export::exported_at();
             let disposition = format!(
                 "Content-Disposition: attachment; filename=\"{}\"\r\n",
-                export_name(exported_at)
+                export_name(
+                    exported_at,
+                    target
+                        .as_ref()
+                        .map(|target| target.label.as_deref().unwrap_or(&target.target))
+                )
             );
             begin_chunked(&mut stream, "application/gzip", &disposition);
             if !include_body {
@@ -322,7 +351,8 @@ fn handle(mut stream: TcpStream, database: &Path, compression: Compression) {
                 let mut chunked = Chunked {
                     stream: &mut stream,
                 };
-                export::write_csv_gz(&mut chunked, &store)
+                let only = target.as_ref().map(|target| target.target.as_str());
+                export::write_csv_gz(&mut chunked, &store, only)
             };
             if let Err(error) = outcome {
                 logging::error(None, &format!("web: export failed: {error}"));
@@ -581,15 +611,45 @@ fn end_chunked(stream: &mut TcpStream) {
     let _ = stream.flush();
 }
 
-/// `disconnections-20261109.csv.gz`, so two downloads never collide.
-fn export_name(now_ms: i64) -> String {
+/// `faults-20261109.csv.gz`, or `faults-cloudflare-dns-20261109.csv.gz` for the history of
+/// one target, so two downloads never collide and a file says whose history it holds.
+fn export_name(now_ms: i64, target: Option<&str>) -> String {
     let stamp = crate::time::format_rfc3339(now_ms);
-    format!(
-        "faults-{}{}{}.csv.gz",
-        &stamp[0..4],
-        &stamp[5..7],
-        &stamp[8..10]
-    )
+    let date = format!("{}{}{}", &stamp[0..4], &stamp[5..7], &stamp[8..10]);
+    match target {
+        Some(name) => format!("faults-{}-{date}.csv.gz", slug(name)),
+        None => format!("faults-{date}.csv.gz"),
+    }
+}
+
+/// The longest a target name may run in a file name.
+const SLUG_LIMIT: usize = 48;
+
+/// A file name that names a target: ASCII letters, digits, `.`, and `_` are kept, every
+/// other character folds into one `-`, and a name that keeps nothing falls back to
+/// `target`. A key such as `https://example.com/a?b=1` becomes `https-example.com-a-b-1`.
+fn slug(name: &str) -> String {
+    let mut slug = String::with_capacity(name.len());
+    let mut pending_dash = false;
+    for character in name.chars() {
+        if slug.len() >= SLUG_LIMIT {
+            break;
+        }
+        if character.is_ascii_alphanumeric() || character == '.' || character == '_' {
+            if pending_dash && !slug.is_empty() {
+                slug.push('-');
+            }
+            pending_dash = false;
+            slug.push(character);
+        } else {
+            pending_dash = true;
+        }
+    }
+    if slug.is_empty() {
+        "target".to_string()
+    } else {
+        slug
+    }
 }
 
 #[derive(Debug, Default)]
@@ -708,6 +768,31 @@ fn resolve_window(from: Option<i64>, to: Option<i64>, hours: Option<u8>, now: i6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The file of one target says whose history it holds; the whole history says only
+    /// when it was taken.
+    #[test]
+    fn the_export_of_one_target_is_named_after_it() {
+        // 2026-11-09T00:00:00Z
+        let at = 1_794_182_400_000;
+        assert_eq!(export_name(at, None), "faults-20261109.csv.gz");
+        assert_eq!(
+            export_name(at, Some("cloudflare-dns")),
+            "faults-cloudflare-dns-20261109.csv.gz"
+        );
+
+        assert_eq!(slug("cloudflare-dns"), "cloudflare-dns");
+        assert_eq!(slug("https://example.com/a?b=1"), "https-example.com-a-b-1");
+        assert_eq!(
+            slug("///"),
+            "target",
+            "a name that keeps nothing still names a file"
+        );
+        assert!(
+            slug(&"a".repeat(200)).len() <= SLUG_LIMIT,
+            "a long key is capped"
+        );
+    }
 
     #[test]
     fn a_request_that_advertises_gzip_gets_a_compressed_page() {

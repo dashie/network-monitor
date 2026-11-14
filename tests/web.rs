@@ -324,6 +324,46 @@ fn the_history_can_be_downloaded_as_a_gzipped_csv() {
     assert!(csv.contains(",down,"), "and the one that went down");
 }
 
+/// The download offered by a detail page carries that target's history only, and says so
+/// in the name of the file.
+#[test]
+fn the_download_of_a_target_holds_only_that_target() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, head, body) = server.get_raw("/export/faults.csv.gz?target=9.9.9.9");
+    assert_eq!(status, 200);
+    assert!(
+        head.contains("attachment; filename=\"faults-probe-"),
+        "the file is named after the target: {head}"
+    );
+    assert!(head.contains(".csv.gz\""));
+
+    let mut csv = String::new();
+    flate2::read::GzDecoder::new(&body[..])
+        .read_to_string(&mut csv)
+        .expect("the response decompresses");
+
+    assert!(
+        csv.starts_with("target,label,interface,state,occurred_at,rtt_us,cause,cause_message\n"),
+        "the header is the one the import reads"
+    );
+    assert!(csv.contains("9.9.9.9"), "got {csv}");
+    assert!(
+        !csv.contains("1.1.1.1"),
+        "the history of the other target is not in the file: {csv}"
+    );
+}
+
+#[test]
+fn the_download_of_an_unknown_target_is_refused() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, _) = server.get("/export/faults.csv.gz?target=no-such-target");
+    assert_eq!(status, 404, "an unknown target is answered plainly");
+}
+
 /// The page in its compressed form, decompressed by the test.
 fn gunzip(body: &[u8]) -> String {
     let mut text = String::new();
@@ -495,6 +535,10 @@ fn every_row_shows_its_statistics_and_links_to_its_detail_page() {
     assert!(
         !detail.contains("class=\"since\""),
         "the target is down, so there is no running up stretch to state"
+    );
+    assert!(
+        detail.contains("<a class=\"download\" href=\"/export/faults.csv.gz?target=1.1.1.1\">"),
+        "the download of the detail page covers that target only"
     );
     assert!(
         detail.contains("<a class=\"back-button\" href=\"/\">"),

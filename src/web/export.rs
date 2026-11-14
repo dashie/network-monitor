@@ -36,14 +36,19 @@ pub fn exported_at() -> i64 {
     now_ms()
 }
 
-/// Stream every event, oldest first, as a gzipped CSV.
-pub fn write_csv_gz<W: Write>(out: W, store: &Store) -> Result<(), ExportError> {
+/// Stream every event, oldest first, as a gzipped CSV. `target` narrows the export to one
+/// target, which is what the detail page downloads.
+pub fn write_csv_gz<W: Write>(
+    out: W,
+    store: &Store,
+    target: Option<&str>,
+) -> Result<(), ExportError> {
     let mut gzip = GzEncoder::new(out, Compression::fast());
     gzip.write_all(header().as_bytes())?;
 
     let mut after_id = i64::MIN;
     loop {
-        let page = store.events_after(after_id, PAGE_SIZE)?;
+        let page = store.events_after(target, after_id, PAGE_SIZE)?;
         if page.is_empty() {
             break;
         }
@@ -133,7 +138,7 @@ mod tests {
 
     fn archive_of(store: &Store) -> String {
         let mut buffer = Vec::new();
-        write_csv_gz(&mut buffer, store).unwrap();
+        write_csv_gz(&mut buffer, store, None).unwrap();
         assert_eq!(&buffer[..2], &[0x1f, 0x8b], "the gzip magic number");
 
         let mut csv = String::new();

@@ -338,6 +338,10 @@ is showing at the right end of the masthead, on the same centre line as that blo
 toolbar under it carries the control that changes what is shown.
 
 - `/` — one lane per target over the selected window (1 h by default; 1, 2, 4, 6, 12, 24 h).
+  A lane is drawn as one bar: only its two outer ends are rounded, so the bands of the states
+  meet square. A fault too short to reach a visible width is drawn at a minimum width and
+  coloured **orange instead of red**, so a brief outage is not lost in a wide window and its
+  width is never mistaken for its duration; hover it for the exact instants.
   A lane states the drops, the average `up` run with its spread, the longest run, and how long
   the target has been up without a drop. Below the chart opens a table of the last 10 faults,
   under a rule that marks where it begins: a row names the target as its lane does — the label,
@@ -350,9 +354,12 @@ toolbar under it carries the control that changes what is shown.
   The masthead states the target at its right end: its label and address, then its status
   (up/down + duration). A back button in the toolbar always returns to the list page,
   whatever page you came from.
-- `Download History` — the whole history as a gzipped CSV, from `/export/faults.csv.gz`. The
-  address the page used before this version, `/export/disconnections.csv.gz`, still answers and
-  redirects to it.
+- `Download History` — the whole history as a gzipped CSV, from `/export/faults.csv.gz`, named
+  `faults-YYYYMMDD.csv.gz`. On a target page the same link downloads **only that target's**
+  history (`/export/faults.csv.gz?target=<key>`) and the file is named after it —
+  `faults-<target>-YYYYMMDD.csv.gz`, using the name the page shows. The address the page used
+  before this version, `/export/disconnections.csv.gz`, still answers and redirects to the
+  whole history.
 - `/healthz` — `ok` while the process runs.
 
 **Selecting a fault opens its cause underneath the row** — one fault at a time. The message is

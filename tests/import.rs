@@ -69,7 +69,7 @@ fn down_with_cause_for(target: &str, at: i64) -> Event {
 fn archive_of(path: &Path) -> Vec<u8> {
     let store = Store::open_ro(path).expect("the database opens");
     let mut bytes = Vec::new();
-    write_csv_gz(&mut bytes, &store).expect("the export succeeds");
+    write_csv_gz(&mut bytes, &store, None).expect("the export succeeds");
     bytes
 }
 

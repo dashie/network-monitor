@@ -20,6 +20,18 @@ const ROW_GAP: f64 = 6.0;
 const TOP_PAD: f64 = 6.0;
 const AXIS_HEIGHT: f64 = 20.0;
 
+/// The radius of the two outer ends of a lane. The bands inside the lane meet square,
+/// so only the left of the first band and the right of the last one are rounded.
+const CAP_RADIUS: f64 = 2.0;
+
+/// The narrowest a fault is ever drawn. A few seconds inside a day-wide window are a
+/// fraction of a pixel, and a fault that cannot be seen is not shown at all.
+const MIN_BAND_WIDTH: f64 = 2.0;
+
+/// The fill of a fault drawn wider than its true duration, so a band that lies about its
+/// width does not lie about its severity: orange states "this is a short fault, widened".
+const SHORT_FAULT_FILL: &str = "#ef6c00";
+
 const HOUR_MS: i64 = 3_600_000;
 
 /// The windows the timeline offers, smallest first: the links read left to right from
@@ -84,7 +96,7 @@ pub fn page(
     window: Window,
 ) -> String {
     let body = chart(timelines, up_since, window);
-    let downs = faults_table(downs, window.to_ms);
+    let downs = faults_table(downs, window.to_ms, "");
 
     super::templates::load_template("page")
         .replace("{title}", "Network Monitor")
@@ -115,17 +127,19 @@ fn window_links(window: Window) -> String {
 
 /// The last faults, newest first, with why each one started and how long it lasted.
 ///
-/// Shared with the detail page, which lists the same table for one target. A row with a
-/// cause is a control: clicking it opens the standard message in a row of its own, and the
-/// `title` states it for a browser without JavaScript.
-pub(super) fn faults_table(faults: &[Fault], now_ms: i64) -> String {
-    let mut output = String::from(
+/// Shared with the detail page, which lists the same table for one target: `download` is
+/// the query that narrows the export to that target, and is empty on the timeline, where
+/// the export covers every target. A row with a cause is a control: clicking it opens the
+/// standard message in a row of its own, and the `title` states it for a browser without
+/// JavaScript.
+pub(super) fn faults_table(faults: &[Fault], now_ms: i64, download: &str) -> String {
+    let mut output = format!(
         "<h2>Last 10 faults\
-         <a class=\"download\" href=\"/export/faults.csv.gz\">Download History</a>\
+         <a class=\"download\" href=\"/export/faults.csv.gz{download}\">Download History</a>\
          </h2>\n<div class=\"table-scroll\">\n<table class=\"faults\">\n\
          <thead><tr><th>target</th><th>started</th><th class=\"cause-head\">cause</th>\
          <th class=\"num lasted-head\">lasted</th></tr></thead>\n\
-         <tbody>\n",
+         <tbody>\n"
     );
 
     if faults.is_empty() {
@@ -266,6 +280,8 @@ fn chart(timelines: &[TargetTimeline], up_since: &HashMap<String, i64>, window: 
     }
 
     // One lane per target; the whole lane links to the 30-day detail page.
+    let track_left = LABEL_WIDTH;
+    let track_width = WIDTH - LABEL_WIDTH - STATS_WIDTH;
     for (index, timeline) in timelines.iter().enumerate() {
         let y = TOP_PAD + AXIS_HEIGHT + index as f64 * (ROW_HEIGHT + ROW_GAP);
         let name = timeline
@@ -292,15 +308,25 @@ fn chart(timelines: &[TargetTimeline], up_since: &HashMap<String, i64>, window: 
             escape(&short(&name, 22))
         );
 
-        for segment in &timeline.segments {
-            let x = window.x(segment.from_ms);
-            let width = (window.x(segment.to_ms) - x).max(0.4);
+        // The bands butt together square and the lane is rounded as a whole, so a lane
+        // reads as one bar instead of a row of lozenges: a clip path holds the two outer
+        // ends, and the bands inside it stay square.
+        let _ = write!(
+            output,
+            "<clipPath id=\"lane-{index}\"><rect x=\"{track_left:.1}\" y=\"{y:.1}\" \
+             width=\"{track_width:.1}\" height=\"{ROW_HEIGHT}\" rx=\"{CAP_RADIUS}\"/></clipPath>\
+             <g clip-path=\"url(#lane-{index})\">"
+        );
+        for band in bands(&timeline.segments, window) {
+            let segment = band.segment;
             let _ = write!(
                 output,
-                "<rect x=\"{x:.1}\" y=\"{y:.1}\" width=\"{width:.1}\" height=\"{ROW_HEIGHT}\" \
-                 rx=\"2\" fill=\"{}\"><title data-datetime=\"{}\" data-until=\"{}\" \
+                "<rect x=\"{:.1}\" y=\"{y:.1}\" width=\"{:.1}\" height=\"{ROW_HEIGHT}\" \
+                 fill=\"{}\"><title data-datetime=\"{}\" data-until=\"{}\" \
                  data-prefix=\"{} — \">{} — {} to {}</title></rect>",
-                colour(segment.state),
+                band.x,
+                band.width,
+                band.fill,
                 format_rfc3339(segment.from_ms),
                 format_rfc3339(segment.to_ms),
                 state_label(segment.state),
@@ -309,6 +335,7 @@ fn chart(timelines: &[TargetTimeline], up_since: &HashMap<String, i64>, window: 
                 utc_text(segment.to_ms)
             );
         }
+        output.push_str("</g>");
 
         let runs = runs_stats(&timeline.segments);
         let values = [
@@ -349,6 +376,57 @@ fn chart(timelines: &[TargetTimeline], up_since: &HashMap<String, i64>, window: 
 
     output.push_str("</svg>");
     output
+}
+
+/// One band of a lane, placed on the track and ready to paint.
+struct Band<'a> {
+    segment: &'a TimelineSegment,
+    x: f64,
+    width: f64,
+    fill: &'static str,
+    /// Drawn wider than the time it covers, so it must be painted over its neighbours.
+    exaggerated: bool,
+}
+
+/// The bands of one lane, in the order they are painted.
+///
+/// A fault too short to reach [`MIN_BAND_WIDTH`] is drawn that wide anyway, centred on the
+/// instant it really covered, so it stays visible in a wide window; it is painted orange to
+/// state that its width is not its duration. Such a band is painted last, because the
+/// neighbour on its right would otherwise cover the width it gained.
+fn bands<'a>(segments: &'a [TimelineSegment], window: Window) -> Vec<Band<'a>> {
+    let track_left = LABEL_WIDTH;
+    let track_right = WIDTH - STATS_WIDTH;
+
+    let mut bands: Vec<Band<'a>> = segments
+        .iter()
+        .map(|segment| {
+            let start = window.x(segment.from_ms);
+            let true_width = (window.x(segment.to_ms) - start).max(0.0);
+            let exaggerated = segment.state == TargetState::Down && true_width < MIN_BAND_WIDTH;
+            let width = if exaggerated {
+                MIN_BAND_WIDTH
+            } else {
+                true_width.max(0.4)
+            };
+            let x = if exaggerated {
+                // Grown both ways from its true centre, kept inside the track so a fault at
+                // either end of the window keeps its whole width.
+                (start + true_width / 2.0 - width / 2.0).clamp(track_left, track_right - width)
+            } else {
+                start
+            };
+            Band {
+                segment,
+                x,
+                width,
+                fill: colour(segment.state, exaggerated),
+                exaggerated,
+            }
+        })
+        .collect();
+    bands.sort_by_key(|band| band.exaggerated);
+    bands
 }
 
 /// Disconnections of one lane over the shown window. A down segment that starts after
@@ -466,7 +544,12 @@ fn short(text: &str, limit: usize) -> String {
     shortened
 }
 
-fn colour(state: TargetState) -> &'static str {
+/// The fill of a band: green, red, or grey. A fault widened to stay visible is orange, so
+/// a reader never mistakes a minimum-width band for a long outage.
+fn colour(state: TargetState, exaggerated: bool) -> &'static str {
+    if exaggerated {
+        return SHORT_FAULT_FILL;
+    }
     match state {
         TargetState::Up => "#2e7d32",
         TargetState::Down => "#c62828",
@@ -550,10 +633,119 @@ mod tests {
             to_ms: 7_200_000,
         };
         let rendered = chart(&[timeline()], &no_streaks(), window);
-        assert_eq!(rendered.matches("rx=\"2\"").count(), 2);
         assert!(rendered.contains("#2e7d32"));
         assert!(rendered.contains("#c62828"));
         assert!(rendered.contains("cloudflare"));
+    }
+
+    /// A lane is one bar: rounded at its two outer ends and square in between, so two
+    /// states never look like two separate objects.
+    #[test]
+    fn a_lane_is_rounded_at_its_ends_and_square_between_its_bands() {
+        let window = Window {
+            from_ms: 0,
+            to_ms: 7_200_000,
+        };
+        let rendered = chart(&[timeline()], &no_streaks(), window);
+
+        // The radius lives in the clip path of the lane, not in its bands.
+        assert_eq!(rendered.matches("rx=\"2\"").count(), 1);
+        assert!(rendered.contains("<clipPath id=\"lane-0\">"));
+        assert!(rendered.contains("clip-path=\"url(#lane-0)\""));
+
+        // The bands cover the track end to end, each starting where the last one ended.
+        let track_left = LABEL_WIDTH;
+        let middle = (WIDTH - STATS_WIDTH + track_left) / 2.0;
+        assert!(rendered.contains(&format!("<rect x=\"{track_left:.1}\"")));
+        assert!(rendered.contains(&format!("<rect x=\"{middle:.1}\"")));
+        for band in rendered.split("<rect ").skip(1) {
+            let tag = band.split('>').next().unwrap_or_default();
+            if tag.contains("fill=\"#2e7d32\"") || tag.contains("fill=\"#c62828\"") {
+                assert!(!tag.contains("rx="), "a band carries no radius: {tag}");
+            }
+        }
+    }
+
+    /// A fault of a few seconds inside a day-wide window is a fraction of a pixel wide;
+    /// it is drawn at the minimum width and painted orange to say its width is not its
+    /// duration.
+    #[test]
+    fn a_fault_too_short_to_see_is_widened_and_painted_orange() {
+        let timeline = TargetTimeline {
+            target: "1.1.1.1".to_string(),
+            label: None,
+            segments: vec![
+                TimelineSegment {
+                    state: TargetState::Up,
+                    from_ms: 0,
+                    to_ms: 43_199_000,
+                },
+                TimelineSegment {
+                    state: TargetState::Down,
+                    from_ms: 43_199_000,
+                    to_ms: 43_200_000,
+                },
+                TimelineSegment {
+                    state: TargetState::Up,
+                    from_ms: 43_200_000,
+                    to_ms: 86_400_000,
+                },
+            ],
+        };
+        let window = Window {
+            from_ms: 0,
+            to_ms: 86_400_000,
+        };
+        let rendered = chart(&[timeline], &no_streaks(), window);
+
+        let band = rendered
+            .split("<rect ")
+            .skip(1)
+            .map(|band| band.split('>').next().unwrap_or_default())
+            .find(|tag| tag.contains(SHORT_FAULT_FILL))
+            .unwrap_or_else(|| panic!("the short fault is orange: {rendered}"));
+        assert!(
+            band.contains(&format!("width=\"{MIN_BAND_WIDTH:.1}\"")),
+            "the short fault is widened to the minimum: {band}"
+        );
+        // Painted last, so the up band that follows it does not cover the width it gained.
+        assert!(
+            rendered.find(SHORT_FAULT_FILL) > rendered.rfind("#2e7d32"),
+            "the widened band is painted over its neighbours"
+        );
+    }
+
+    /// The widened band stays inside the track, so a fault at the very end of the window
+    /// keeps the whole minimum width instead of half of it.
+    #[test]
+    fn a_short_fault_at_the_end_of_the_window_keeps_its_width() {
+        let timeline = TargetTimeline {
+            target: "1.1.1.1".to_string(),
+            label: None,
+            segments: vec![
+                TimelineSegment {
+                    state: TargetState::Up,
+                    from_ms: 0,
+                    to_ms: 86_399_000,
+                },
+                TimelineSegment {
+                    state: TargetState::Down,
+                    from_ms: 86_399_000,
+                    to_ms: 86_400_000,
+                },
+            ],
+        };
+        let window = Window {
+            from_ms: 0,
+            to_ms: 86_400_000,
+        };
+        let rendered = chart(&[timeline], &no_streaks(), window);
+
+        let track_right = WIDTH - STATS_WIDTH;
+        assert!(
+            rendered.contains(&format!("<rect x=\"{:.1}\"", track_right - MIN_BAND_WIDTH)),
+            "the last fault stops at the end of the track: {rendered}"
+        );
     }
 
     #[test]
