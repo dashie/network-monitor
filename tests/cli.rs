@@ -166,3 +166,58 @@ fn serve_refuses_an_invalid_listen_address() {
         .failure()
         .stderr(predicate::str::contains("invalid listen address"));
 }
+
+#[test]
+fn show_config_renders_one_shape_per_method() {
+    let directory = tempfile::tempdir().unwrap();
+
+    monitor(directory.path())
+        .args([
+            "--show-config",
+            "--target",
+            "tcp:1.1.1.1:443,label=https",
+            "--target",
+            "dns:example.com@9.9.9.9,record=AAAA",
+            "--target",
+            "http:https://example.com/health,expect=204",
+            "--target",
+            "1.1.1.1",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("method = \"tcp\""))
+        .stdout(predicate::str::contains("host = \"1.1.1.1\""))
+        .stdout(predicate::str::contains("port = 443"))
+        .stdout(predicate::str::contains("method = \"dns\""))
+        .stdout(predicate::str::contains("resolver = \"9.9.9.9\""))
+        .stdout(predicate::str::contains("record = \"AAAA\""))
+        .stdout(predicate::str::contains("method = \"http\""))
+        .stdout(predicate::str::contains(
+            "url = \"https://example.com/health\"",
+        ))
+        .stdout(predicate::str::contains("expect_status"))
+        .stdout(predicate::str::contains("method = \"icmp\""))
+        .stdout(predicate::str::contains("ip = \"1.1.1.1\""));
+}
+
+#[test]
+fn an_incomplete_target_spec_names_the_problem() {
+    let directory = tempfile::tempdir().unwrap();
+
+    monitor(directory.path())
+        .args(["--show-config", "--target", "tcp:1.1.1.1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("host:port"));
+}
+
+#[test]
+fn a_target_key_belonging_to_another_method_is_refused() {
+    let directory = tempfile::tempdir().unwrap();
+
+    monitor(directory.path())
+        .args(["--show-config", "--target", "tcp:1.1.1.1:443,record=A"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("record"));
+}

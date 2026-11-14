@@ -18,9 +18,10 @@ fn file_config() -> FileConfig {
         database: Some("/tmp/from-file.db".to_string()),
         retention_days: Some(3),
         targets: Some(vec![FileTarget {
-            ip: "1.1.1.1".to_string(),
+            ip: Some("1.1.1.1".to_string()),
             interface: Some("eth0".to_string()),
             label: Some("from-file".to_string()),
+            ..FileTarget::default()
         }]),
     }
 }
@@ -61,7 +62,7 @@ fn every_key_has_a_flag_that_wins_over_the_file() {
 
     // --target replaces the file list instead of adding to it.
     assert_eq!(config.targets.len(), 1);
-    assert_eq!(config.targets[0].ip.to_string(), "8.8.8.8");
+    assert_eq!(config.targets[0].key(), "icmp://8.8.8.8");
     assert_eq!(config.targets[0].interface.as_deref(), Some("eth1"));
     assert_eq!(config.targets[0].label.as_deref(), Some("from-flag"));
 }
@@ -72,9 +73,8 @@ fn built_in_defaults_apply_below_the_file() {
     let config = Config::resolve(
         Some(FileConfig {
             targets: Some(vec![FileTarget {
-                ip: "1.1.1.1".to_string(),
-                interface: None,
-                label: None,
+                ip: Some("1.1.1.1".to_string()),
+                ..FileTarget::default()
             }]),
             ..FileConfig::default()
         }),
@@ -118,4 +118,39 @@ fn overrides_without_values_do_not_change_anything() {
     let overrides: Overrides = cli.overrides().unwrap();
     assert!(overrides.interval_ms.is_none());
     assert!(overrides.targets.is_none());
+}
+
+/// The per-target keys exist as flags too, and they carry the method with them.
+#[test]
+fn the_target_keys_of_every_method_are_reachable_from_the_flag() {
+    let cli = parse(&[
+        "--target",
+        "tcp:1.1.1.1:443,interface=eth0,label=from-flag,timeout_ms=1500,interval_ms=900",
+        "--target",
+        "dns:example.com@9.9.9.9,record=AAAA",
+        "--target",
+        "http:https://example.com/health,expect=204",
+        "--target",
+        "icmp:1.0.0.1",
+    ]);
+    let config = Config::resolve(None, cli.overrides().unwrap()).unwrap();
+
+    assert_eq!(
+        config
+            .targets
+            .iter()
+            .map(|target| target.key())
+            .collect::<Vec<_>>(),
+        vec![
+            "tcp://1.1.1.1:443",
+            "dns://example.com@9.9.9.9",
+            "https://example.com/health",
+            "icmp://1.0.0.1",
+        ]
+    );
+    assert_eq!(config.targets[0].interface.as_deref(), Some("eth0"));
+    assert_eq!(config.targets[0].label.as_deref(), Some("from-flag"));
+    assert_eq!(config.targets[0].timeout.as_millis(), 1_500);
+    assert_eq!(config.targets[0].interval.as_millis(), 900);
+    assert_eq!(config.timeout.as_millis(), 2_000, "the global default");
 }

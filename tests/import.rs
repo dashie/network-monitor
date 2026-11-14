@@ -17,7 +17,8 @@ const HEADER: &str = "target,label,interface,state,occurred_at,rtt_us\n";
 
 fn transition(target: &str, previous: TargetState, state: TargetState, at: i64) -> Event {
     Event {
-        target: target.to_string(),
+        // The store keeps the canonical key; the archive carries it too.
+        target: format!("icmp://{target}"),
         interface: Some("eth0".to_string()),
         label: Some("probe".to_string()),
         previous_state: previous,
@@ -157,8 +158,8 @@ fn a_plain_csv_needs_no_flag() {
     assert_eq!(
         events_of(&restored),
         vec![
-            ("1.1.1.1".to_string(), "down".to_string(), 2_000),
-            ("8.8.8.8".to_string(), "up".to_string(), 50_000),
+            ("icmp://1.1.1.1".to_string(), "down".to_string(), 2_000),
+            ("icmp://8.8.8.8".to_string(), "up".to_string(), 50_000),
         ]
     );
 }
@@ -382,14 +383,14 @@ fn replacing_a_window_keeps_the_history_outside_it() {
     assert_eq!(
         events_of(&target),
         vec![
-            ("1.1.1.1".to_string(), "down".to_string(), 5_000),
-            ("1.1.1.1".to_string(), "down".to_string(), 100_000),
-            ("1.1.1.1".to_string(), "down".to_string(), 900_000),
-            ("1.1.1.1".to_string(), "up".to_string(), 1_000),
-            ("1.1.1.1".to_string(), "up".to_string(), 6_000),
-            ("1.1.1.1".to_string(), "up".to_string(), 200_000),
-            ("1.1.1.1".to_string(), "up".to_string(), 960_000),
-            ("8.8.8.8".to_string(), "down".to_string(), 700_000),
+            ("icmp://1.1.1.1".to_string(), "down".to_string(), 5_000),
+            ("icmp://1.1.1.1".to_string(), "down".to_string(), 100_000),
+            ("icmp://1.1.1.1".to_string(), "down".to_string(), 900_000),
+            ("icmp://1.1.1.1".to_string(), "up".to_string(), 1_000),
+            ("icmp://1.1.1.1".to_string(), "up".to_string(), 6_000),
+            ("icmp://1.1.1.1".to_string(), "up".to_string(), 200_000),
+            ("icmp://1.1.1.1".to_string(), "up".to_string(), 960_000),
+            ("icmp://8.8.8.8".to_string(), "down".to_string(), 700_000),
         ],
         "the events before and after the window are untouched"
     );
@@ -437,10 +438,10 @@ fn replacing_a_window_leaves_the_targets_outside_the_archive_alone() {
     assert_eq!(
         events_of(&target),
         vec![
-            ("1.1.1.1".to_string(), "down".to_string(), 100_000),
-            ("1.1.1.1".to_string(), "up".to_string(), 160_000),
-            ("9.9.9.9".to_string(), "down".to_string(), 100_000),
-            ("9.9.9.9".to_string(), "up".to_string(), 160_000),
+            ("icmp://1.1.1.1".to_string(), "down".to_string(), 100_000),
+            ("icmp://1.1.1.1".to_string(), "up".to_string(), 160_000),
+            ("icmp://9.9.9.9".to_string(), "down".to_string(), 100_000),
+            ("icmp://9.9.9.9".to_string(), "up".to_string(), 160_000),
         ],
         "the archive rewrites the history of 9.9.9.9 and says nothing about 1.1.1.1"
     );
@@ -500,11 +501,11 @@ fn replacing_a_window_gives_every_target_its_own_window() {
     assert_eq!(
         events_of(&target),
         vec![
-            ("1.1.1.1".to_string(), "down".to_string(), 200_000),
-            ("1.1.1.1".to_string(), "up".to_string(), 90_000),
-            ("8.8.8.8".to_string(), "down".to_string(), 100_000),
-            ("8.8.8.8".to_string(), "down".to_string(), 180_000),
-            ("8.8.8.8".to_string(), "up".to_string(), 130_000),
+            ("icmp://1.1.1.1".to_string(), "down".to_string(), 200_000),
+            ("icmp://1.1.1.1".to_string(), "up".to_string(), 90_000),
+            ("icmp://8.8.8.8".to_string(), "down".to_string(), 100_000),
+            ("icmp://8.8.8.8".to_string(), "down".to_string(), 180_000),
+            ("icmp://8.8.8.8".to_string(), "up".to_string(), 130_000),
         ],
         "8.8.8.8 keeps what its own part of the archive never covered"
     );

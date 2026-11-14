@@ -54,9 +54,12 @@ network-monitor/
 │   │   ├── mod.rs        interval loop per target, shutdown handling
 │   │   └── state.rs      transition decision from the previous state and the verdict
 │   ├── probe/
-│   │   ├── mod.rs        Probe contract, Verdict, ProbeError
+│   │   ├── mod.rs        Probe contract, Endpoint, Method, StatusMatch, Prober
 │   │   ├── icmp.rs       raw ICMP echo request and reply matching
-│   │   ├── interface.rs  platform interface binding (Linux, macOS, Windows)
+│   │   ├── tcp.rs        TCP connect, optionally through an interface
+│   │   ├── dns.rs        hand-written DNS question and answer over UDP
+│   │   ├── http.rs       one HTTP request, plain or over TLS
+│   │   ├── interface.rs  platform interface validation and binding
 │   │   └── fake.rs       deterministic prober for tests
 │   ├── store/
 │   │   ├── mod.rs        connection, write transaction, retention, read queries
@@ -420,11 +423,12 @@ gunzip -c disconnections.csv.gz | network-monitor import - --database ./events.d
 The format is detected from the first two bytes, so a plain CSV works as it is. The rows need no order: the chain is rebuilt from the timestamps at the end of the import, and an event that repeats the state before it is dropped and counted. Running
 the same import twice is harmless: an event already in the database is skipped and
 counted, and the command reports `imported 2870 events for 2 target(s) … (0 rows
-skipped, gzip format)`. Labels and interfaces are not part of the CSV; the next probe of
-the monitor writes them back from the configuration.
+skipped, gzip format)`. The CSV carries the target key, the label, and the interface of
+every event, so an imported history keeps them; the next probe rewrites them from the
+configuration when they changed there.
 
-Only `http://` URLs are accepted: the binary carries no TLS stack. Download an `https`
-archive with `curl` and import the file.
+The import reads plain `http://` only: the importer does not use the TLS stack the probes
+carry. Download an `https` archive with `curl` and import the file.
 
 A merge adds to what is there; `--replace-window` replaces what the archive covers. The
 window belongs to the target: for every target the file mentions, everything between that
@@ -564,10 +568,30 @@ cargo clippy --all-targets -- -D warnings
 
 ### Adding a probe type
 
-1. Define the type in `probe/`, implement the `Probe` contract, and return the existing `Verdict` variants; do not add a variant that means "local failure".
-2. Keep the platform-specific socket work in `probe/interface.rs` so the rest of the code stays portable.
-3. Select it in the composition step, from configuration, without touching `monitor`.
-4. Add a fake-driven test of the decision logic and one manual acceptance test with real privileges.
+1. Add the variant to `Endpoint` in `probe/mod.rs`, with its parameters and its `Display`
+   rendering — that string is the identity stored in the database, so it must round-trip
+   through the configuration.
+2. Create `probe/<method>.rs`, implement `Probe` for the variant, and return the existing
+   `Verdict` variants; do not add a variant that means "local failure". Decide, and write
+   down, what is a definitive answer of the target and what is a failure of this host
+   (INV-5): a refusal, a missing name, or a timeout is a verdict, a permission error or a
+   malformed answer is not.
+3. Keep the protocol pure and private where you can — the codec is a function of bytes — and
+   keep the platform-specific socket work in `probe/interface.rs`. Test the codec with fixed
+   bytes and the exchange against a listener bound to `127.0.0.1:0`; a public endpoint belongs
+   in an `#[ignore]` acceptance test.
+4. Add the field and the arm to `Prober` in `probe/mod.rs`; `monitor` must not change.
+5. Teach `config`: the keys of the new method in `FileTarget`, their validation in
+   `TargetSpec::from_file`, the flag grammar in `TargetSpec::parse_spec`, and the rendering in
+   `Config::to_toml` (`--show-config` must parse back into the same target).
+6. Run `cargo test --lib probe::<method>` for the transport alone, then the suite; add a
+   fake-driven monitor test only if the method changes the loop.
+7. Document it: an FR in [PRODUCT.md](./PRODUCT.md), the terms in
+   [GLOSSARY.md](./GLOSSARY.md), the component in [ARCHITECTURE.md](./ARCHITECTURE.md), and an
+   ADR when the method brings a dependency or a decision that outlives the code.
+
+A new crate is a decision, not an implementation detail: it needs an ADR with the rejected
+alternatives and the effect on the static build (ADR-0024 is the example).
 
 ### Changing the schema
 

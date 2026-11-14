@@ -9,6 +9,7 @@ use std::fmt::Write as _;
 use crate::store::{DownEpisode, TargetState, TargetTimeline, TimelineSegment};
 use crate::time::format_rfc3339;
 
+use super::encode;
 use super::stats::{self, RunStats};
 
 const WIDTH: f64 = 1000.0;
@@ -530,7 +531,7 @@ fn chart(timelines: &[TargetTimeline], up_since: &HashMap<String, i64>, window: 
             "<a href=\"/target?target={}\"><rect x=\"0\" y=\"{y:.1}\" width=\"{WIDTH}\" \
              height=\"{ROW_HEIGHT}\" fill=\"#000000\" fill-opacity=\"0\">\
              <title>Last 30 days for {}</title></rect>",
-            escape(&timeline.target),
+            encode(&timeline.target),
             escape(&timeline.target),
         );
 
@@ -771,6 +772,26 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn a_lane_link_carries_the_encoded_key() {
+        let mut timeline = timeline();
+        timeline.target = "https://example.com/a?b=1".to_string();
+        timeline.label = None;
+        let rendered = chart(
+            &[timeline],
+            &no_streaks(),
+            super::Window {
+                from_ms: 0,
+                to_ms: 3_600_000,
+            },
+        );
+
+        assert!(
+            rendered.contains("href=\"/target?target=https%3A%2F%2Fexample.com%2Fa%3Fb%3D1\""),
+            "unexpected markup: {rendered}"
+        );
     }
 
     #[test]

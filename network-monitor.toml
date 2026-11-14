@@ -4,10 +4,11 @@
 # file (FR-2). The effective configuration after the merge is printed by
 # `network-monitor --show-config`.
 
-# Probe interval in milliseconds.
+# Probe interval in milliseconds. Every target may state its own `interval_ms`.
 interval_ms = 5000
 
-# Maximum wait for the matching echo reply, in milliseconds.
+# Maximum wait for an answer, in milliseconds. Every target may state its own
+# `timeout_ms`.
 timeout_ms = 2000
 
 # SQLite event database. Keep it on a local filesystem: WAL is not supported on
@@ -17,12 +18,44 @@ database = "./tmp/network-monitor.db"
 # Delete events older than this many days. 0 keeps every event.
 retention_days = 0
 
-# Probe out of eth1, like `ping -I eth1 1.1.1.1`.
+# ICMP echo request, the default method. `interface` is optional: without it the
+# default-route interface is used.
 [[targets]]
+method = "icmp"
 ip = "1.1.1.1"
 # interface = "eth1"
 label = "cloudflare-dns"
 
-# No interface: the default-route interface is used.
 [[targets]]
 ip = "192.168.1.1"
+
+# TCP: the handshake completing is `up`. `host` may be an address or a name;
+# `interface` is allowed here too.
+[[targets]]
+method = "tcp"
+host = "1.1.1.1"
+port = 443
+label = "cloudflare-https"
+timeout_ms = 1000
+
+# DNS: asks one server when `resolver` is given, otherwise the system resolver.
+# `record` is A (the default) or AAAA.
+[[targets]]
+method = "dns"
+name = "example.com"
+resolver = "9.9.9.9"
+record = "A"
+label = "example-via-quad9"
+
+[[targets]]
+method = "dns"
+name = "example.com"
+label = "example-system"
+
+# HTTP: one GET, no redirect. `expect_status` defaults to 200-399 and accepts
+# classes (`2xx`) and exact codes.
+[[targets]]
+method = "http"
+url = "https://example.com/health"
+expect_status = ["200", "3xx"]
+label = "example-health"

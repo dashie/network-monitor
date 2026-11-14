@@ -34,6 +34,8 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0020 | Give every target its own replace window on import | accepted | 2026-11-11 | `--replace-window` deletes per target, inside the span that target's own rows cover |
 | ADR-0021 | Offer the detail page 30 to 360 days | accepted | 2026-11-11 | `?days=90d` selects the period, 30 days by default; a count label only where a column can carry it |
 | ADR-0022 | Drop the down-time and availability columns from the timeline | accepted | 2026-11-13 | A lane states `DROPS`, `AVG UP`, `MAX`, `UP FOR`; the freed width goes to the bands |
+| ADR-0023 | One probe contract with four methods and a prefixed target key | accepted | 2026-11-14 | `Endpoint` per method, one module each, `method://endpoint` as the stored identity; no schema change |
+| ADR-0024 | Use rustls, a hand-written DNS codec and socket2 instead of an async stack | accepted | 2026-11-14 | `ring` provider with embedded roots, one UDP question decoded here, `socket2` for interface-bound TCP |
 
 ## Records
 
@@ -819,3 +821,90 @@ where a reader compares days and decides what to fix.
   for two that repeat the drawing.
 - Remove down time from the detail page too: rejected, the per-day table is where the
   figure belongs; the timeline was the wrong place for it, not the product.
+
+## ADR-0023 — One probe contract with four methods and a prefixed target key
+
+**Status:** accepted · **Date:** 2026-11-14
+
+### Context
+
+The product answered "is this address reachable" with ICMP only. An operator needs the same
+history for a TCP port, a DNS name, and an HTTPS endpoint, and ICMP is often the one check a
+network refuses. The monitor, the store, the page, and the query path were written around one
+`Probe` that took an `Ipv4Addr`, and the database keyed a target by that address.
+
+### Decision
+
+A probe is an `Endpoint`: the method (`icmp`, `tcp`, `dns`, `http`) plus the parameters that
+identify what is checked and, for HTTP, the statuses that count as `up`. One `Probe` trait
+takes an endpoint, an optional interface, and the timeout of the request. Each method is one
+module — `probe/icmp.rs`, `probe/tcp.rs`, `probe/dns.rs`, `probe/http.rs` — with its own tests,
+and an enum `Prober` dispatches on the endpoint. The identity of a target is the endpoint
+rendered as a canonical string (`tcp://1.1.1.1:443`), stored in the existing `target` column:
+no new column, no new table. A writable open rewrites the bare addresses of an older history
+into their `icmp://` form, once and idempotently.
+
+### Consequences
+
+- Adding a method is adding one file, one endpoint variant, and one dispatch arm; the monitor,
+  the store, and the page do not change.
+- `--show-config` prints each target with only the keys of its method, and the output parses
+  back into the same targets.
+- Per-target `timeout_ms` and `interval_ms` replace the global `set_timeout` on the prober:
+  the timeout belongs to the request.
+- The identity of a history changes on the first writable open of a database written by the
+  previous version. An older binary reading the rewritten database would key the same target
+  twice; the release notes state it and a backup removes it.
+- `ProbeError` must be decided per method, which FR-20 to FR-22 and INV-5 now state.
+
+### Alternatives considered
+
+- A `method` column with a composite primary key: rejected, because every read path, link,
+  export, and filter would need to carry two fields for one concept.
+- Four separate monitors: rejected, because one history, one page, and one process per NAS is
+  the product.
+- One `Probe` per target chosen at startup with `Box<dyn Probe>`: rejected, because the
+  dispatch is static and an enum keeps the call path visible.
+
+## ADR-0024 — Use rustls, a hand-written DNS codec and socket2 instead of an async stack
+
+**Status:** accepted · **Date:** 2026-11-14
+
+### Context
+
+HTTPS needs TLS, DNS needs a message codec, and interface-bound TCP needs a socket created by
+hand. The obvious libraries bring constraints: `hickory-resolver` 0.26 requires Rust 1.88 and a
+tokio runtime, while the project declares `rust-version = "1.75"` and runs one synchronous
+thread per target; `openssl` would add a C dependency to a binary that must stay statically
+linked; `aws-lc-rs` would add cmake and NASM to the build of the container image.
+
+### Decision
+
+- TLS: `rustls` 0.23 with `default-features = false` and the `ring` provider, roots from
+  `webpki-roots` compiled into the binary, ALPN `http/1.1`, verification not configurable.
+- DNS: a hand-written codec in `probe/dns.rs` for the question and the answer, over one UDP
+  socket, with the system resolver used only when a target names no server.
+- TCP with an interface: `socket2` for a socket that can be bound before connecting, with the
+  platform-specific bind kept in `probe/interface.rs`.
+
+### Consequences
+
+- The project stays on Rust 1.75, synchronous, and single-binary; the musl container build
+  still works (a C compiler is already in the builder for `ring`).
+- The binary grows by the TLS stack and the root list; INV-8 (no runtime dependency) holds
+  because everything is compiled in.
+- The trust store is ours: a corporate proxy that re-signs traffic requires a rebuild, and the
+  system store is not consulted. Recorded in FR-14.
+- The DNS codec is our surface: bounds, pointer loops, and malformed messages are ours to get
+  right, and the tests pin them.
+- The system-resolver path cannot tell a missing name from an unreachable resolver; a target
+  that needs the distinction names its resolver (FR-21).
+
+### Alternatives considered
+
+- `hickory-resolver`: rejected, Rust 1.88 and a tokio runtime for one question.
+- System TLS (`openssl`, `native-tls`): rejected, a C dependency and a runtime library in a
+  static binary.
+- `rustls` with `aws-lc-rs`: rejected, cmake and NASM in the image build.
+- Reading `/etc/resolv.conf` ourselves: deferred, it reintroduces platform code for a case the
+  explicit resolver already covers.

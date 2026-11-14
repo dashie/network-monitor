@@ -112,9 +112,10 @@ C4Container
 | Component | Responsibility | Published contract |
 |---|---|---|
 | `cli` | Parse the command line, dispatch the subcommand, map every option to a configuration override, set the exit code | `clap` definition, `Command` enum |
-| `config` | Load the TOML file, validate it, merge defaults, file, and overrides into one effective configuration | `Config`, `TargetSpec`, `ConfigError` |
-| `probe` | Execute one ICMP echo request for a target through an interface and classify the outcome | `Probe` trait, `Verdict`, `ProbeError` |
-| `probe::interface` | Resolve an interface name to the platform handle and bind the socket to it | `bind_socket(fd, interface)` per platform |
+| `config` | Load the TOML file, validate it, merge defaults, file, and overrides into one effective configuration | `Config`, `Target`, `TargetSpec`, `ConfigError` |
+| `probe` | Dispatch one reachability check to the transport its endpoint names, and classify the outcome | `Probe` trait, `Endpoint`, `Method`, `Verdict`, `ProbeError`, `Prober` |
+| `probe::icmp`, `probe::tcp`, `probe::dns`, `probe::http` | One transport each: an echo request, a TCP connect, a DNS question, an HTTP request | `IcmpProbe`, `TcpProbe`, `DnsProbe`, `HttpProbe` |
+| `probe::interface` | Validate an interface name and bind a socket to it | `validate`, `bind_socket` per platform |
 | `monitor` | Supervise one interval loop per target, decide whether a transition occurred, reload the configuration file, dispatch transitions to the store | `run(config, prober, store, shutdown, reload)` |
 | `reload` | Compare the configuration file with the last accepted content and report a change | `Watcher`, `Change`, `POLL_INTERVAL` |
 | `web` | Serve the read-only timeline, the per-target detail page, and a health check | `bind`, `serve`, `page`, `target_page` |
@@ -127,14 +128,14 @@ C4Container
 ### `config`
 
 - **Input:** an optional TOML file and the command-line overrides.
-- **Output:** an immutable `Config` with global defaults resolved and every target validated, or a `ConfigError` naming the offending key.
+- **Output:** an immutable `Config` with global defaults resolved, every target carrying its `Endpoint`, interface, label, timeout, and interval, or a `ConfigError` naming the offending key.
 - **Guarantees:** the merge order is `command line > file > default`; no value is invented at probe time; validation (positive interval and timeout, parseable IP, existing interface when privileged checks are possible) happens before the first probe.
 
 ### `probe`
 
-- **Input:** a target address and an optional interface name.
+- **Input:** an `Endpoint` (method plus parameters), an optional interface name, and the timeout of the target. The interface applies to `icmp` and `tcp`; the configuration refuses it on the other methods.
 - **Output:** `Verdict::Up { rtt }`, `Verdict::Down`, or `ProbeError::Local { reason }`.
-- **Guarantees:** one echo request per call; the wait is bounded by `timeout_ms` for the whole probe, and every wait is shortened to what is left of that budget, so packets from other hosts and from the session's other targets — a raw ICMP socket receives them all — can delay the verdict by the gap between two packets but never postpone it; a reply from a different address or with a different identifier is discarded; a local failure (socket, permission, interface) is never reported as `Down`.
+- **Guarantees:** one check per call; the wait is bounded by the timeout of the request, never by state inside the prober, so two targets of one process may use different timeouts; `icmp` shortens every wait to what is left of its budget, so packets from other hosts — a raw ICMP socket receives them all — can delay the verdict but never postpone it, and a reply from a different address or identifier is discarded; `tcp` opens and closes one connection without sending a byte; `dns` sends one question and bounds the answer buffer; `http` sends one `GET` and bounds the head; a local failure (socket, permission, interface, unresolvable name, malformed answer) is never reported as `Down`. The one documented exception is the DNS system resolver, which offers no portable way to tell a missing name from an unreachable resolver and therefore reports both as `Down`.
 
 ### `store`
 
@@ -176,6 +177,11 @@ C4Container
 ### Data model
 
 Two tables, owned exclusively by the `store` component. Timestamps are UTC epoch milliseconds.
+The key of a target is its canonical string — `icmp://1.1.1.1`, `tcp://1.1.1.1:443`,
+`dns://example.com@9.9.9.9`, `https://example.com/health` — so a method change or another
+port is another target. A writable open rewrites the bare addresses a previous version wrote
+into their `icmp://` form, once and idempotently; the read-only open the page uses never
+writes (INV-10).
 
 ```sql
 PRAGMA journal_mode = WAL;
@@ -188,7 +194,7 @@ CREATE TABLE IF NOT EXISTS schema_meta (
 
 CREATE TABLE IF NOT EXISTS events (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    target         TEXT    NOT NULL,   -- IP address, canonical form
+    target         TEXT    NOT NULL,   -- canonical key: method scheme + endpoint
     interface      TEXT,               -- null when the default route was used
     previous_state TEXT    NOT NULL,   -- 'unknown' | 'up' | 'down'
     state          TEXT    NOT NULL,   -- 'up' | 'down'
@@ -200,7 +206,7 @@ CREATE INDEX IF NOT EXISTS events_target_time
     ON events (target, occurred_at_ms);
 
 CREATE TABLE IF NOT EXISTS targets (
-    target            TEXT PRIMARY KEY,
+    target            TEXT PRIMARY KEY,   -- the same canonical key
     interface         TEXT,
     label             TEXT,
     current_state     TEXT    NOT NULL,   -- 'unknown' | 'up' | 'down'
@@ -251,7 +257,7 @@ Takeaway: the write path is one transaction per transition, and the read path ne
 
 - **Local development.** `cargo run -- monitor --config ./network-monitor.toml`, database at `./network-monitor.db`, raw sockets through `sudo` on macOS and Linux or an elevated shell on Windows.
 - **Bare host.** The release binary copied anywhere on `PATH`, the configuration in `/etc/network-monitor/config.toml`, the database in `/var/lib/network-monitor/events.db`, supervised by systemd, launchd, or the Windows scheduler. The binary requires `CAP_NET_RAW` or `root`.
-- **Container.** A multi-stage image builds the static musl binary and copies it onto a minimal base, together with a default configuration that probes the container's loopback so a bare `docker run` starts. The build uses the `release-dev` profile (thin LTO, parallel codegen) and a cached `target` directory, so a source change does not recompile every dependency; `PROFILE=release` produces the published artifact. The process runs as the container user with `--cap-drop ALL --cap-add NET_RAW`, the configuration mounted read-only over the default when real targets are needed, and a volume for the database. No port is published: the page, when the command adds `--listen`, binds the host address directly through host networking. Host networking (`network_mode: host`) is required when a target is bound to a physical interface, because a bridge container only sees its own `eth0`.
+- **Container.** A multi-stage image builds the static musl binary and copies it onto a minimal base, together with a default configuration that probes the container's loopback so a bare `docker run` starts. The build uses the `release-dev` profile (thin LTO, parallel codegen) and a cached `target` directory, so a source change does not recompile every dependency; `PROFILE=release` produces the published artifact. The process runs as the container user with `--cap-drop ALL --cap-add NET_RAW`, the configuration mounted read-only over the default when real targets are needed, a volume for the database, and certificate roots compiled into the binary for HTTPS targets. No port is published: the page, when the command adds `--listen`, binds the host address directly through host networking. Host networking (`network_mode: host`) is required when a target is bound to a physical interface, because a bridge container only sees its own `eth0`.
 - **QNAP Container Station.** A project from [docker-compose.yml](../docker-compose.yml) that builds and runs the generic image with restart policy `unless-stopped`, host networking, and the named `network-monitor-data` volume as the database. The configuration is not a file on the NAS: it is the `content` of the project's `monitor-config` config, which compose copies into the container over `/etc/network-monitor/config.toml`, so the whole deployment is one YAML and the image stays reusable. The volume must be a local share, not a network share. Build and deployment — including a Docker context that points at the NAS so the image is built there — are in [DEVELOPER-GUIDE.md](./DEVELOPER-GUIDE.md#container-and-qnap-deployment).
 - **Configuration sources.** The TOML file, then the command line. In the container the file arrives as a compose config object mounted over the default path, and the compose `command` passes only what has no key in the file — `--config` and `--listen`. There is no environment-variable layer.
 - **Upgrades.** Replace the binary or image and restart. The schema is migrated on open; a rollback to an older binary against a newer schema is refused, so the database must be backed up before a downgrade. `import` restores the disconnection history into a fresh database after a redeploy: it does not know the labels and the interfaces, which the next probe of the monitor writes back from the configuration.
@@ -328,9 +334,9 @@ enforced or verified.
 
 - `INV-1`: A target never has two consecutive events with the same `state`. Enforced by `monitor::state::transition`, verified by its unit tests and by the end-to-end test in `tests/monitor_e2e.rs`.
 - `INV-2`: Every configuration key has a command-line override, and the precedence is `command line > file > default`. Enforced by the `config` merge function, verified by a test that walks every key.
-- `INV-3`: The monitor, the store, and the query depend on the `Probe` contract only; no test requires raw sockets or privileges. Enforced by module visibility, verified by the suite running in an unprivileged container.
+- `INV-3`: The monitor, the store, and the query depend on the `Probe` contract only, and each method is one module behind it; no test requires raw sockets or privileges. Enforced by module visibility, verified by the suite running in an unprivileged container and by `cargo test --lib probe::<method>` running one transport alone.
 - `INV-4`: The event database is readable while the monitor writes. Enforced by WAL mode and a single writer, verified by an integration test with a concurrent reader.
-- `INV-5`: A local probe failure is never persisted as a state change. Enforced by the `Verdict`/`ProbeError` split, verified by a test that feeds `LocalError` for several cycles.
+- `INV-5`: A local probe failure is never persisted as a state change. Enforced by the `Verdict`/`ProbeError` split, per method, verified by a test that feeds `LocalError` for several cycles and by the per-method classification tests. One documented exception: the DNS system resolver reports an unreachable resolver as `Down`, because `getaddrinfo` does not expose the cause; a target that needs the distinction names its resolver (FR-21).
 - `INV-6`: Timestamps are stored as UTC epoch milliseconds and converted only for presentation. Enforced by the column types, verified by a store test under a non-UTC `TZ`.
 - `INV-7`: The event and the current state of a target are committed in the same transaction. Enforced by the store write function, verified by a test that interrupts the writer after `BEGIN`.
 - `INV-8`: The release binary has no dependency beyond the platform C runtime, and SQLite is compiled in. Enforced by the static build, verified by the `ldd` check in CI.

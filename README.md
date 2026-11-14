@@ -1,12 +1,12 @@
 # network-monitor
 
-Event-based ICMP reachability monitor with per-interface probes, TOML configuration, and an embedded SQLite history.
+Event-based reachability monitor with ICMP, TCP, DNS, and HTTP checks, per-interface probes, TOML configuration, and an embedded SQLite history.
 
 ## Overview
 
-`network-monitor` answers one narrow question continuously and cheaply: is this IP address reachable right now, from this interface?
+`network-monitor` answers one narrow question continuously and cheaply: is this target reachable right now, from this interface?
 
-It reads a TOML configuration listing the addresses to watch, sends one ICMP echo request to each address on a configurable interval — the same check `ping` performs — and can bind the probe to a named interface, exactly like `ping -I eth1 1.1.1.1`. When no interface is configured the operating system routing table decides, so the probe leaves through the default interface.
+A target is a method plus what it checks: an ICMP echo request to an address, a TCP connection to a port, a DNS record that must resolve, or an HTTP status that must fall inside an expectation. ICMP and TCP probes can be bound to a named interface, exactly like `ping -I eth1 1.1.1.1`; when no interface is configured the operating system routing table decides, so the probe leaves through the default interface.
 
 Unlike a ping loop or an uptime checker that samples every probe, it writes to the database only when a target changes state: one record when a target stops answering and one when it answers again. The history therefore grows with the number of incidents, not with the number of probes.
 
@@ -58,18 +58,37 @@ label = "cloudflare-dns"
 
 [[targets]]
 ip = "192.168.1.1"          # no interface: the default-route interface is used
+
+# One example per method; see network-monitor.toml for every key and its default.
+[[targets]]
+method = "tcp"
+host = "1.1.1.1"            # address or name
+port = 443
+label = "cloudflare-https"
+
+[[targets]]
+method = "dns"
+name = "example.com"        # resolved by the system resolver
+resolver = "9.9.9.9"        # optional: ask this server instead
+label = "example-via-quad9"
+
+[[targets]]
+method = "http"
+url = "https://example.com/health"   # up when the status is 200-399 by default
+label = "example-health"
 ```
 
 ## Status
 
-**Alpha.** The feature set in [docs/PRODUCT.md](docs/PRODUCT.md) is implemented and covered by the test suite: layered configuration with live reload, ICMP probing with per-interface binding, event-only SQLite persistence, querying while monitoring runs, retention, and a read-only web page with 24 h state bands, per-target statistics, the latest disconnections, and a 30-day per-target view. The container image builds and probes with only `NET_RAW` added.
+**Alpha.** The feature set in [docs/PRODUCT.md](docs/PRODUCT.md) is implemented and covered by the test suite: layered configuration with live reload, four probe methods — ICMP, TCP, DNS, and HTTP/HTTPS — with per-interface binding for the first two, event-only SQLite persistence, querying while monitoring runs, retention, and a read-only web page with 24 h state bands, per-target statistics, the latest disconnections, and a 30-day per-target view. The container image builds and probes with only `NET_RAW` added; HTTPS verification uses roots compiled into the binary.
 
-Not done yet: the Windows raw-socket path is written but not exercised on a Windows host, IPv6 targets are deferred, and no binary is published as a release.
+Not done yet: the Windows raw-socket path is written but not exercised on a Windows host, IPv6 targets are deferred, HTTP checks do not follow redirects, and no binary is published as a release.
 
 ## Documentation
 
 | Document | Purpose |
 |---|---|
+| [docs/USER-GUIDE.md](docs/USER-GUIDE.md) | Install, configure, operate, troubleshoot — the manual to hand to a user |
 | [docs/PRODUCT.md](docs/PRODUCT.md) | Users, scope, functional requirements, business rules |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | arc42 structure, C4 views, component contracts, invariants |
 | [docs/ADR.md](docs/ADR.md) | Architecture decisions and their rationale |

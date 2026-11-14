@@ -501,6 +501,23 @@ fn parse_hours(value: &str) -> Option<u8> {
     page::WINDOWS.contains(&hours).then_some(hours)
 }
 
+/// Percent-encode a value carried in a query, so a target key survives the link.
+///
+/// Every character outside the unreserved set is escaped: a key such as
+/// `https://example.com/a?b=1` must not lose its `?` and `&` to the query parser.
+pub(crate) fn encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 /// Decode the escapes a browser puts in a query value.
 fn decode(value: &str) -> String {
     let bytes = value.as_bytes();
@@ -629,6 +646,22 @@ mod tests {
         let now = 10 * DAY_MS;
         let window = resolve_window(Some(now - 1_000), Some(now), None, now);
         assert_eq!(window.to_ms - window.from_ms, MIN_SPAN_MS);
+    }
+
+    #[test]
+    fn a_target_key_survives_the_query_it_is_written_into() {
+        let key = "https://example.com/a?b=1&c=2#fragment";
+        let encoded = encode(key);
+
+        assert_eq!(
+            encoded,
+            "https%3A%2F%2Fexample.com%2Fa%3Fb%3D1%26c%3D2%23fragment"
+        );
+        assert_eq!(decode(&encoded), key);
+        assert_eq!(
+            parse_query(&format!("target={encoded}")).target.as_deref(),
+            Some(key)
+        );
     }
 
     #[test]

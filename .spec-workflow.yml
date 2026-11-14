@@ -1,0 +1,28 @@
+# spec-driven workflow profile — see the spec-workflow skill
+plan_dir: tech-plans
+draft_dir: ""
+archive_dir: tech-plans/archive
+number_width: 3
+
+quality:
+  all: "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test"
+  tests: "cargo test"
+  lint: "cargo clippy --all-targets -- -D warnings"
+  types: "cargo check"
+
+docs:
+  architecture: docs/ARCHITECTURE.md
+  decisions: docs/ADR.md
+  glossary: docs/GLOSSARY.md
+  product: docs/PRODUCT.md
+  user_guide: docs/USER-GUIDE.md
+  developer_guide: docs/DEVELOPER-GUIDE.md
+
+version:
+  file: Cargo.toml
+  field: version
+  bump: plan
+
+git:
+  allow_writes: false
+  commit_convention: conventional

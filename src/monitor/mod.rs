@@ -68,15 +68,13 @@ impl Supervisor {
             let store = Arc::clone(&self.store);
             let stop = Shutdown::new();
             let worker_stop = stop.clone();
-            let interval = self.config.interval;
             let previous = initial_states
-                .get(&target.ip.to_string())
+                .get(&target.key())
                 .copied()
                 .unwrap_or(TargetState::Unknown);
 
-            let handle = thread::spawn(move || {
-                monitor_target(target, prober, store, interval, previous, worker_stop)
-            });
+            let handle =
+                thread::spawn(move || monitor_target(target, prober, store, previous, worker_stop));
             self.workers.push(Worker { stop, handle });
         }
         Ok(())
@@ -187,7 +185,6 @@ impl Supervisor {
 
         self.stop_workers();
         self.config = next;
-        self.prober.set_timeout(self.config.timeout);
         self.retention_days
             .store(self.config.retention_days, Ordering::Relaxed);
         self.start_workers()?;
@@ -285,14 +282,17 @@ fn monitor_target(
     target: Target,
     prober: Arc<dyn Probe>,
     store: Arc<Mutex<Store>>,
-    interval: Duration,
     mut previous: TargetState,
     shutdown: Shutdown,
 ) -> Result<(), RunError> {
     let name = target.display();
 
     while !shutdown::stopped(&shutdown) {
-        let outcome = prober.probe(target.ip, target.interface.as_deref());
+        let outcome = prober.probe(
+            &target.endpoint,
+            target.interface.as_deref(),
+            target.timeout,
+        );
 
         match &outcome {
             Ok(verdict) => logging::debug(Some(&name), &format!("verdict {verdict:?}")),
@@ -301,7 +301,7 @@ fn monitor_target(
 
         if let Some(transition) = state::transition(previous, &outcome) {
             let event = Event {
-                target: target.ip.to_string(),
+                target: target.key(),
                 interface: target.interface.clone(),
                 label: target.label.clone(),
                 previous_state: transition.from,
@@ -319,7 +319,7 @@ fn monitor_target(
             logging::info(Some(&name), &describe(&transition));
         }
 
-        pause(interval, &shutdown);
+        pause(target.interval, &shutdown);
     }
 
     Ok(())

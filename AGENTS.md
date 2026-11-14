@@ -60,6 +60,12 @@ Rules for these documents:
      same three columns as the map above. Keep them outside the managed block so an
      update of this file never drops them. -->
 
+| Document | What it defines | Update it when |
+|---|---|---|
+| [docs/USER-GUIDE.md](./docs/USER-GUIDE.md) | Install, configure, operate, and troubleshoot: the manual handed to a user | A user-visible behaviour, a configuration key, a command, or an operating step changes |
+| [docs/UPTIME-KUMA-IMPORT.md](./docs/UPTIME-KUMA-IMPORT.md) | Runbook for importing an Uptime Kuma history | The import format or the Kuma procedure changes |
+| [NOTES.md](./NOTES.md) | Deployment notes: compose and `docker run` against a Docker context | A deployment step changes |
+
 <!-- skill:block:agents-engineering-principles before="## Git standards" -->
 ## Engineering principles
 

@@ -581,3 +581,39 @@ fn serving_never_writes_to_the_database() {
     };
     assert_eq!(before, after);
 }
+
+/// A key that carries a scheme and a query survives both the link the page generates and
+/// the `?target=` round trip that opens its detail page.
+#[test]
+fn a_url_shaped_key_survives_the_link_and_the_query() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("events.db");
+    let key = "https://example.com/a?b=1&c=2";
+    {
+        let mut store = Store::open_rw(&database).unwrap();
+        store
+            .record_transition(&event(
+                key,
+                TargetState::Unknown,
+                TargetState::Up,
+                now_ms() - 60_000,
+            ))
+            .expect("the transition is recorded");
+    }
+    let server = start(&database);
+
+    let (status, page) = server.get("/");
+    assert_eq!(status, 200);
+    assert!(
+        page.contains("target=https%3A%2F%2Fexample.com%2Fa%3Fb%3D1%26c%3D2"),
+        "the lane link must encode the key"
+    );
+
+    let (status, detail) =
+        server.get("/target?target=https%3A%2F%2Fexample.com%2Fa%3Fb%3D1%26c%3D2");
+    assert_eq!(status, 200, "the encoded key must open its target");
+    assert!(
+        detail.contains("https://example.com/a?b=1&amp;c=2"),
+        "the address of the target is shown escaped"
+    );
+}

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::config::{Overrides, Target};
+use crate::config::{Overrides, TargetSpec};
 
 /// Event-based ICMP reachability monitor.
 #[derive(Debug, Parser)]
@@ -38,7 +38,9 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "DAYS")]
     pub retention_days: Option<u64>,
 
-    /// Target as IP[,interface=NAME][,label=NAME]; repeatable, replaces the file list
+    /// Target as [method:]address[,key=value]… — `1.1.1.1`, `tcp:1.1.1.1:443`,
+    /// `dns:example.com@9.9.9.9`, `http:https://example.com/`; repeatable, replaces the
+    /// file list
     #[arg(long = "target", global = true, value_name = "SPEC")]
     pub targets: Vec<String>,
 
@@ -138,7 +140,7 @@ impl Cli {
             let mut parsed = Vec::with_capacity(self.targets.len());
             for spec in &self.targets {
                 parsed.push(
-                    Target::parse_spec(spec)
+                    TargetSpec::parse_spec(spec)
                         .map_err(|reason| format!("invalid --target '{spec}': {reason}"))?,
                 );
             }

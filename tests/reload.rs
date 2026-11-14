@@ -51,13 +51,19 @@ fn write_config(config_path: &Path, database: &Path, interval_ms: u64, targets: 
 }
 
 fn start(config_path: &Path, database: &Path) -> Running {
+    start_with_probe(config_path, database).0
+}
+
+/// The same start, keeping the fake so a test can inspect the probes it received.
+fn start_with_probe(config_path: &Path, database: &Path) -> (Running, Arc<FakeProbe>) {
     let loaded = config::load(Some(config_path)).unwrap().unwrap();
     let settings = Config::resolve(Some(loaded.config), Overrides::default()).unwrap();
     let reload = Reload {
         path: config_path.to_path_buf(),
         overrides: Overrides::default(),
     };
-    let prober: Arc<dyn Probe> = Arc::new(FakeProbe::always(up()));
+    let probe = Arc::new(FakeProbe::always(up()));
+    let prober: Arc<dyn Probe> = probe.clone();
     let store = Arc::new(Mutex::new(Store::open_rw(database).unwrap()));
     let stop = Shutdown::new();
     let running = stop.clone();
@@ -65,9 +71,30 @@ fn start(config_path: &Path, database: &Path) -> Running {
     let handle =
         thread::spawn(move || monitor::run(&settings, prober, store, &running, Some(reload)));
 
-    Running {
-        stop,
-        handle: Some(handle),
+    (
+        Running {
+            stop,
+            handle: Some(handle),
+        },
+        probe,
+    )
+}
+
+fn wait_for_probe(probe: &FakeProbe, key: &str, timeout: Duration, within: Duration) {
+    let deadline = Instant::now() + within;
+    loop {
+        if probe
+            .calls()
+            .iter()
+            .any(|call| call.endpoint.to_string() == key && call.timeout == timeout)
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no probe of {key} with a {timeout:?} timeout within {within:?}"
+        );
+        thread::sleep(Duration::from_millis(25));
     }
 }
 
@@ -181,4 +208,40 @@ fn a_changed_database_path_is_reported_and_not_applied() {
     );
     let store = Store::open_ro(&database).unwrap();
     assert_eq!(store.states().unwrap().len(), 1);
+}
+
+/// A reload replaces the method and the timeout of a target without a restart.
+#[test]
+fn a_changed_target_takes_its_new_method_and_timeout() {
+    let (_directory, config_path, database) = temp_paths();
+    write_config(&config_path, &database, 30, &["127.0.0.1"]);
+
+    let (running, probe) = start_with_probe(&config_path, &database);
+    wait_for_probe(
+        &probe,
+        "icmp://127.0.0.1",
+        Duration::from_millis(500),
+        Duration::from_secs(5),
+    );
+
+    std::fs::write(
+        &config_path,
+        format!(
+            "interval_ms = 30\ntimeout_ms = 500\ndatabase = \"{}\"\n\n\
+             [[targets]]\nmethod = \"tcp\"\nhost = \"127.0.0.1\"\nport = 9\n\
+             timeout_ms = 120\n",
+            database.display()
+        ),
+    )
+    .unwrap();
+
+    wait_for_probe(
+        &probe,
+        "tcp://127.0.0.1:9",
+        Duration::from_millis(120),
+        Duration::from_secs(15),
+    );
+
+    assert!(!running.is_finished(), "the monitor keeps running");
+    running.stop();
 }

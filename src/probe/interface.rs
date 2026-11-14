@@ -5,6 +5,31 @@
 
 use std::ffi::CString;
 
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(windows)]
+use std::os::windows::io::AsRawSocket;
+
+/// Bind a socket to an interface, taking the socket so callers stay platform-free.
+#[cfg(unix)]
+pub fn bind_socket(socket: &socket2::Socket, name: &str) -> Result<(), String> {
+    bind(socket.as_raw_fd(), name)
+}
+
+/// Bind a socket to an interface, taking the socket so callers stay platform-free.
+#[cfg(windows)]
+pub fn bind_socket(socket: &socket2::Socket, name: &str) -> Result<(), String> {
+    bind(socket.as_raw_socket() as usize, name)
+}
+
+/// Bind a socket to an interface, taking the socket so callers stay platform-free.
+#[cfg(not(any(unix, windows)))]
+pub fn bind_socket(_socket: &socket2::Socket, name: &str) -> Result<(), String> {
+    Err(format!(
+        "interface binding to '{name}' is not implemented for this operating system"
+    ))
+}
+
 /// Verify that the configured interface can be used, before the first probe (BR-5).
 #[cfg(unix)]
 pub fn validate(name: &str) -> Result<(), String> {

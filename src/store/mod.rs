@@ -260,6 +260,7 @@ impl Store {
         let mut store = Store { connection };
         store.connection.execute_batch(PRAGMAS)?;
         store.migrate()?;
+        store.rewrite_legacy_target_keys()?;
         Ok(store)
     }
 
@@ -607,12 +608,33 @@ impl Store {
             .map_err(StoreError::from)
     }
 
-    /// Resolve a target address or label to the target address it identifies.
+    /// Give the targets recorded before methods existed their canonical key.
+    ///
+    /// A bare `1.1.1.1` becomes `icmp://1.1.1.1`, so an older history keeps its identity
+    /// and its lanes. Idempotent: a key that already carries a scheme is left alone.
+    pub fn rewrite_legacy_target_keys(&self) -> Result<usize, StoreError> {
+        let events = self.connection.execute(
+            "UPDATE events SET target = 'icmp://' || target WHERE instr(target, '://') = 0",
+            [],
+        )?;
+        let targets = self.connection.execute(
+            "UPDATE targets SET target = 'icmp://' || target WHERE instr(target, '://') = 0",
+            [],
+        )?;
+        Ok(events + targets)
+    }
+
+    /// Resolve a target key or label to the key it identifies.
+    ///
+    /// A bare address is accepted for an ICMP target, because that is how the tool was
+    /// used before methods existed.
     pub fn resolve_target(&self, needle: &str) -> Result<Option<String>, StoreError> {
         let target = self
             .connection
             .query_row(
-                "SELECT target FROM targets WHERE target = ?1 OR label = ?1 LIMIT 1",
+                "SELECT target FROM targets
+                 WHERE target = ?1 OR label = ?1 OR target = 'icmp://' || ?1
+                 LIMIT 1",
                 params![needle],
                 |row| row.get::<_, String>(0),
             )
@@ -628,7 +650,7 @@ impl Store {
                 "SELECT target, interface, label, current_state,
                         first_seen_at_ms, last_change_at_ms, last_rtt_us
                  FROM targets
-                 WHERE target = ?1 OR label = ?1
+                 WHERE target = ?1 OR label = ?1 OR target = 'icmp://' || ?1
                  LIMIT 1",
                 params![needle],
                 |row| {

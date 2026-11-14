@@ -9,6 +9,7 @@ use std::fmt::Write as _;
 use crate::store::{DailyDrops, TargetStateRow, TimelineSegment};
 use crate::time::format_rfc3339;
 
+use super::encode;
 use super::page::{
     escape, footer, format_runs, format_span, runs_stats, up_for, ICON_LINKS, LOCALIZE_SCRIPT,
     MARK, REFRESH_SECONDS, STYLE,
@@ -133,7 +134,8 @@ fn period_links(target: &str, period_days: u32) -> String {
         };
         let _ = write!(
             output,
-            "<a href=\"/target?target={target}&days={days}d\"{current}>{days}d</a>"
+            "<a href=\"/target?target={encoded}&days={days}d\"{current}>{days}d</a>",
+            encoded = encode(target),
         );
     }
     output.push_str("</nav>");

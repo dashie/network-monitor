@@ -6,10 +6,10 @@
 //! localised `ping` output (ADR-0003).
 
 use std::net::Ipv4Addr;
-use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
-use super::{Probe, ProbeError, Verdict};
+use super::{Endpoint, Probe, ProbeError, Verdict};
 
 /// Identifier carried in every echo request of this process.
 fn identifier() -> u16 {
@@ -17,33 +17,38 @@ fn identifier() -> u16 {
 }
 
 /// Raw ICMP echo prober.
+///
+/// Stateless apart from the sequence number: the timeout arrives with every request, so
+/// two targets of the same process may use different ones.
+#[derive(Default)]
 pub struct IcmpProbe {
-    timeout_micros: AtomicU64,
     sequence: AtomicU16,
 }
 
 impl IcmpProbe {
-    pub fn new(timeout: Duration) -> Self {
+    pub fn new() -> Self {
         IcmpProbe {
-            timeout_micros: AtomicU64::new(timeout.as_micros() as u64),
             sequence: AtomicU16::new(1),
         }
-    }
-
-    fn timeout(&self) -> Duration {
-        Duration::from_micros(self.timeout_micros.load(Ordering::Relaxed))
     }
 }
 
 impl Probe for IcmpProbe {
-    fn probe(&self, target: Ipv4Addr, interface: Option<&str>) -> Result<Verdict, ProbeError> {
-        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
-        exchange(target, interface, self.timeout(), identifier(), sequence)
-    }
+    fn probe(
+        &self,
+        endpoint: &Endpoint,
+        interface: Option<&str>,
+        timeout: Duration,
+    ) -> Result<Verdict, ProbeError> {
+        let Endpoint::Icmp { address } = endpoint else {
+            return Err(ProbeError::local(format!(
+                "the icmp prober cannot check a {} target",
+                endpoint.method()
+            )));
+        };
 
-    fn set_timeout(&self, timeout: Duration) {
-        self.timeout_micros
-            .store(timeout.as_micros() as u64, Ordering::Relaxed);
+        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
+        exchange(*address, interface, timeout, identifier(), sequence)
     }
 }
 

@@ -314,7 +314,7 @@ impl Row {
             return None;
         }
 
-        let target = fields[0].trim().to_string();
+        let target = canonical_target(fields[0].trim());
         if target.is_empty() {
             return None;
         }
@@ -350,6 +350,15 @@ impl Row {
             occurred_at_ms: self.occurred_at_ms,
             rtt_us: self.rtt_us,
         }
+    }
+}
+
+/// A target name written before methods existed is an ICMP target.
+fn canonical_target(value: &str) -> String {
+    if value.is_empty() || value.contains("://") {
+        value.to_string()
+    } else {
+        format!("icmp://{value}")
     }
 }
 
@@ -587,12 +596,19 @@ mod tests {
     fn a_row_carries_the_target_what_happened_and_when() {
         let row = Row::parse("1.1.1.1,cloudflare,eth0,down,2026-11-08T00:00:00.000Z,")
             .expect("a valid row");
-        assert_eq!(row.target, "1.1.1.1");
+        assert_eq!(row.target, "icmp://1.1.1.1");
         assert_eq!(row.label.as_deref(), Some("cloudflare"));
         assert_eq!(row.interface.as_deref(), Some("eth0"));
         assert_eq!(row.state, TargetState::Down);
         assert_eq!(row.occurred_at_ms, 1_794_096_000_000);
         assert_eq!(row.rtt_us, None);
+    }
+
+    #[test]
+    fn a_target_that_already_carries_its_method_is_kept() {
+        let row = Row::parse("tcp://1.1.1.1:443,,,up,2026-11-08T00:00:00.000Z,12500")
+            .expect("a valid row");
+        assert_eq!(row.target, "tcp://1.1.1.1:443");
     }
 
     #[test]

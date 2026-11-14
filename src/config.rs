@@ -2,6 +2,11 @@
 //!
 //! The merge order is fixed by BR-3 and INV-2: command line, then file, then the
 //! built-in default. [`Config::resolve`] is the only function that knows that order.
+//!
+//! A target is a [`Method`](crate::probe::Method) plus its parameters, and every common
+//! property — `interface`, `label`, `timeout_ms`, `interval_ms` — is optional per target.
+//! [`TargetSpec`] is what the file or the command line states; [`Target`] is the same
+//! target with the global defaults applied, and its key is its identity in the database.
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
@@ -10,11 +15,17 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::probe::http::parse_url;
+use crate::probe::{Endpoint, Method, RecordType, StatusMatch};
+
 pub const DEFAULT_CONFIG_FILE: &str = "network-monitor.toml";
 pub const DEFAULT_INTERVAL_MS: u64 = 5_000;
 pub const DEFAULT_TIMEOUT_MS: u64 = 2_000;
 pub const DEFAULT_DATABASE: &str = "network-monitor.db";
 pub const DEFAULT_RETENTION_DAYS: u64 = 0;
+
+/// The ways a target can be checked.
+const METHODS: [&str; 4] = ["icmp", "tcp", "dns", "http"];
 
 /// The configuration file as written on disk. Every key is optional so that the
 /// same struct can express a partial file.
@@ -29,83 +40,317 @@ pub struct FileConfig {
 }
 
 /// One `[[targets]]` entry of the configuration file.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+///
+/// `method` selects which of the remaining keys apply (INV-2: every key has a flag too);
+/// a key that belongs to another method is refused rather than ignored.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FileTarget {
-    pub ip: String,
+    /// `icmp` (the default), `tcp`, `dns`, or `http`.
+    pub method: Option<String>,
+    /// Address of an `icmp` target.
+    pub ip: Option<String>,
+    /// Host of a `tcp` target: an address or a name.
+    pub host: Option<String>,
+    /// Port of a `tcp` target.
+    pub port: Option<u16>,
+    /// Name a `dns` target must resolve.
+    pub name: Option<String>,
+    /// Server a `dns` target asks; the system resolver is used when absent.
+    pub resolver: Option<String>,
+    /// `A` (the default) or `AAAA`.
+    pub record: Option<String>,
+    /// URL of an `http` target.
+    pub url: Option<String>,
+    /// Statuses that count as `up`: a class such as `2xx`, or exact codes.
+    pub expect_status: Option<Vec<String>>,
     pub interface: Option<String>,
     pub label: Option<String>,
+    pub timeout_ms: Option<u64>,
+    pub interval_ms: Option<u64>,
 }
 
-/// A validated target.
+/// A target as the file or the command line states it, before the global defaults apply.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Target {
-    pub ip: Ipv4Addr,
+pub struct TargetSpec {
+    pub endpoint: Endpoint,
     pub interface: Option<String>,
     pub label: Option<String>,
+    pub timeout_ms: Option<u64>,
+    pub interval_ms: Option<u64>,
+}
+
+/// A validated target: the endpoint plus the effective timeout and interval.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    pub endpoint: Endpoint,
+    pub interface: Option<String>,
+    pub label: Option<String>,
+    pub timeout: Duration,
+    pub interval: Duration,
 }
 
 impl Target {
-    /// Parse the command-line form `IP[,interface=NAME][,label=NAME]`.
-    pub fn parse_spec(spec: &str) -> Result<Target, String> {
-        let mut parts = spec.split(',');
-        let address = parts.next().unwrap_or("").trim();
-        if address.is_empty() {
-            return Err("the target address is missing".to_string());
+    /// The identity of the target in the database and on the page.
+    pub fn key(&self) -> String {
+        self.endpoint.to_string()
+    }
+
+    /// Name used in logs: the label when present, the key otherwise.
+    pub fn display(&self) -> String {
+        match &self.label {
+            Some(label) => label.clone(),
+            None => self.key(),
         }
-        let ip = parse_ipv4(address)?;
+    }
+
+    pub fn method(&self) -> Method {
+        self.endpoint.method()
+    }
+
+    /// Apply the global defaults and refuse what the method cannot do.
+    fn resolve(
+        spec: TargetSpec,
+        index: usize,
+        timeout: Duration,
+        interval: Duration,
+    ) -> Result<Target, ConfigError> {
+        if spec.interface.is_some() && !matches!(spec.endpoint.method(), Method::Icmp | Method::Tcp)
+        {
+            return Err(invalid(
+                format!("targets[{index}].interface"),
+                format!("is not supported by the {} method", spec.endpoint.method()),
+            ));
+        }
+
+        Ok(Target {
+            endpoint: spec.endpoint,
+            interface: spec.interface,
+            label: spec.label,
+            timeout: millis(spec.timeout_ms, format!("targets[{index}].timeout_ms"))?
+                .unwrap_or(timeout),
+            interval: millis(spec.interval_ms, format!("targets[{index}].interval_ms"))?
+                .unwrap_or(interval),
+        })
+    }
+}
+
+impl TargetSpec {
+    /// Parse the command-line form `[method:]address[,key=value]…`.
+    pub fn parse_spec(spec: &str) -> Result<TargetSpec, String> {
+        let mut parts = spec.split(',');
+        let head = parts.next().unwrap_or("").trim();
+        if head.is_empty() {
+            return Err("the target is missing".to_string());
+        }
+        let (method, address) = split_method(head)?;
 
         let mut interface = None;
         let mut label = None;
+        let mut timeout_ms = None;
+        let mut interval_ms = None;
+        let mut record = None;
+        let mut expect: Vec<String> = Vec::new();
+
         for part in parts {
             let part = part.trim();
             if part.is_empty() {
                 continue;
             }
-            let (key, value) = part
+            let (name, value) = part
                 .split_once('=')
                 .ok_or_else(|| format!("expected key=value in target attribute '{part}'"))?;
+            let name = name.trim();
             let value = value.trim();
             if value.is_empty() {
-                return Err(format!("attribute '{}' has an empty value", key.trim()));
+                return Err(format!("attribute '{name}' has an empty value"));
             }
-            match key.trim() {
+            match name {
                 "interface" => interface = Some(value.to_string()),
                 "label" => label = Some(value.to_string()),
+                "timeout_ms" => timeout_ms = Some(parse_millis(value)?),
+                "interval_ms" => interval_ms = Some(parse_millis(value)?),
+                "record" => record = Some(value.to_string()),
+                "expect" => expect.push(value.to_string()),
                 other => {
                     return Err(format!(
-                        "unknown target attribute '{other}' (expected interface or label)"
+                        "unknown target attribute '{other}' (expected interface, label, \
+                         timeout_ms, interval_ms, record or expect)"
                     ))
                 }
             }
         }
 
-        Ok(Target {
-            ip,
+        let endpoint = match method {
+            Method::Icmp => {
+                reject_attributes(method, record.is_some(), !expect.is_empty())?;
+                Endpoint::Icmp {
+                    address: parse_ipv4(address)?,
+                }
+            }
+            Method::Tcp => {
+                reject_attributes(method, record.is_some(), !expect.is_empty())?;
+                let (host, port) = address
+                    .rsplit_once(':')
+                    .ok_or_else(|| "a tcp target is host:port".to_string())?;
+                Endpoint::Tcp {
+                    host: parse_host(host)?,
+                    port: parse_port(port)?,
+                }
+            }
+            Method::Dns => {
+                reject_attributes(method, record.is_some() && false, !expect.is_empty())?;
+                let (name, resolver) = match address.split_once('@') {
+                    Some((name, resolver)) => (name, Some(parse_ipv4_resolver(resolver)?)),
+                    None => (address, None),
+                };
+                Endpoint::Dns {
+                    name: parse_host(name)?,
+                    resolver,
+                    record: match record.as_deref() {
+                        None => RecordType::A,
+                        Some(text) => parse_record(text)?,
+                    },
+                }
+            }
+            Method::Http => {
+                if record.is_some() {
+                    return Err("'record' does not apply to the http method".to_string());
+                }
+                let parts = parse_url(address)?;
+                let expect = if expect.is_empty() {
+                    StatusMatch::default()
+                } else {
+                    StatusMatch::parse(&expect)?
+                };
+                Endpoint::Http {
+                    scheme: parts.scheme,
+                    host: parts.host,
+                    port: parts.port,
+                    target: parts.target,
+                    expect,
+                }
+            }
+        };
+
+        Ok(TargetSpec {
+            endpoint,
             interface,
             label,
+            timeout_ms,
+            interval_ms,
         })
     }
 
-    /// Name used in logs and query output: the label when present, the address otherwise.
-    pub fn display(&self) -> String {
-        match &self.label {
-            Some(label) => label.clone(),
-            None => self.ip.to_string(),
-        }
-    }
+    fn from_file(target: FileTarget, index: usize) -> Result<TargetSpec, ConfigError> {
+        let key = |name: &str| format!("targets[{index}].{name}");
 
-    fn from_file(target: FileTarget, index: usize) -> Result<Target, ConfigError> {
-        let ip = parse_ipv4(&target.ip).map_err(|reason| ConfigError::Invalid {
-            key: format!("targets[{index}].ip"),
-            reason,
-        })?;
-        let interface = target.interface.filter(|value| !value.trim().is_empty());
-        let label = target.label.filter(|value| !value.trim().is_empty());
-        Ok(Target {
-            ip,
-            interface,
-            label,
+        let method = match clean(target.method).as_deref() {
+            None => Method::Icmp,
+            Some(name) => parse_method(name).map_err(|reason| invalid(key("method"), reason))?,
+        };
+
+        let reject = |name: &str, present: bool| -> Result<(), ConfigError> {
+            if present {
+                Err(invalid(
+                    key(name),
+                    format!("does not apply to the {method} method"),
+                ))
+            } else {
+                Ok(())
+            }
+        };
+
+        let endpoint = match method {
+            Method::Icmp => {
+                reject("host", target.host.is_some())?;
+                reject("port", target.port.is_some())?;
+                reject("name", target.name.is_some())?;
+                reject("resolver", target.resolver.is_some())?;
+                reject("record", target.record.is_some())?;
+                reject("url", target.url.is_some())?;
+                reject("expect_status", target.expect_status.is_some())?;
+                let ip = required(target.ip.as_deref(), &key("ip"))?;
+                Endpoint::Icmp {
+                    address: parse_ipv4(ip).map_err(|reason| invalid(key("ip"), reason))?,
+                }
+            }
+            Method::Tcp => {
+                reject("ip", target.ip.is_some())?;
+                reject("name", target.name.is_some())?;
+                reject("resolver", target.resolver.is_some())?;
+                reject("record", target.record.is_some())?;
+                reject("url", target.url.is_some())?;
+                reject("expect_status", target.expect_status.is_some())?;
+                let host = required(target.host.as_deref(), &key("host"))?;
+                let port = target
+                    .port
+                    .ok_or_else(|| invalid(key("port"), "is required"))?;
+                Endpoint::Tcp {
+                    host: parse_host(host).map_err(|reason| invalid(key("host"), reason))?,
+                    port: if port == 0 {
+                        return Err(invalid(key("port"), "must be between 1 and 65535"));
+                    } else {
+                        port
+                    },
+                }
+            }
+            Method::Dns => {
+                reject("ip", target.ip.is_some())?;
+                reject("host", target.host.is_some())?;
+                reject("port", target.port.is_some())?;
+                reject("url", target.url.is_some())?;
+                reject("expect_status", target.expect_status.is_some())?;
+                let name = required(target.name.as_deref(), &key("name"))?;
+                let resolver = match clean(target.resolver) {
+                    Some(text) => Some(
+                        parse_ipv4_resolver(&text)
+                            .map_err(|reason| invalid(key("resolver"), reason))?,
+                    ),
+                    None => None,
+                };
+                let record = match clean(target.record) {
+                    Some(text) => {
+                        parse_record(&text).map_err(|reason| invalid(key("record"), reason))?
+                    }
+                    None => RecordType::A,
+                };
+                Endpoint::Dns {
+                    name: parse_host(name).map_err(|reason| invalid(key("name"), reason))?,
+                    resolver,
+                    record,
+                }
+            }
+            Method::Http => {
+                reject("ip", target.ip.is_some())?;
+                reject("host", target.host.is_some())?;
+                reject("port", target.port.is_some())?;
+                reject("name", target.name.is_some())?;
+                reject("resolver", target.resolver.is_some())?;
+                reject("record", target.record.is_some())?;
+                let url = required(target.url.as_deref(), &key("url"))?;
+                let parts = parse_url(url).map_err(|reason| invalid(key("url"), reason))?;
+                let expect = match &target.expect_status {
+                    Some(parts) => StatusMatch::parse(parts)
+                        .map_err(|reason| invalid(key("expect_status"), reason))?,
+                    None => StatusMatch::default(),
+                };
+                Endpoint::Http {
+                    scheme: parts.scheme,
+                    host: parts.host,
+                    port: parts.port,
+                    target: parts.target,
+                    expect,
+                }
+            }
+        };
+
+        Ok(TargetSpec {
+            endpoint,
+            interface: clean(target.interface),
+            label: clean(target.label),
+            timeout_ms: target.timeout_ms,
+            interval_ms: target.interval_ms,
         })
     }
 }
@@ -127,7 +372,7 @@ pub struct Overrides {
     pub timeout_ms: Option<u64>,
     pub database: Option<PathBuf>,
     pub retention_days: Option<u64>,
-    pub targets: Option<Vec<Target>>,
+    pub targets: Option<Vec<TargetSpec>>,
 }
 
 #[derive(Debug, Error)]
@@ -198,10 +443,7 @@ impl Config {
             .or(file.interval_ms)
             .unwrap_or(DEFAULT_INTERVAL_MS);
         if interval_ms == 0 {
-            return Err(ConfigError::Invalid {
-                key: "interval_ms".to_string(),
-                reason: "must be greater than zero".to_string(),
-            });
+            return Err(invalid("interval_ms", "must be greater than zero"));
         }
 
         let timeout_ms = overrides
@@ -209,10 +451,7 @@ impl Config {
             .or(file.timeout_ms)
             .unwrap_or(DEFAULT_TIMEOUT_MS);
         if timeout_ms == 0 {
-            return Err(ConfigError::Invalid {
-                key: "timeout_ms".to_string(),
-                reason: "must be greater than zero".to_string(),
-            });
+            return Err(invalid("timeout_ms", "must be greater than zero"));
         }
 
         let database = overrides
@@ -225,26 +464,33 @@ impl Config {
             .or(file.retention_days)
             .unwrap_or(DEFAULT_RETENTION_DAYS);
 
-        let targets = match overrides.targets {
-            Some(targets) => targets,
+        let specs = match overrides.targets {
+            Some(specs) => specs,
             None => file
                 .targets
                 .map(|targets| {
                     targets
                         .into_iter()
                         .enumerate()
-                        .map(|(index, target)| Target::from_file(target, index))
+                        .map(|(index, target)| TargetSpec::from_file(target, index))
                         .collect()
                 })
                 .transpose()?
                 .unwrap_or_default(),
         };
 
+        let interval = Duration::from_millis(interval_ms);
+        let timeout = Duration::from_millis(timeout_ms);
+        let targets = specs
+            .into_iter()
+            .enumerate()
+            .map(|(index, spec)| Target::resolve(spec, index, timeout, interval))
+            .collect::<Result<Vec<_>, _>>()?;
         ensure_unique(&targets)?;
 
         Ok(Config {
-            interval: Duration::from_millis(interval_ms),
-            timeout: Duration::from_millis(timeout_ms),
+            interval,
+            timeout,
             database,
             retention_days,
             targets,
@@ -261,8 +507,12 @@ impl Config {
     }
 
     /// Render the effective configuration as TOML, for `--show-config`.
+    ///
+    /// The result parses back into the same targets: a method prints the keys it uses and
+    /// nothing else, and a timeout or interval is stated only when it differs from the
+    /// global one.
     pub fn to_toml(&self) -> String {
-        #[derive(Serialize)]
+        #[derive(Serialize, Default)]
         struct SerializableConfig {
             interval_ms: u64,
             timeout_ms: u64,
@@ -271,37 +521,192 @@ impl Config {
             targets: Vec<SerializableTarget>,
         }
 
-        #[derive(Serialize)]
+        #[derive(Serialize, Default)]
         struct SerializableTarget {
-            ip: String,
+            method: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            ip: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            host: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            port: Option<u16>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            name: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            resolver: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            record: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            url: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            expect_status: Option<Vec<String>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             interface: Option<String>,
             #[serde(skip_serializing_if = "Option::is_none")]
             label: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            timeout_ms: Option<u64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            interval_ms: Option<u64>,
         }
+
+        let targets = self
+            .targets
+            .iter()
+            .map(|target| {
+                let mut serializable = SerializableTarget {
+                    method: target.method().as_str().to_string(),
+                    ..SerializableTarget::default()
+                };
+                match &target.endpoint {
+                    Endpoint::Icmp { address } => serializable.ip = Some(address.to_string()),
+                    Endpoint::Tcp { host, port } => {
+                        serializable.host = Some(host.clone());
+                        serializable.port = Some(*port);
+                    }
+                    Endpoint::Dns {
+                        name,
+                        resolver,
+                        record,
+                    } => {
+                        serializable.name = Some(name.clone());
+                        serializable.resolver = resolver.map(|address| address.to_string());
+                        if *record != RecordType::A {
+                            serializable.record = Some(record.as_str().to_string());
+                        }
+                    }
+                    Endpoint::Http { expect, .. } => {
+                        serializable.url = Some(target.endpoint.to_string());
+                        if *expect != StatusMatch::default() {
+                            serializable.expect_status = Some(expect.specs());
+                        }
+                    }
+                }
+                serializable.interface = target.interface.clone();
+                serializable.label = target.label.clone();
+                if target.timeout != self.timeout {
+                    serializable.timeout_ms = Some(target.timeout.as_millis() as u64);
+                }
+                if target.interval != self.interval {
+                    serializable.interval_ms = Some(target.interval.as_millis() as u64);
+                }
+                serializable
+            })
+            .collect();
 
         let serializable = SerializableConfig {
             interval_ms: self.interval.as_millis() as u64,
             timeout_ms: self.timeout.as_millis() as u64,
             database: self.database.to_string_lossy().into_owned(),
             retention_days: self.retention_days,
-            targets: self
-                .targets
-                .iter()
-                .map(|target| SerializableTarget {
-                    ip: target.ip.to_string(),
-                    interface: target.interface.clone(),
-                    label: target.label.clone(),
-                })
-                .collect(),
+            targets,
         };
 
         toml::to_string_pretty(&serializable).expect("the effective configuration is serializable")
     }
 }
 
+fn invalid(key: impl Into<String>, reason: impl Into<String>) -> ConfigError {
+    ConfigError::Invalid {
+        key: key.into(),
+        reason: reason.into(),
+    }
+}
+
+/// The text of an optional key, trimmed, with an empty value read as absent.
+fn clean(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn required<'a>(value: Option<&'a str>, key: &str) -> Result<&'a str, ConfigError> {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => Ok(value),
+        None => Err(invalid(key, "is required")),
+    }
+}
+
+fn millis(value: Option<u64>, key: String) -> Result<Option<Duration>, ConfigError> {
+    match value {
+        None => Ok(None),
+        Some(0) => Err(invalid(key, "must be greater than zero")),
+        Some(ms) => Ok(Some(Duration::from_millis(ms))),
+    }
+}
+
+fn parse_millis(text: &str) -> Result<u64, String> {
+    match text.parse::<u64>() {
+        Ok(0) | Err(_) => Err(format!("'{text}' is not a positive number of milliseconds")),
+        Ok(ms) => Ok(ms),
+    }
+}
+
+fn parse_method(name: &str) -> Result<Method, String> {
+    match name {
+        "icmp" => Ok(Method::Icmp),
+        "tcp" => Ok(Method::Tcp),
+        "dns" => Ok(Method::Dns),
+        "http" => Ok(Method::Http),
+        other => Err(format!(
+            "unknown method '{other}' (expected icmp, tcp, dns or http)"
+        )),
+    }
+}
+
+/// Split `[method:]address`; a head without a known method is an ICMP address.
+fn split_method(head: &str) -> Result<(Method, &str), String> {
+    if let Some((name, rest)) = head.split_once(':') {
+        if METHODS.contains(&name) {
+            return Ok((parse_method(name)?, rest.trim()));
+        }
+    }
+    Ok((Method::Icmp, head))
+}
+
+fn reject_attributes(method: Method, record: bool, expect: bool) -> Result<(), String> {
+    if record {
+        return Err(format!("'record' does not apply to the {method} method"));
+    }
+    if expect {
+        return Err(format!("'expect' does not apply to the {method} method"));
+    }
+    Ok(())
+}
+
+fn parse_host(text: &str) -> Result<String, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("the host is missing".to_string());
+    }
+    if !text.is_ascii() {
+        return Err("the host must be written in ASCII".to_string());
+    }
+    if text.contains([':', '/', '@']) || text.chars().any(char::is_whitespace) {
+        return Err(format!("'{text}' is not a host name or address"));
+    }
+    Ok(text.to_string())
+}
+
+fn parse_port(text: &str) -> Result<u16, String> {
+    match text.trim().parse::<u16>() {
+        Ok(0) | Err(_) => Err(format!("'{text}' is not a port between 1 and 65535")),
+        Ok(port) => Ok(port),
+    }
+}
+
+fn parse_record(text: &str) -> Result<RecordType, String> {
+    match text.trim().to_ascii_uppercase().as_str() {
+        "A" => Ok(RecordType::A),
+        "AAAA" => Ok(RecordType::Aaaa),
+        other => Err(format!(
+            "'{other}' is not a record type (expected A or AAAA)"
+        )),
+    }
+}
+
 fn parse_ipv4(text: &str) -> Result<Ipv4Addr, String> {
-    match text.parse::<IpAddr>() {
+    match text.trim().parse::<IpAddr>() {
         Ok(IpAddr::V4(ip)) => Ok(ip),
         Ok(IpAddr::V6(_)) => Err(format!(
             "'{text}' is an IPv6 address; only IPv4 targets are supported in this version"
@@ -310,14 +715,27 @@ fn parse_ipv4(text: &str) -> Result<Ipv4Addr, String> {
     }
 }
 
-/// Two entries for the same address would share one row in the event database.
+fn parse_ipv4_resolver(text: &str) -> Result<IpAddr, String> {
+    match text.trim().parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => Ok(IpAddr::V4(ip)),
+        Ok(IpAddr::V6(_)) => Err(format!(
+            "'{text}' is an IPv6 address; only IPv4 resolvers are supported in this version"
+        )),
+        Err(_) => Err(format!("'{text}' is not an IP address")),
+    }
+}
+
+/// Two entries with the same key would share one row in the event database.
 fn ensure_unique(targets: &[Target]) -> Result<(), ConfigError> {
     for (index, target) in targets.iter().enumerate() {
-        if targets[..index].iter().any(|other| other.ip == target.ip) {
-            return Err(ConfigError::Invalid {
-                key: format!("targets[{index}].ip"),
-                reason: format!("duplicate target {}", target.ip),
-            });
+        if targets[..index]
+            .iter()
+            .any(|other| other.key() == target.key())
+        {
+            return Err(invalid(
+                format!("targets[{index}]"),
+                format!("duplicate target {}", target.key()),
+            ));
         }
     }
     Ok(())
@@ -326,9 +744,32 @@ fn ensure_unique(targets: &[Target]) -> Result<(), ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::probe::Scheme;
 
     fn overrides() -> Overrides {
         Overrides::default()
+    }
+
+    fn file(targets: Vec<FileTarget>) -> FileConfig {
+        FileConfig {
+            targets: Some(targets),
+            ..FileConfig::default()
+        }
+    }
+
+    fn icmp(ip: &str) -> FileTarget {
+        FileTarget {
+            ip: Some(ip.to_string()),
+            ..FileTarget::default()
+        }
+    }
+
+    fn resolve(file: Option<FileConfig>) -> Config {
+        Config::resolve(file, overrides()).unwrap()
+    }
+
+    fn keys(config: &Config) -> Vec<String> {
+        config.targets.iter().map(Target::key).collect()
     }
 
     #[test]
@@ -342,23 +783,236 @@ mod tests {
     }
 
     #[test]
-    fn parses_target_specs() {
-        let target = Target::parse_spec("1.1.1.1,interface=eth1,label=cloudflare").unwrap();
-        assert_eq!(target.ip, Ipv4Addr::new(1, 1, 1, 1));
-        assert_eq!(target.interface.as_deref(), Some("eth1"));
-        assert_eq!(target.label.as_deref(), Some("cloudflare"));
+    fn an_icmp_target_is_the_default_method() {
+        let config = resolve(Some(file(vec![icmp("1.1.1.1")])));
+        assert_eq!(config.targets[0].method(), Method::Icmp);
+        assert_eq!(config.targets[0].key(), "icmp://1.1.1.1");
+        assert_eq!(
+            config.targets[0].timeout,
+            Duration::from_millis(DEFAULT_TIMEOUT_MS)
+        );
+    }
+
+    #[test]
+    fn every_method_is_read_from_the_file() {
+        let config = resolve(Some(file(vec![
+            FileTarget {
+                method: Some("tcp".to_string()),
+                host: Some("1.1.1.1".to_string()),
+                port: Some(443),
+                label: Some("https".to_string()),
+                ..FileTarget::default()
+            },
+            FileTarget {
+                method: Some("dns".to_string()),
+                name: Some("example.com".to_string()),
+                resolver: Some("9.9.9.9".to_string()),
+                record: Some("AAAA".to_string()),
+                ..FileTarget::default()
+            },
+            FileTarget {
+                method: Some("http".to_string()),
+                url: Some("https://example.com/health".to_string()),
+                expect_status: Some(vec!["204".to_string()]),
+                ..FileTarget::default()
+            },
+            icmp("1.0.0.1"),
+        ])));
+
+        assert_eq!(
+            keys(&config),
+            vec![
+                "tcp://1.1.1.1:443",
+                "dns://example.com@9.9.9.9",
+                "https://example.com/health",
+                "icmp://1.0.0.1"
+            ]
+        );
+        assert_eq!(
+            config.targets[1].endpoint,
+            Endpoint::Dns {
+                name: "example.com".to_string(),
+                resolver: Some("9.9.9.9".parse().unwrap()),
+                record: RecordType::Aaaa,
+            }
+        );
+        assert_eq!(
+            config.targets[2].endpoint,
+            Endpoint::Http {
+                scheme: Scheme::Https,
+                host: "example.com".to_string(),
+                port: 443,
+                target: "/health".to_string(),
+                expect: StatusMatch {
+                    classes: Vec::new(),
+                    codes: vec![204],
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn a_key_of_another_method_is_refused() {
+        let error = Config::resolve(
+            Some(file(vec![FileTarget {
+                method: Some("tcp".to_string()),
+                ip: Some("1.1.1.1".to_string()),
+                port: Some(443),
+                ..FileTarget::default()
+            }])),
+            overrides(),
+        )
+        .unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("targets[0].ip"), "unexpected: {message}");
+        assert!(message.contains("does not apply"), "unexpected: {message}");
+    }
+
+    #[test]
+    fn a_missing_key_is_named() {
+        let error = Config::resolve(
+            Some(file(vec![FileTarget {
+                method: Some("tcp".to_string()),
+                host: Some("1.1.1.1".to_string()),
+                ..FileTarget::default()
+            }])),
+            overrides(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("targets[0].port"));
+    }
+
+    #[test]
+    fn per_target_timeout_and_interval_override_the_globals() {
+        let config = resolve(Some(file(vec![FileTarget {
+            ip: Some("1.1.1.1".to_string()),
+            timeout_ms: Some(1_500),
+            interval_ms: Some(1_000),
+            ..FileTarget::default()
+        }])));
+        assert_eq!(config.targets[0].timeout, Duration::from_millis(1_500));
+        assert_eq!(config.targets[0].interval, Duration::from_millis(1_000));
+        assert_eq!(config.timeout, Duration::from_millis(DEFAULT_TIMEOUT_MS));
+    }
+
+    #[test]
+    fn a_zero_per_target_timeout_is_refused() {
+        let error = Config::resolve(
+            Some(file(vec![FileTarget {
+                ip: Some("1.1.1.1".to_string()),
+                timeout_ms: Some(0),
+                ..FileTarget::default()
+            }])),
+            overrides(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("targets[0].timeout_ms"));
+    }
+
+    #[test]
+    fn interface_is_refused_for_dns_and_http() {
+        for target in [
+            FileTarget {
+                method: Some("dns".to_string()),
+                name: Some("example.com".to_string()),
+                interface: Some("eth1".to_string()),
+                ..FileTarget::default()
+            },
+            FileTarget {
+                method: Some("http".to_string()),
+                url: Some("http://example.com/".to_string()),
+                interface: Some("eth1".to_string()),
+                ..FileTarget::default()
+            },
+        ] {
+            let error = Config::resolve(Some(file(vec![target])), overrides()).unwrap_err();
+            assert!(
+                error.to_string().contains("interface"),
+                "unexpected: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_keys_are_refused() {
+        // The same endpoint written twice, and the same URL with the default port stated.
+        let error = Config::resolve(
+            Some(file(vec![
+                FileTarget {
+                    method: Some("http".to_string()),
+                    url: Some("https://example.com/".to_string()),
+                    ..FileTarget::default()
+                },
+                FileTarget {
+                    method: Some("http".to_string()),
+                    url: Some("https://example.com:443/".to_string()),
+                    ..FileTarget::default()
+                },
+            ])),
+            overrides(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("duplicate target"));
+    }
+
+    #[test]
+    fn parses_the_command_line_grammar() {
+        let specs = [
+            "icmp:1.1.1.1,interface=eth1,label=dns,timeout_ms=1500,interval_ms=1000",
+            "tcp:1.1.1.1:443,label=https",
+            "dns:example.com@9.9.9.9,record=AAAA",
+            "http:https://example.com/health,expect=204,expect=3xx",
+        ];
+        let config = Config::resolve(
+            None,
+            Overrides {
+                targets: Some(
+                    specs
+                        .iter()
+                        .map(|spec| TargetSpec::parse_spec(spec).unwrap())
+                        .collect(),
+                ),
+                ..Overrides::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            keys(&config),
+            vec![
+                "icmp://1.1.1.1",
+                "tcp://1.1.1.1:443",
+                "dns://example.com@9.9.9.9",
+                "https://example.com/health"
+            ]
+        );
+        assert_eq!(config.targets[0].interface.as_deref(), Some("eth1"));
+        assert_eq!(config.targets[0].timeout, Duration::from_millis(1_500));
+        assert_eq!(config.targets[0].interval, Duration::from_millis(1_000));
+    }
+
+    #[test]
+    fn a_bare_address_is_an_icmp_target() {
+        let spec = TargetSpec::parse_spec("1.1.1.1,label=cloudflare").unwrap();
+        assert_eq!(spec.endpoint.method(), Method::Icmp);
+        assert_eq!(spec.endpoint.to_string(), "icmp://1.1.1.1");
+        assert_eq!(spec.label.as_deref(), Some("cloudflare"));
     }
 
     #[test]
     fn rejects_unknown_target_attributes() {
-        assert!(Target::parse_spec("1.1.1.1,color=red").is_err());
-        assert!(Target::parse_spec("1.1.1.1,interface=").is_err());
-        assert!(Target::parse_spec("").is_err());
+        assert!(TargetSpec::parse_spec("1.1.1.1,color=red").is_err());
+        assert!(TargetSpec::parse_spec("1.1.1.1,interface=").is_err());
+        assert!(TargetSpec::parse_spec("").is_err());
+        assert!(TargetSpec::parse_spec("tcp:1.1.1.1:443,record=A").is_err());
+        assert!(TargetSpec::parse_spec("ftp:1.1.1.1").is_err());
     }
 
     #[test]
-    fn rejects_ipv6_targets() {
-        assert!(Target::parse_spec("2001:db8::1").is_err());
+    fn rejects_ipv6_targets_and_resolvers() {
+        assert!(TargetSpec::parse_spec("2001:db8::1").is_err());
+        assert!(TargetSpec::parse_spec("dns:example.com@2001:db8::1").is_err());
     }
 
     #[test]
@@ -374,40 +1028,41 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_targets() {
-        let target = || FileTarget {
-            ip: "1.1.1.1".to_string(),
-            interface: None,
-            label: None,
-        };
-        let result = Config::resolve(
-            Some(FileConfig {
-                targets: Some(vec![target(), target()]),
-                ..FileConfig::default()
-            }),
-            overrides(),
-        );
-        assert!(matches!(result, Err(ConfigError::Invalid { .. })));
-    }
+    fn serializes_the_effective_configuration_so_it_parses_back() {
+        let config = resolve(Some(file(vec![
+            FileTarget {
+                ip: Some("1.1.1.1".to_string()),
+                interface: Some("eth1".to_string()),
+                timeout_ms: Some(1_500),
+                ..FileTarget::default()
+            },
+            FileTarget {
+                method: Some("dns".to_string()),
+                name: Some("example.com".to_string()),
+                resolver: Some("9.9.9.9".to_string()),
+                record: Some("AAAA".to_string()),
+                ..FileTarget::default()
+            },
+            FileTarget {
+                method: Some("http".to_string()),
+                url: Some("https://example.com/health?deep=1".to_string()),
+                expect_status: Some(vec!["204".to_string(), "3xx".to_string()]),
+                label: Some("site".to_string()),
+                ..FileTarget::default()
+            },
+        ])));
 
-    #[test]
-    fn serializes_the_effective_configuration() {
-        let config = Config::resolve(
-            Some(FileConfig {
-                targets: Some(vec![FileTarget {
-                    ip: "1.1.1.1".to_string(),
-                    interface: Some("eth1".to_string()),
-                    label: None,
-                }]),
-                ..FileConfig::default()
-            }),
-            overrides(),
-        )
-        .unwrap();
         let text = config.to_toml();
-        assert!(text.contains("interval_ms = 5000"));
         assert!(text.contains("[[targets]]"));
-        assert!(text.contains("interface = \"eth1\""));
+        assert!(text.contains("method = \"dns\""));
+        assert!(text.contains("timeout_ms = 1500"));
+
+        let parsed = parse(&text, Path::new("roundtrip.toml")).unwrap();
+        let again = resolve(Some(parsed));
+        assert_eq!(keys(&again), keys(&config));
+        assert_eq!(again.targets[0].timeout, Duration::from_millis(1_500));
+        assert_eq!(again.targets[1].endpoint, config.targets[1].endpoint);
+        assert_eq!(again.targets[2].endpoint, config.targets[2].endpoint);
     }
 
     #[test]

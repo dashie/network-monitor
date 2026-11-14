@@ -87,6 +87,20 @@ configs:
       ip = "192.168.1.1"
       label = "gateway"
 
+      # Websites: one GET every 30 s, up when the status is in the default 200-399
+      # range (a refusal, a timeout, or a TLS failure is down).
+      [[targets]]
+      method = "http"
+      url = "https://www.xthema.it"
+      interval_ms = 30000
+      label = "xthema-it"
+
+      [[targets]]
+      method = "http"
+      url = "https://www.h7labs.it"
+      interval_ms = 30000
+      label = "h7labs-it"
+
 volumes:
   # Explicit name: without it Compose prefixes the volume with the project name and
   # the monitor would start from an empty history.

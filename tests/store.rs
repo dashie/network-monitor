@@ -97,3 +97,48 @@ fn labels_resolve_to_their_target() {
     );
     assert!(store.resolve_target("unknown").unwrap().is_none());
 }
+
+/// A history written before methods existed keeps its identity: the address alone becomes
+/// the ICMP key once, and asking for the address still finds the target.
+#[test]
+fn a_history_written_before_methods_existed_keeps_its_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("events.db");
+
+    {
+        let mut store = Store::open_rw(&path).unwrap();
+        store.record_transition(&event(0)).unwrap();
+    }
+
+    let rewritten = {
+        let store = Store::open_rw(&path).unwrap();
+        store.states().unwrap()
+    };
+    assert_eq!(rewritten.len(), 1);
+    assert_eq!(rewritten[0].target, "icmp://1.1.1.1");
+
+    // Idempotent: a later open leaves the key alone.
+    let again = {
+        let store = Store::open_rw(&path).unwrap();
+        store.states().unwrap()
+    };
+    assert_eq!(again[0].target, "icmp://1.1.1.1");
+    assert_eq!(store_events(&path).len(), 1, "no event is lost");
+
+    let store = Store::open_ro(&path).unwrap();
+    assert_eq!(
+        store.resolve_target("1.1.1.1").unwrap().as_deref(),
+        Some("icmp://1.1.1.1"),
+        "an old query by address still resolves the target"
+    );
+}
+
+fn store_events(path: &std::path::Path) -> Vec<String> {
+    let store = Store::open_ro(path).unwrap();
+    store
+        .events(&EventFilter::default())
+        .unwrap()
+        .into_iter()
+        .map(|row| row.target)
+        .collect()
+}

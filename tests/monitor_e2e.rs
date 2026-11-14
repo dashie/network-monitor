@@ -8,9 +8,20 @@ use std::time::{Duration, Instant};
 use network_monitor::config::{Config, FileConfig, FileTarget, Overrides};
 use network_monitor::monitor;
 use network_monitor::probe::fake::{up, FakeProbe};
-use network_monitor::probe::{Probe, ProbeError, Verdict};
+use network_monitor::probe::{Endpoint, Probe, ProbeError, Verdict};
 use network_monitor::shutdown::Shutdown;
 use network_monitor::store::{EventFilter, Store, TargetState};
+
+/// The endpoint and the timeout a direct fake call uses.
+fn loopback() -> Endpoint {
+    Endpoint::Icmp {
+        address: Ipv4Addr::LOCALHOST,
+    }
+}
+
+fn timeout() -> Duration {
+    Duration::from_millis(2_000)
+}
 
 #[test]
 fn a_local_error_is_not_a_state_change() {
@@ -20,9 +31,9 @@ fn a_local_error_is_not_a_state_change() {
         Ok(up()),
     ]);
 
-    assert_eq!(probe.probe(Ipv4Addr::LOCALHOST, None).unwrap(), up());
-    assert!(probe.probe(Ipv4Addr::LOCALHOST, None).is_err());
-    assert_eq!(probe.probe(Ipv4Addr::LOCALHOST, None).unwrap(), up());
+    assert_eq!(probe.probe(&loopback(), None, timeout()).unwrap(), up());
+    assert!(probe.probe(&loopback(), None, timeout()).is_err());
+    assert_eq!(probe.probe(&loopback(), None, timeout()).unwrap(), up());
 }
 
 #[test]
@@ -106,9 +117,9 @@ fn test_config(database: &std::path::Path) -> Config {
             database: Some(database.to_string_lossy().into_owned()),
             retention_days: None,
             targets: Some(vec![FileTarget {
-                ip: "127.0.0.1".to_string(),
-                interface: None,
+                ip: Some("127.0.0.1".to_string()),
                 label: Some("loop-test".to_string()),
+                ..FileTarget::default()
             }]),
         }),
         Overrides::default(),
@@ -133,4 +144,69 @@ fn wait_for_events(database: &std::path::Path, expected: usize, timeout: Duratio
         );
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// Each worker uses the timeout and the interval of its own target, not the globals.
+#[test]
+fn every_target_uses_its_own_timeout_and_interval() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("events.db");
+    let config = Config::resolve(
+        Some(FileConfig {
+            interval_ms: Some(10),
+            timeout_ms: Some(500),
+            database: Some(database.to_string_lossy().into_owned()),
+            targets: Some(vec![
+                FileTarget {
+                    ip: Some("127.0.0.1".to_string()),
+                    timeout_ms: Some(150),
+                    interval_ms: Some(10),
+                    ..FileTarget::default()
+                },
+                FileTarget {
+                    ip: Some("127.0.0.2".to_string()),
+                    timeout_ms: Some(400),
+                    interval_ms: Some(2_000),
+                    ..FileTarget::default()
+                },
+            ]),
+            ..FileConfig::default()
+        }),
+        Overrides::default(),
+    )
+    .unwrap();
+
+    let probe = Arc::new(FakeProbe::always(up()));
+    let prober: Arc<dyn Probe> = probe.clone();
+    let store = Arc::new(Mutex::new(Store::open_rw(&database).unwrap()));
+    let stop = Shutdown::new();
+    let running = stop.clone();
+    let handle = thread::spawn(move || monitor::run(&config, prober, store, &running, None));
+
+    thread::sleep(Duration::from_millis(450));
+    stop.request();
+    handle
+        .join()
+        .expect("the monitor thread does not panic")
+        .unwrap();
+
+    let calls = probe.calls();
+    let count = |key: &str| {
+        calls
+            .iter()
+            .filter(|call| call.endpoint.to_string() == key)
+            .count()
+    };
+    let fast = count("icmp://127.0.0.1");
+    let slow = count("icmp://127.0.0.2");
+
+    assert!(
+        calls
+            .iter()
+            .all(|call| call.timeout == Duration::from_millis(150)
+                || call.timeout == Duration::from_millis(400)),
+        "unexpected timeout in {calls:?}"
+    );
+    assert!(fast >= 3, "the 10 ms target was probed {fast} time(s)");
+    assert!(slow <= 2, "the 2 s target was probed {slow} time(s)");
 }

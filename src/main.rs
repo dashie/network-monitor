@@ -12,7 +12,7 @@ use network_monitor::import::{self, ImportError};
 use network_monitor::logging::{self, Level};
 use network_monitor::monitor::{self, RunError};
 use network_monitor::probe::interface;
-use network_monitor::probe::{IcmpProbe, Probe};
+use network_monitor::probe::{Probe, Prober};
 use network_monitor::query::{self, QueryError};
 use network_monitor::shutdown;
 use network_monitor::store::{Store, StoreError};
@@ -139,7 +139,7 @@ fn validate_interfaces(settings: &Config) -> Result<(), AppError> {
     for target in &settings.targets {
         if let Some(name) = &target.interface {
             interface::validate(name).map_err(|reason| {
-                AppError::Invalid(format!("interface '{name}' for {}: {reason}", target.ip))
+                AppError::Invalid(format!("interface '{name}' for {}: {reason}", target.key()))
             })?;
         }
     }
@@ -151,7 +151,7 @@ fn run_monitor(
     reload: Option<monitor::Reload>,
     listen: Option<String>,
 ) -> Result<(), AppError> {
-    let prober: Arc<dyn Probe> = Arc::new(IcmpProbe::new(settings.timeout));
+    let prober: Arc<dyn Probe> = Arc::new(Prober::new());
     let store = Arc::new(Mutex::new(Store::open_rw(&settings.database)?));
     let stop = shutdown::Shutdown::new();
 
