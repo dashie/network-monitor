@@ -33,6 +33,12 @@ const MAX_CONNECTIONS: usize = 32;
 /// How many disconnections the timeline page lists below the chart.
 const RECENT_DOWNS: u32 = 10;
 
+/// The icon of the application, embedded so the executable stays self-contained: the
+/// masthead mark, the favicon, and the PNG behind both for the browsers without SVG
+/// support.
+const ICON_SVG: &str = include_str!("../../assets/icon/icon.svg");
+const ICON_PNG: &[u8] = include_bytes!("../../assets/icon/favicon-32.png");
+
 #[derive(Debug, Error)]
 pub enum ServeError {
     #[error("invalid listen address '{address}': {reason}")]
@@ -319,6 +325,8 @@ fn handle(mut stream: TcpStream, database: &Path) {
             "ok\n",
             include_body,
         ),
+        "/icon.svg" => respond(&mut stream, 200, "image/svg+xml", ICON_SVG, include_body),
+        "/icon.png" => respond_bytes(&mut stream, 200, "image/png", ICON_PNG, include_body),
         "/favicon.ico" => respond(&mut stream, 204, "text/plain; charset=utf-8", "", true),
         _ => respond(
             &mut stream,
@@ -366,6 +374,17 @@ fn respond(
     body: &str,
     include_body: bool,
 ) {
+    respond_bytes(stream, status, content_type, body.as_bytes(), include_body);
+}
+
+/// The same response for a body that is not text, such as the favicon.
+fn respond_bytes(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    include_body: bool,
+) {
     let reason = match status {
         200 => "OK",
         204 => "No Content",
@@ -388,7 +407,7 @@ fn respond(
 
     let _ = stream.write_all(head.as_bytes());
     if include_body && !body.is_empty() {
-        let _ = stream.write_all(body.as_bytes());
+        let _ = stream.write_all(body);
     }
     let _ = stream.flush();
 }

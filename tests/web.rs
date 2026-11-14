@@ -28,8 +28,15 @@ impl Server {
         )
     }
 
-    /// The status, the headers, and the de-chunked body of a binary response.
+    /// The status, the headers, and the de-chunked body of a streamed response.
     fn get_raw(&self, target: &str) -> (u16, String, Vec<u8>) {
+        let (status, head, body) = self.get_bytes(target);
+        (status, head, dechunk(&body))
+    }
+
+    /// The status, the headers, and the body as it arrived, for a response whose
+    /// length is known in advance.
+    fn get_bytes(&self, target: &str) -> (u16, String, Vec<u8>) {
         let mut stream = TcpStream::connect(&self.address).expect("the server answers");
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
@@ -54,7 +61,7 @@ impl Server {
             .nth(1)
             .and_then(|code| code.parse().ok())
             .unwrap_or(0);
-        (status, head, dechunk(&response[split..]))
+        (status, head, response[split..].to_vec())
     }
 }
 
@@ -216,8 +223,10 @@ fn serves_the_page_with_a_band_per_state() {
         "the page lists the latest disconnections"
     );
     assert!(
-        response.contains("href=\"/export/disconnections.csv.gz\""),
-        "the page offers the full export"
+        response.contains(
+            "<a class=\"download\" href=\"/export/disconnections.csv.gz\">Download History</a>"
+        ),
+        "the page offers the full export under a plain label"
     );
     assert!(
         response.contains("and counting"),
@@ -437,6 +446,86 @@ fn an_unknown_or_missing_target_is_refused() {
 
     let (status, _) = server.get("/target");
     assert_eq!(status, 404);
+}
+
+/// What a page is showing and the selector that changes it share one line, with the
+/// selector at its end.
+#[test]
+fn the_page_context_and_its_selector_share_one_line() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, page) = server.get("/");
+    assert_eq!(status, 200);
+    assert!(page.contains("<div class=\"toolbar\">\n<p class=\"window\">"));
+    assert!(page.contains("<nav class=\"windows\" aria-label=\"Time window\">"));
+
+    let (status, detail) = server.get("/target?target=1.1.1.1");
+    assert_eq!(status, 200);
+    assert!(detail.contains(
+        "<div class=\"toolbar\"><p class=\"hint\">1.1.1.1</p>\
+         <nav class=\"windows\" aria-label=\"Period\">"
+    ));
+}
+
+/// Both pages close with the same short manual: a rule narrower than the content, then
+/// the notes. The timeline states nothing about itself above the chart.
+#[test]
+fn both_pages_close_with_a_short_manual() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, page) = server.get("/");
+    assert_eq!(status, 200);
+    assert!(
+        !page.contains(r#"<p class="hint">Times follow"#),
+        "the top of the page carries no explanation"
+    );
+    assert!(page.contains("<footer>\n<hr>\n"));
+    assert!(page.contains("A lane is one target over the chosen window"));
+    assert!(page.contains("Times follow the time zone of your browser"));
+
+    let (status, detail) = server.get("/target?target=1.1.1.1");
+    assert_eq!(status, 200);
+    assert!(detail.contains("<footer>\n<hr>\n"));
+    assert!(detail.contains("Each bar is one day of the period"));
+    assert!(detail.contains("Times follow the time zone of your browser"));
+    assert!(
+        !detail.contains("times in your time zone"),
+        "the hint under the title states the address only"
+    );
+}
+
+/// Both pages open with the mark of the application and advertise it to the browser,
+/// and the server serves it in the two formats they name: the scalable one and the
+/// PNG fallback.
+#[test]
+fn both_pages_show_the_mark_the_server_serves() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, page) = server.get("/");
+    assert_eq!(status, 200);
+    assert!(page.contains(r#"<img class="mark" src="/icon.svg" alt="" width="36" height="36">"#));
+    assert!(page.contains(r#"<h1>Network Monitor</h1>"#));
+    assert!(page.contains(r#"<p class="tagline">Reachability monitoring</p>"#));
+    assert!(page.contains(r#"type="image/svg+xml" href="/icon.svg""#));
+    assert!(page.contains(r#"type="image/png" sizes="32x32" href="/icon.png""#));
+
+    let (status, detail) = server.get("/target?target=1.1.1.1");
+    assert_eq!(status, 200);
+    assert!(detail.contains(r#"<header class="masthead"><img class="mark" src="/icon.svg""#));
+    assert!(detail.contains(r#"href="/icon.svg""#));
+
+    let (status, head, body) = server.get_bytes("/icon.svg");
+    assert_eq!(status, 200);
+    assert!(head.contains("Content-Type: image/svg+xml"));
+    assert!(body.starts_with(b"<svg"));
+
+    let (status, head, body) = server.get_bytes("/icon.png");
+    assert_eq!(status, 200);
+    assert!(head.contains("Content-Type: image/png"));
+    assert_eq!(&body[..8], b"\x89PNG\r\n\x1a\n");
 }
 
 #[test]

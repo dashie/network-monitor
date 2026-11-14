@@ -80,10 +80,17 @@ network-monitor/
 │   ├── web.rs                page, disconnection table, detail page, no writes
 │   ├── import.rs             export round trip, plain CSV, stdin, URL, duplicates
 │   └── icmp_privileged.rs    real raw-socket probe, ignored unless root
+├── assets/icon/          application icon: SVG master, its PNG renders, the favicon
 ├── docs/                 product, architecture, decisions, glossary, developer guide
 ├── .github/              commit and pull request instruction contracts
 └── .vscode/              editor settings that register those contracts
 ```
+
+The icon is authored once in `assets/icon/icon.svg`; the PNGs next to it are its renders,
+regenerated with `rsvg-convert -w 1024 -h 1024 assets/icon/icon.svg -o
+assets/icon/icon-1024.png`, and the same command at 32 px into `assets/icon/favicon-32.png`.
+The SVG and the 32 px PNG are embedded in the executable, so the server ships the masthead
+mark and the favicon without reading the disk.
 
 ## Build
 

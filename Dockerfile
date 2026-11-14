@@ -6,6 +6,7 @@ RUN apk add --no-cache build-base
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY assets ./assets
 
 # `release-dev` is `release` with thin LTO and parallel codegen: the same optimised
 # binary for practical purposes, and a link step that no longer dominates the build

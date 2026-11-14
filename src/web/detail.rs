@@ -10,7 +10,8 @@ use crate::store::{DailyDrops, TargetStateRow, TimelineSegment};
 use crate::time::format_rfc3339;
 
 use super::page::{
-    escape, format_runs, format_span, runs_stats, up_for, LOCALIZE_SCRIPT, REFRESH_SECONDS, STYLE,
+    escape, footer, format_runs, format_span, runs_stats, up_for, ICON_LINKS, LOCALIZE_SCRIPT,
+    MARK, REFRESH_SECONDS, STYLE,
 };
 use super::stats;
 
@@ -71,18 +72,24 @@ pub fn target_page(
     };
 
     let body = format!(
-        "<nav class=\"breadcrumb\" aria-label=\"Breadcrumb\">\
+        "<header class=\"masthead\">{MARK}\
+         <div>\
+         <nav class=\"breadcrumb\" aria-label=\"Breadcrumb\">\
          <a href=\"/\">All targets</a>\
          <span class=\"sep\" aria-hidden=\"true\">/</span>\
          <span aria-current=\"page\">{name}</span>\
-         </nav>\n\
+         </nav>\
          <div class=\"title\">\
          <h1>{name}</h1>\
          <span class=\"badge {state}\">{state}</span>\
          {since}\
+         </div>\
+         </div>\
+         </header>\n\
+         <div class=\"toolbar\">\
+         <p class=\"hint\">{address}{interface}</p>\
+         {periods}\
          </div>\n\
-         <p class=\"hint\">{address}{interface} · times in your time zone</p>\n\
-         {periods}\n\
          <div class=\"stats\">\
          <div class=\"stat\"><b>{total} disconnections</b><span>last {period}</span></div>\
          <div class=\"stat\"><b>{down_ms}</b><span>down time in the last {period}</span></div>\
@@ -133,6 +140,13 @@ fn period_links(target: &str, period_days: u32) -> String {
     output
 }
 
+/// The manual of the detail page, read at its foot.
+const PAGE_NOTES: [&str; 3] = [
+    "Each bar is one day of the period, as tall as the disconnections recorded in it.",
+    "Times follow the time zone of your browser; the page reloads every 30 seconds.",
+    "The period changes the window; the table lists the same days with the down time and the average up run.",
+];
+
 fn layout(title: &str, body: &str) -> String {
     format!(
         r#"<!doctype html>
@@ -142,11 +156,13 @@ fn layout(title: &str, body: &str) -> String {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="{REFRESH_SECONDS}">
 <title>{title}</title>
+{ICON_LINKS}
 <style>{STYLE}</style>
 </head>
 <body>
 <main>
 {body}
+{notes}
 </main>
 <script>
 {localize}
@@ -156,6 +172,7 @@ fn layout(title: &str, body: &str) -> String {
 "#,
         title = escape(title),
         localize = LOCALIZE_SCRIPT,
+        notes = footer(&PAGE_NOTES),
     )
 }
 

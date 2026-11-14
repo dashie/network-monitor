@@ -34,7 +34,31 @@ pub(crate) const STYLE: &str = r#"
   }
   main { max-width: 1040px; margin: 0 auto; }
   h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+  /* Both pages open with the mark and their own heading, above a hairline that
+     separates the masthead from the content. */
+  .masthead {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding-bottom: 16px;
+    margin-bottom: 18px;
+    border-bottom: 1px solid var(--rule);
+  }
+  .masthead .mark { width: 36px; height: 36px; flex: none; }
+  .masthead .tagline {
+    margin: 2px 0 0;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    opacity: 0.55;
+  }
+  .masthead .breadcrumb { margin-bottom: 6px; }
   h2 {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 12px;
     font-size: 12px;
     margin: 32px 0 10px;
     font-weight: 600;
@@ -42,14 +66,45 @@ pub(crate) const STYLE: &str = r#"
     text-transform: uppercase;
     opacity: var(--muted);
   }
+  /* The action of a section sits at the far end of its heading. */
   h2 .download {
+    margin-left: auto;
     font-size: 12px;
     font-weight: 400;
     letter-spacing: 0;
     text-transform: none;
-    margin-left: 12px;
   }
-  .hint { margin: 4px 0 20px; font-size: 13px; opacity: var(--muted); }
+  .hint { margin: 0 0 20px; font-size: 13px; opacity: var(--muted); }
+  /* What the page is showing — the window of the chart, the target of the detail
+     page — and the selector that changes it share one line, the selector on the right.
+     When they do not fit on one line they stack, both flush left. */
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin: 0 0 20px;
+  }
+  .toolbar .windows { margin: 0; }
+  .toolbar .window,
+  .toolbar .hint { margin: 0; }
+  /* The manual of a page: a short rule, never the full width, then the notes in small
+     type, quiet enough to stay out of the way of the content above. */
+  footer {
+    margin-top: 44px;
+    font-size: 12px;
+    line-height: 1.6;
+    opacity: 0.6;
+  }
+  footer hr {
+    width: 72px;
+    margin: 0 0 14px;
+    border: 0;
+    border-top: 1px solid var(--rule);
+  }
+  footer p { margin: 0 0 4px; max-width: 68ch; }
+  footer p:last-child { margin-bottom: 0; }
   .windows { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 20px; font-size: 13px; }
   .windows a {
     padding: 2px 11px;
@@ -160,6 +215,33 @@ pub(crate) const STYLE: &str = r#"
 /// How often the browser reloads a page by itself.
 pub(crate) const REFRESH_SECONDS: u32 = 30;
 
+/// The manual of the timeline, read at the foot of the page: what a lane is, how time
+/// and reloads behave, and where the history goes.
+const PAGE_NOTES: [&str; 3] = [
+    "A lane is one target over the chosen window: a break in it is a disconnection.",
+    "Times follow the time zone of your browser; the page reloads every 30 seconds.",
+    "Select a lane for the last 30 days of that target, or download the whole history as a gzipped CSV.",
+];
+
+/// The notes that close a page, each on its own line, under a short rule.
+pub(crate) fn footer(notes: &[&str]) -> String {
+    let mut output = String::from("<footer>\n<hr>\n");
+    for note in notes {
+        let _ = writeln!(output, "<p>{note}</p>");
+    }
+    output.push_str("</footer>\n");
+    output
+}
+
+/// The icon links both pages share: the scalable mark first, then the PNG the browsers
+/// without SVG support fall back to.
+pub(crate) const ICON_LINKS: &str = r#"<link rel="icon" type="image/svg+xml" href="/icon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="/icon.png">"#;
+
+/// The mark that opens the masthead, next to the heading of the page. It carries no
+/// alternative text: the heading beside it already names what it stands for.
+pub(crate) const MARK: &str = r#"<img class="mark" src="/icon.svg" alt="" width="36" height="36">"#;
+
 const HOUR_MS: i64 = 3_600_000;
 
 /// The windows the timeline offers, smallest first: the links read left to right from
@@ -265,15 +347,23 @@ pub fn page(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="{REFRESH_SECONDS}">
-<title>network-monitor</title>
+<title>Network Monitor</title>
+{ICON_LINKS}
 <style>{STYLE}</style>
 </head>
 <body>
 <main>
-<h1>network-monitor</h1>
-<p class="hint">Times follow the time zone of your browser. The page reloads every
-{REFRESH_SECONDS} s; select a lane for its last 30 days.</p>
+<header class="masthead">
+{MARK}
+<div>
+<h1>Network Monitor</h1>
+<p class="tagline">Reachability monitoring</p>
+</div>
+</header>
+<div class="toolbar">
+{span}
 {windows}
+</div>
 <div id="chart">{body}</div>
 <div class="legend">
   <span><i class="swatch" style="background:#2e7d32"></i>up</span>
@@ -281,6 +371,7 @@ pub fn page(
   <span><i class="swatch" style="background:#bdbdbd"></i>unknown</span>
 </div>
 {downs}
+{notes}
 </main>
 <script>
 {lane}
@@ -289,9 +380,11 @@ pub fn page(
 </body>
 </html>
 "#,
+        span = window_span(window),
         windows = window_links(window),
         body = body,
         downs = downs,
+        notes = footer(&PAGE_NOTES),
         lane = LANE_SCRIPT,
         localize = LOCALIZE_SCRIPT,
     )
@@ -319,7 +412,7 @@ fn window_links(window: Window) -> String {
 fn downs_table(downs: &[DownEpisode], now_ms: i64) -> String {
     let mut output = String::from(
         "<h2>Last 10 disconnections\
-         <a class=\"download\" href=\"/export/disconnections.csv.gz\">download all (csv.gz)</a>\
+         <a class=\"download\" href=\"/export/disconnections.csv.gz\">Download History</a>\
          </h2>\n<table>\n\
          <thead><tr><th>target</th><th>started</th><th class=\"num\">lasted</th></tr></thead>\n\
          <tbody>\n",
@@ -354,17 +447,20 @@ fn downs_table(downs: &[DownEpisode], now_ms: i64) -> String {
     output
 }
 
-/// The window label plus the SVG.
-fn chart(timelines: &[TargetTimeline], up_since: &HashMap<String, i64>, window: Window) -> String {
-    let mut output = String::new();
-    let _ = write!(
-        output,
-        "<p class=\"window\"><time datetime=\"{}\">{}</time> → <time datetime=\"{}\">{}</time></p>",
+/// The two instants the chart covers, in UTC for the browser to localise.
+fn window_span(window: Window) -> String {
+    format!(
+        "<p class=\"window\"><time datetime=\"{}\">{}</time> → <time datetime=\"{}\">{}</time></p>\n",
         format_rfc3339(window.from_ms),
         utc_text(window.from_ms),
         format_rfc3339(window.to_ms),
         utc_text(window.to_ms)
-    );
+    )
+}
+
+/// The SVG of the chart.
+fn chart(timelines: &[TargetTimeline], up_since: &HashMap<String, i64>, window: Window) -> String {
+    let mut output = String::new();
 
     if timelines.is_empty() {
         output.push_str("<p>No target has been probed yet. Start the monitor first.</p>");
