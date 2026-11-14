@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="30">
+<title>{title}</title>
+<link rel="icon" type="image/svg+xml" href="/icon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="/icon.png">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+<header class="masthead">
+{brand}
+<div class="target-info">
+<span class="target-identity">{identity}</span>
+<span class="target-state"><span class="badge {state}">{state}</span>{since}</span>
+</div>
+</header>
+<div class="toolbar">
+<button class="back-button">← Back</button>
+{periods}
+</div>
+<div class="stats">
+<div class="stat"><b>{total} faults</b><span>last {period}</span></div>
+<div class="stat"><b>{down_ms}</b><span>down time in the last {period}</span></div>
+<div class="stat" title="{avg_up_hint}"><b>{avg_up}</b><span>avg up run in {period} · max {longest}</span></div>
+</div>
+<h2>Disconnections per day</h2>
+{bars}
+{recent}
+{table}
+<footer>
+<hr>
+<p>Each bar is one day of the period, as tall as the faults recorded in it. Select a fault to read why it happened.</p>
+<p>Times follow the time zone of your browser; the page reloads every 30 seconds.</p>
+<p>The period changes the window; the table lists the same days with the down time and the average up run.</p>
+</footer>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

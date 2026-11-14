@@ -77,8 +77,11 @@ network-monitor/
 │   ├── import.rs         restore a history from the exported CSV (path, URL, stdin)
 │   └── web/
 │       ├── mod.rs        HTTP loop, routes, window parsing
-│       ├── page.rs       timeline page: HTML, SVG, shared stylesheet and scripts
+│       ├── page.rs       timeline page: the lanes, the chart, the tables
 │       ├── detail.rs     detail page of one target: per-day chart and table
+│       ├── templates.rs  the templates and assets of both pages: read in debug, embedded
+│       ├── templates/    page.html, detail.html and brand.html, editable without a rebuild
+│       ├── static/       style.css and app.js, served as files and editable live
 │       ├── stats.rs      up runs, mean and spread
 │       └── export.rs     the streamed gzipped CSV
 ├── tests/
@@ -122,6 +125,30 @@ cargo run -- query state --config ./network-monitor.toml
 cargo run -- query events 1.1.1.1 --since 24h --config ./network-monitor.toml
 cargo run -- --show-config --config ./network-monitor.toml
 ```
+
+## Web templates and assets
+
+The HTML of both pages sits in `src/web/templates/`: `page.html` for the timeline,
+`detail.html` for one target, and `brand.html` for the identity block both pages open with.
+Each page file carries its own `<head>`, its icon links, its own footer, and its copy;
+`src/web/page.rs` and `src/web/detail.rs` only fill the placeholders that carry data. The
+stylesheet is `src/web/static/style.css`, the script is `src/web/static/app.js`, and the
+server publishes them at `/style.css` and `/app.js`; the pages link them like any other
+site, so devtools shows each one as a file with its own lines, breakpoints, and live edits.
+
+What stays in Rust is markup that a loop computes: the SVG of the charts, the fault and
+day-by-day tables, the rows of a lane, and the window and period links. Moving those out
+would need a template engine, which this server deliberately does not have.
+
+- **Debug build:** every request reads the five files from the source tree. Edit the HTML,
+  the CSS, or the JS, refresh the browser, and the page shows the change — no rebuild, no
+  restart, no watcher.
+- **Release build:** the same files are embedded with `include_str!`, so the executable
+  still ships its pages and reads no file from disk.
+
+A file that cannot be read falls back to the copy embedded at compile time, so a page never
+fails for a missing file. Nothing is cached: every response carries `Cache-Control:
+no-store`, so a refresh always fetches the current file.
 
 ## Container and QNAP deployment
 

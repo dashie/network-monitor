@@ -558,7 +558,7 @@ The window was fixed at 24 hours unless the operator edited `from`/`to` by hand,
 
 ### Decision
 
-The server writes every instant twice: the machine-readable UTC value in the `datetime` attribute of a `<time>` element, or in `data-datetime`/`data-until` on an SVG `<text>` and `<title>`, and a readable UTC fallback as the text. A small inline script at the end of each page rewrites that text through `Intl.DateTimeFormat` with no explicit locale, so the visitor reads the format and the time zone of its own browser. Nothing else runs on the client: no data is loaded, nothing is re-rendered, no state is kept.
+The server writes every instant twice: the machine-readable UTC value in the `datetime` attribute of a `<time>` element, or in `data-datetime`/`data-until` on an SVG `<text>` and `<title>`, and a readable UTC fallback as the text. A small script, served as `/app.js` and loaded at the end of each page, rewrites that text through `Intl.DateTimeFormat` with no explicit locale, so the visitor reads the format and the time zone of its own browser. Nothing else runs on the client: no data is loaded, nothing is re-rendered, no state is kept.
 
 The fallback stays visible when the script does not run, and it always names `UTC`, so a reader is never shown a wrong zone: the page degrades to exact but unlocalised, never to plausible but wrong.
 

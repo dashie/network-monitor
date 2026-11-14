@@ -10,10 +10,7 @@ use crate::store::{DailyDrops, Fault, TargetStateRow, TimelineSegment};
 use crate::time::format_rfc3339;
 
 use super::encode;
-use super::page::{
-    escape, faults_table, footer, format_runs, format_span, runs_stats, up_for, CAUSE_SCRIPT,
-    ICON_LINKS, LOCALIZE_SCRIPT, MARK, REFRESH_SECONDS, STYLE,
-};
+use super::page::{escape, faults_table, format_runs, format_span, runs_stats, up_for};
 use super::stats;
 
 const WIDTH: f64 = 1000.0;
@@ -54,9 +51,15 @@ pub fn target_page(
         .label
         .clone()
         .unwrap_or_else(|| target.target.clone());
-    let interface = match &target.interface {
-        Some(name) => format!(" on {}", escape(name)),
-        None => String::new(),
+    let address = escape(&target.target);
+    // The masthead states the target at its right end: the label with the address it names,
+    // or the address alone when the target carries no label.
+    let identity = match &target.label {
+        Some(label) => format!(
+            "<span class=\"target-label\">{}</span> | <span class=\"target-address\">{address}</span>",
+            escape(label)
+        ),
+        None => format!("<span class=\"target-address\">{address}</span>"),
     };
     let period = format!("{period_days} days");
     let total: u32 = days.iter().map(|day| day.drops).sum();
@@ -74,57 +77,33 @@ pub fn target_page(
         None => String::new(),
     };
 
-    let body = format!(
-        "<header class=\"masthead\">{MARK}\
-         <div>\
-         <nav class=\"breadcrumb\" aria-label=\"Breadcrumb\">\
-         <a href=\"/\">All targets</a>\
-         <span class=\"sep\" aria-hidden=\"true\">/</span>\
-         <span aria-current=\"page\">{name}</span>\
-         </nav>\
-         <div class=\"title\">\
-         <h1>{name}</h1>\
-         <span class=\"badge {state}\">{state}</span>\
-         {since}\
-         </div>\
-         </div>\
-         </header>\n\
-         <div class=\"toolbar\">\
-         <p class=\"hint\">{address}{interface}</p>\
-         {periods}\
-         </div>\n\
-         <div class=\"stats\">\
-         <div class=\"stat\"><b>{total} faults</b><span>last {period}</span></div>\
-         <div class=\"stat\"><b>{down_ms}</b><span>down time in the last {period}</span></div>\
-         <div class=\"stat\" title=\"{avg_up_hint}\"><b>{avg_up}</b>\
-         <span>avg up run in {period} · max {longest}</span></div>\
-         </div>\n\
-         <h2>Disconnections per day</h2>\n\
-         {bars}\n\
-         {recent}\n\
-         {table}",
+    let title = format!(
+        "{name} — last {period}",
         name = escape(&name),
-        address = escape(&target.target),
-        interface = interface,
-        state = target.state.as_str(),
-        since = since,
-        total = total,
-        down_ms = format_span(down_ms),
-        avg_up = format_runs(runs),
-        longest = longest,
-        period = period,
-        periods = period_links(&target.target, period_days),
-        avg_up_hint = match runs.count {
-            0 => format!("no up run in the last {period}"),
-            1 => format!("1 up run in the last {period}: no spread to state"),
-            count => format!("mean of {count} up runs in the last {period}"),
-        },
-        bars = bars(days),
-        recent = faults_table(recent, now_ms),
-        table = days_table(days, segments, now_ms),
+        period = period
     );
+    let avg_up_hint = match runs.count {
+        0 => format!("no up run in the last {period}"),
+        1 => format!("1 up run in the last {period}: no spread to state"),
+        count => format!("mean of {count} up runs in the last {period}"),
+    };
 
-    layout(&format!("{name} — last {period}"), &body)
+    super::templates::load_template("detail")
+        .replace("{title}", &title)
+        .replace("{brand}", &super::templates::brand())
+        .replace("{identity}", &identity)
+        .replace("{state}", target.state.as_str())
+        .replace("{since}", &since)
+        .replace("{periods}", &period_links(&target.target, period_days))
+        .replace("{total}", &total.to_string())
+        .replace("{period}", &period)
+        .replace("{down_ms}", &format_span(down_ms))
+        .replace("{avg_up}", &format_runs(runs))
+        .replace("{longest}", &longest)
+        .replace("{avg_up_hint}", &avg_up_hint)
+        .replace("{bars}", &bars(days))
+        .replace("{recent}", &faults_table(recent, now_ms))
+        .replace("{table}", &days_table(days, segments, now_ms))
 }
 
 /// The links that change the period of the page, the selected one marked.
@@ -144,44 +123,6 @@ fn period_links(target: &str, period_days: u32) -> String {
     }
     output.push_str("</nav>");
     output
-}
-
-/// The manual of the detail page, read at its foot.
-const PAGE_NOTES: [&str; 3] = [
-    "Each bar is one day of the period, as tall as the faults recorded in it. Select a fault to read why it happened.",
-    "Times follow the time zone of your browser; the page reloads every 30 seconds.",
-    "The period changes the window; the table lists the same days with the down time and the average up run.",
-];
-
-fn layout(title: &str, body: &str) -> String {
-    format!(
-        r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="{REFRESH_SECONDS}">
-<title>{title}</title>
-{ICON_LINKS}
-<style>{STYLE}</style>
-</head>
-<body>
-<main>
-{body}
-{notes}
-</main>
-<script>
-{localize}
-{cause}
-</script>
-</body>
-</html>
-"#,
-        title = escape(title),
-        localize = LOCALIZE_SCRIPT,
-        cause = CAUSE_SCRIPT,
-        notes = footer(&PAGE_NOTES),
-    )
 }
 
 /// The bar chart: one bar per day, scaled to the busiest day of the period.
@@ -410,7 +351,7 @@ mod tests {
         assert!(rendered.contains("data-suffix=\": 5\">01-03: 5</title>"));
         assert!(rendered.contains("cloudflare"));
         assert!(rendered.contains("7 faults"));
-        assert!(rendered.contains("href=\"/\""));
+        assert!(rendered.contains("class=\"back-button\""));
     }
 
     #[test]
@@ -572,8 +513,8 @@ mod tests {
             .contains("<a href=\"/target?target=1.1.1.1&days=30d\" aria-current=\"page\">30d</a>"));
         assert_eq!(
             rendered.matches("aria-current=\"page\"").count(),
-            2,
-            "the breadcrumb and the selected period"
+            1,
+            "only the selected period (breadcrumb removed)"
         );
     }
 
@@ -632,15 +573,19 @@ mod tests {
             NOW,
             DEFAULT_PERIOD_DAYS,
         );
-        let crumb = rendered
-            .find("href=\"/\"")
-            .expect("the breadcrumb links to the timeline");
+        let back = rendered
+            .find("class=\"back-button\"")
+            .expect("the back button in the toolbar");
         let chart = rendered.find("<svg").expect("the chart");
         assert!(
-            crumb < chart,
-            "the way back comes before the chart, so it needs no scrolling"
+            back < chart,
+            "the back button comes before the chart, so it needs no scrolling"
         );
-        assert_eq!(rendered.matches("href=\"/\"").count(), 1);
+        assert_eq!(rendered.matches("class=\"back-button\"").count(), 1);
+        assert!(
+            !rendered.contains("breadcrumb"),
+            "breadcrumb should be removed"
+        );
     }
 
     #[test]
@@ -835,6 +780,51 @@ mod tests {
     }
 
     #[test]
+    fn the_masthead_states_the_label_and_the_address_of_the_target() {
+        let rendered = target_page(
+            &target(),
+            &[day(0, 1, 60_000)],
+            &[],
+            &[],
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+        );
+        assert!(
+            rendered.contains(
+                "<span class=\"target-label\">cloudflare</span> | \
+                 <span class=\"target-address\">1.1.1.1</span>"
+            ),
+            "the label and the address it names share one line, at the top right"
+        );
+        let masthead_end = rendered.find("</header>").expect("a closed masthead");
+        assert!(
+            rendered[..masthead_end].contains("<div class=\"target-info\">"),
+            "the identity of the target sits in the masthead, above the toolbar"
+        );
+    }
+
+    #[test]
+    fn a_target_without_a_label_states_its_address_alone() {
+        let mut unnamed = target();
+        unnamed.label = None;
+        let rendered = target_page(
+            &unnamed,
+            &[day(0, 1, 60_000)],
+            &[],
+            &[],
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+        );
+        assert_eq!(
+            rendered.matches(">1.1.1.1<").count(),
+            1,
+            "one address, with no empty label beside it"
+        );
+        assert!(!rendered.contains("class=\"target-label\""));
+        assert!(rendered.contains("<span class=\"target-address\">1.1.1.1</span>"));
+    }
+
+    #[test]
     fn a_target_that_is_not_up_states_no_streak() {
         let mut down = target();
         down.state = TargetState::Down;
@@ -866,9 +856,10 @@ mod tests {
             rendered.contains("data-datetime=\"1970-01-01T00:00:00.000Z\" data-format=\"day\""),
             "the axis labels carry the instant the browser reformats"
         );
+        assert!(rendered.contains("<script src=\"/app.js\"></script>"));
         assert!(
-            rendered.contains("Intl.DateTimeFormat"),
-            "the page localises its own instants"
+            crate::web::templates::script().contains("Intl.DateTimeFormat"),
+            "the shared script localises the instants of the page"
         );
         assert!(!rendered.contains("times are UTC"));
     }

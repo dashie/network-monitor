@@ -1,0 +1,274 @@
+/* The stylesheet of both pages. A debug build serves this file as it is on disk, so saving
+   it and refreshing the page is enough to see the change; a release build embeds it. */
+
+:root {
+  color-scheme: light dark;
+  --rule: rgba(127, 127, 127, 0.28);
+  --muted: 0.65;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 32px 24px 48px;
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+main { max-width: 1040px; margin: 0 auto; }
+h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+/* Every page opens with the same identity block — the mark, the name of the
+   application, and its tagline — flush left, above a hairline that separates the
+   masthead from the content. A page may state what it is showing at its right end, on
+   the same centre line, but the identity block never moves: it is the same block, in
+   the same place, everywhere. */
+.masthead {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding-bottom: 16px;
+  margin-bottom: 18px;
+  border-bottom: 1px solid var(--rule);
+  min-height: 72px;
+}
+.masthead .brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-right: auto;
+}
+.masthead .mark { width: 36px; height: 36px; flex: none; }
+.masthead .tagline {
+  margin: 2px 0 0;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  opacity: 0.55;
+}
+/* The target of the detail page sits at the right end of the masthead, on the same
+   centre line as the identity block: its label and address on one line, its state and
+   duration under them. The identity block stays flush left, where it sits on every
+   other page. */
+.masthead .target-info {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  text-align: right;
+}
+.masthead .target-identity { font-size: 14px; font-weight: 500; }
+.masthead .target-label { font-weight: 600; }
+.masthead .target-address { opacity: 0.8; font-variant-numeric: tabular-nums; }
+.masthead .target-state { display: inline-flex; align-items: center; gap: 6px; }
+.masthead .target-state .since { font-size: 12px; }
+.toolbar .back-button {
+  padding: 4px 12px;
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 13px;
+  opacity: 0.7;
+  text-decoration: none;
+}
+.toolbar .back-button:hover {
+  opacity: 1;
+}
+h2 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 12px;
+  margin: 32px 0 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: var(--muted);
+}
+/* The action of a section sits at the far end of its heading. */
+h2 .download {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+/* What the page is showing — the window of the chart, the period of the detail page —
+   and the control that changes it share one line, the control on the right. The detail
+   page opens the line with the way back to the list. */
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 20px;
+  min-height: 56px;
+}
+.toolbar .windows { margin: 0; margin-left: auto; }
+.toolbar .window { margin: 0; flex: 0 0 auto; }
+/* The manual of a page: a short rule, never the full width, then the notes in small
+   type, quiet enough to stay out of the way of the content above. */
+footer {
+  margin-top: 44px;
+  font-size: 12px;
+  line-height: 1.6;
+  opacity: 0.6;
+}
+footer hr {
+  width: 72px;
+  margin: 0 0 14px;
+  border: 0;
+  border-top: 1px solid var(--rule);
+}
+footer p { margin: 0 0 4px; max-width: 68ch; }
+footer p:last-child { margin-bottom: 0; }
+.windows { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 20px; font-size: 13px; }
+.windows a {
+  padding: 2px 11px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  color: inherit;
+  text-decoration: none;
+  font-variant-numeric: tabular-nums;
+}
+.windows a:hover { border-color: currentColor; }
+.windows a[aria-current] {
+  background: rgba(127, 127, 127, 0.16);
+  border-color: transparent;
+  font-weight: 600;
+}
+.title { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.badge {
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #ffffff;
+}
+.badge.up { background: #2e7d32; }
+.badge.down { background: #c62828; }
+.badge.unknown { background: #9e9e9e; }
+.since { font-size: 13px; opacity: var(--muted); font-variant-numeric: tabular-nums; }
+.stats { display: flex; flex-wrap: wrap; gap: 12px; margin: 20px 0 0; }
+.stat {
+  flex: 1 1 150px;
+  padding: 10px 14px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+}
+.stat b {
+  display: block;
+  font-size: 19px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.stat span { font-size: 12px; opacity: var(--muted); }
+.window {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  opacity: var(--muted);
+}
+svg { width: 100%; height: auto; display: block; }
+a:hover text { text-decoration: underline; }
+.legend { display: flex; gap: 18px; margin-top: 14px; font-size: 13px; opacity: 0.8; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.swatch { width: 14px; height: 10px; border-radius: 2px; display: inline-block; }
+/* One table style for both pages: as wide as `main`, text left, numbers right.
+   The numeric columns carry `.num`; no table is narrower than the chart above it. */
+/* A table starts where the reader sees it start: a rule at the top of the header, room
+   above it, and a header that stays put while a long table scrolls, painted with the
+   page background so no row shows through it. */
+.table-scroll { overflow-x: auto; }  /* a wide table scrolls itself, not the page */
+table {
+  width: 100%;
+  margin: 22px 0 0;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+th, td { text-align: left; padding: 7px 18px 7px 0; }
+th {
+  position: sticky;
+  top: 0;
+  background: Canvas;
+  padding-top: 11px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  opacity: var(--muted);
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+}
+/* Every fault row is as tall as the one with two lines under the target, so the table
+   reads as a grid instead of a ragged list. */
+tr.fault { height: 52px; }
+tbody td { border-bottom: 1px solid var(--rule); }
+.fault-name { display: block; line-height: 1.35; }
+.fault-key {
+  display: block;
+  font-size: 11px;
+  line-height: 1.3;
+  opacity: 0.6;
+  font-variant-numeric: tabular-nums;
+}
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: rgba(127, 127, 127, 0.07); }
+/* The cause of a fault is a control: the code opens the message under the row. */
+tr.fault { cursor: pointer; }
+/* The four columns keep their share of the width whatever they carry, so a long name never
+   squeezes the date and a short code never leaves a gap: 15, 30, 45 and 10 per cent. */
+table.faults { table-layout: fixed; }
+table.faults th:nth-child(1) { width: 15%; }
+table.faults th:nth-child(2) { width: 30%; }
+table.faults th:nth-child(3) { width: 45%; }
+table.faults th:nth-child(4) { width: 10%; }
+table.faults th.cause-head, table.faults td.cause-cell { text-align: right; }
+table.faults .ongoing {
+  display: block;
+  font-size: 11px;
+  line-height: 1.3;
+  opacity: 0.6;
+}
+button.cause {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  opacity: 0.75;
+  border-bottom: 1px dotted var(--rule);
+  cursor: pointer;
+}
+button.cause:hover { opacity: 1; }
+button.cause[aria-expanded="true"] { opacity: 1; border-bottom-color: currentColor; }
+/* The message reads as part of its fault, not as a fault of its own. */
+tr.cause-row td {
+  padding: 1px 0 13px;
+  font-size: 13px;
+  opacity: var(--muted);
+  border-bottom: 1px solid var(--rule);
+}
+tr.cause-row:hover { background: none; }
+/* The row of the day still running states a rolling window, not a calendar one. */
+td.current { background: rgba(127, 127, 127, 0.1); }
+.tag {
+  display: inline-block;
+  margin-right: 7px;
+  padding: 0 7px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  opacity: 0.75;
+  vertical-align: 1px;
+}
+.num { text-align: right; }
+.sub { font-size: 11px; opacity: 0.65; font-variant-numeric: tabular-nums; }
+td.down { color: #c62828; }
+@media (max-width: 620px) { body { padding: 20px 16px 40px; } }

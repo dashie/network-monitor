@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="30">
+<title>{title}</title>
+<link rel="icon" type="image/svg+xml" href="/icon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="/icon.png">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+<header class="masthead">
+{brand}
+</header>
+<div class="toolbar">
+{span}
+{windows}
+</div>
+<div id="chart">{body}</div>
+<div class="legend">
+  <span><i class="swatch" style="background:#2e7d32"></i>up</span>
+  <span><i class="swatch" style="background:#c62828"></i>down</span>
+  <span><i class="swatch" style="background:#bdbdbd"></i>unknown</span>
+</div>
+{downs}
+<footer>
+<hr>
+<p>A lane is one target over the chosen window: a break in it is a fault. Select a fault to read why it happened.</p>
+<p>Times follow the time zone of your browser; the page reloads every 30 seconds.</p>
+<p>Select a lane for the last 30 days of that target, or download the whole history as a gzipped CSV.</p>
+</footer>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

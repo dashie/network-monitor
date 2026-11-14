@@ -8,6 +8,7 @@ pub mod detail;
 pub mod export;
 pub mod page;
 pub mod stats;
+pub mod templates;
 
 use std::io::{self, Read, Write};
 use std::net::{AddrParseError, SocketAddr, TcpListener, TcpStream};
@@ -333,6 +334,22 @@ fn handle(mut stream: TcpStream, database: &Path, compression: Compression) {
             200,
             "text/plain; charset=utf-8",
             "ok\n",
+            include_body,
+        ),
+        // The stylesheet and the script of the pages, served as files: the browser names
+        // them in its devtools with their own lines, instead of showing them inside the page.
+        "/style.css" => respond(
+            &mut stream,
+            200,
+            "text/css; charset=utf-8",
+            &templates::stylesheet(),
+            include_body,
+        ),
+        "/app.js" => respond(
+            &mut stream,
+            200,
+            "text/javascript; charset=utf-8",
+            &templates::script(),
             include_body,
         ),
         "/icon.svg" => respond(&mut stream, 200, "image/svg+xml", ICON_SVG, include_body),

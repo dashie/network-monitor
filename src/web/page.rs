@@ -20,292 +20,6 @@ const ROW_GAP: f64 = 6.0;
 const TOP_PAD: f64 = 6.0;
 const AXIS_HEIGHT: f64 = 20.0;
 
-/// Shared stylesheet of both pages.
-pub(crate) const STYLE: &str = r#"
-  :root {
-    color-scheme: light dark;
-    --rule: rgba(127, 127, 127, 0.28);
-    --muted: 0.65;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    padding: 32px 24px 48px;
-    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
-  }
-  main { max-width: 1040px; margin: 0 auto; }
-  h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
-  /* Both pages open with the mark and their own heading, above a hairline that
-     separates the masthead from the content. */
-  .masthead {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    padding-bottom: 16px;
-    margin-bottom: 18px;
-    border-bottom: 1px solid var(--rule);
-  }
-  .masthead .mark { width: 36px; height: 36px; flex: none; }
-  .masthead .tagline {
-    margin: 2px 0 0;
-    font-size: 11px;
-    font-weight: 500;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    opacity: 0.55;
-  }
-  .masthead .breadcrumb { margin-bottom: 6px; }
-  h2 {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 12px;
-    font-size: 12px;
-    margin: 32px 0 10px;
-    font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    opacity: var(--muted);
-  }
-  /* The action of a section sits at the far end of its heading. */
-  h2 .download {
-    margin-left: auto;
-    font-size: 12px;
-    font-weight: 400;
-    letter-spacing: 0;
-    text-transform: none;
-  }
-  .hint { margin: 0 0 20px; font-size: 13px; opacity: var(--muted); }
-  /* What the page is showing — the window of the chart, the target of the detail
-     page — and the selector that changes it share one line, the selector on the right.
-     When they do not fit on one line they stack, both flush left. */
-  .toolbar {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    margin: 0 0 20px;
-  }
-  .toolbar .windows { margin: 0; }
-  .toolbar .window,
-  .toolbar .hint { margin: 0; }
-  /* The manual of a page: a short rule, never the full width, then the notes in small
-     type, quiet enough to stay out of the way of the content above. */
-  footer {
-    margin-top: 44px;
-    font-size: 12px;
-    line-height: 1.6;
-    opacity: 0.6;
-  }
-  footer hr {
-    width: 72px;
-    margin: 0 0 14px;
-    border: 0;
-    border-top: 1px solid var(--rule);
-  }
-  footer p { margin: 0 0 4px; max-width: 68ch; }
-  footer p:last-child { margin-bottom: 0; }
-  .windows { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 20px; font-size: 13px; }
-  .windows a {
-    padding: 2px 11px;
-    border: 1px solid var(--rule);
-    border-radius: 999px;
-    color: inherit;
-    text-decoration: none;
-    font-variant-numeric: tabular-nums;
-  }
-  .windows a:hover { border-color: currentColor; }
-  .windows a[aria-current] {
-    background: rgba(127, 127, 127, 0.16);
-    border-color: transparent;
-    font-weight: 600;
-  }
-  .breadcrumb {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
-    margin: 0 0 18px;
-    font-size: 13px;
-  }
-  .breadcrumb a {
-    color: inherit;
-    text-decoration: none;
-    border-bottom: 1px solid transparent;
-    padding-bottom: 1px;
-  }
-  .breadcrumb a:hover { border-bottom-color: currentColor; }
-  .breadcrumb .sep { opacity: 0.4; }
-  .breadcrumb [aria-current] { opacity: var(--muted); }
-  .title { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-  .badge {
-    padding: 2px 9px;
-    border-radius: 999px;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: #ffffff;
-  }
-  .badge.up { background: #2e7d32; }
-  .badge.down { background: #c62828; }
-  .badge.unknown { background: #9e9e9e; }
-  .since { font-size: 13px; opacity: var(--muted); font-variant-numeric: tabular-nums; }
-  .stats { display: flex; flex-wrap: wrap; gap: 12px; margin: 20px 0 0; }
-  .stat {
-    flex: 1 1 150px;
-    padding: 10px 14px;
-    border: 1px solid var(--rule);
-    border-radius: 8px;
-  }
-  .stat b {
-    display: block;
-    font-size: 19px;
-    font-weight: 600;
-    font-variant-numeric: tabular-nums;
-  }
-  .stat span { font-size: 12px; opacity: var(--muted); }
-  .window {
-    margin: 0 0 10px;
-    font-size: 13px;
-    font-variant-numeric: tabular-nums;
-    opacity: var(--muted);
-  }
-  svg { width: 100%; height: auto; display: block; }
-  a:hover text { text-decoration: underline; }
-  .legend { display: flex; gap: 18px; margin-top: 14px; font-size: 13px; opacity: 0.8; }
-  .legend span { display: inline-flex; align-items: center; gap: 6px; }
-  .swatch { width: 14px; height: 10px; border-radius: 2px; display: inline-block; }
-  /* One table style for both pages: as wide as `main`, text left, numbers right.
-     The numeric columns carry `.num`; no table is narrower than the chart above it. */
-  /* A table starts where the reader sees it start: a rule at the top of the header, room
-     above it, and a header that stays put while a long table scrolls, painted with the
-     page background so no row shows through it. */
-  .table-scroll { overflow-x: auto; }  /* a wide table scrolls itself, not the page */
-  table {
-    width: 100%;
-    margin: 22px 0 0;
-    border-collapse: collapse;
-    font-variant-numeric: tabular-nums;
-  }
-  th, td { text-align: left; padding: 7px 18px 7px 0; }
-  th {
-    position: sticky;
-    top: 0;
-    background: Canvas;
-    padding-top: 11px;
-    font-size: 12px;
-    font-weight: 600;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-    opacity: var(--muted);
-    border-top: 1px solid var(--rule);
-    border-bottom: 1px solid var(--rule);
-  }
-  /* Every fault row is as tall as the one with two lines under the target, so the table
-     reads as a grid instead of a ragged list. */
-  tr.fault { height: 52px; }
-  tbody td { border-bottom: 1px solid var(--rule); }
-  .fault-name { display: block; line-height: 1.35; }
-  .fault-key {
-    display: block;
-    font-size: 11px;
-    line-height: 1.3;
-    opacity: 0.6;
-    font-variant-numeric: tabular-nums;
-  }
-  tbody tr:last-child td { border-bottom: 0; }
-  tbody tr:hover { background: rgba(127, 127, 127, 0.07); }
-  /* The cause of a fault is a control: the code opens the message under the row. */
-  tr.fault { cursor: pointer; }
-  /* The four columns keep their share of the width whatever they carry, so a long name never
-     squeezes the date and a short code never leaves a gap: 15, 30, 45 and 10 per cent. */
-  table.faults { table-layout: fixed; }
-  table.faults th:nth-child(1) { width: 15%; }
-  table.faults th:nth-child(2) { width: 30%; }
-  table.faults th:nth-child(3) { width: 45%; }
-  table.faults th:nth-child(4) { width: 10%; }
-  table.faults th.cause-head, table.faults td.cause-cell { text-align: right; }
-  table.faults .ongoing {
-    display: block;
-    font-size: 11px;
-    line-height: 1.3;
-    opacity: 0.6;
-  }
-  button.cause {
-    padding: 0;
-    border: 0;
-    background: none;
-    color: inherit;
-    font: inherit;
-    font-size: 11px;
-    letter-spacing: 0.04em;
-    opacity: 0.75;
-    border-bottom: 1px dotted var(--rule);
-    cursor: pointer;
-  }
-  button.cause:hover { opacity: 1; }
-  button.cause[aria-expanded="true"] { opacity: 1; border-bottom-color: currentColor; }
-  /* The message reads as part of its fault, not as a fault of its own. */
-  tr.cause-row td {
-    padding: 1px 0 13px;
-    font-size: 13px;
-    opacity: var(--muted);
-    border-bottom: 1px solid var(--rule);
-  }
-  tr.cause-row:hover { background: none; }
-  /* The row of the day still running states a rolling window, not a calendar one. */
-  td.current { background: rgba(127, 127, 127, 0.1); }
-  .tag {
-    display: inline-block;
-    margin-right: 7px;
-    padding: 0 7px;
-    border: 1px solid var(--rule);
-    border-radius: 999px;
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-    opacity: 0.75;
-    vertical-align: 1px;
-  }
-  .num { text-align: right; }
-  .sub { font-size: 11px; opacity: 0.65; font-variant-numeric: tabular-nums; }
-  td.down { color: #c62828; }
-  @media (max-width: 620px) { body { padding: 20px 16px 40px; } }
-"#;
-
-/// How often the browser reloads a page by itself.
-pub(crate) const REFRESH_SECONDS: u32 = 30;
-
-/// The manual of the timeline, read at the foot of the page: what a lane is, how time
-/// and reloads behave, and where the history goes.
-const PAGE_NOTES: [&str; 3] = [
-    "A lane is one target over the chosen window: a break in it is a fault. Select a fault to read why it happened.",
-    "Times follow the time zone of your browser; the page reloads every 30 seconds.",
-    "Select a lane for the last 30 days of that target, or download the whole history as a gzipped CSV.",
-];
-
-/// The notes that close a page, each on its own line, under a short rule.
-pub(crate) fn footer(notes: &[&str]) -> String {
-    let mut output = String::from("<footer>\n<hr>\n");
-    for note in notes {
-        let _ = writeln!(output, "<p>{note}</p>");
-    }
-    output.push_str("</footer>\n");
-    output
-}
-
-/// The icon links both pages share: the scalable mark first, then the PNG the browsers
-/// without SVG support fall back to.
-pub(crate) const ICON_LINKS: &str = r#"<link rel="icon" type="image/svg+xml" href="/icon.svg">
-<link rel="icon" type="image/png" sizes="32x32" href="/icon.png">"#;
-
-/// The mark that opens the masthead, next to the heading of the page. It carries no
-/// alternative text: the heading beside it already names what it stands for.
-pub(crate) const MARK: &str = r#"<img class="mark" src="/icon.svg" alt="" width="36" height="36">"#;
-
 const HOUR_MS: i64 = 3_600_000;
 
 /// The windows the timeline offers, smallest first: the links read left to right from
@@ -362,68 +76,7 @@ impl Window {
     }
 }
 
-/// Follow a lane link from script: some engines ignore an `<a href>` that wraps SVG
-/// shapes.
-/// Opens the standard message of a fault under its own row, one fault at a time.
-///
-/// The button carries `aria-expanded` and the message lives in a real row, so the table
-/// stays a table for a screen reader; a browser without JavaScript keeps the `title`.
-pub(crate) const CAUSE_SCRIPT: &str = r#"(() => {
-  const rows = document.querySelectorAll('tr.fault');
-  const close = () => {
-    for (const row of document.querySelectorAll('tr.cause-row')) row.hidden = true;
-    for (const button of document.querySelectorAll('button.cause')) {
-      button.setAttribute('aria-expanded', 'false');
-    }
-  };
-  for (const row of rows) {
-    const button = row.querySelector('button.cause');
-    if (!button) continue;
-    const message = document.getElementById(button.getAttribute('aria-controls'));
-    if (!message) continue;
-    const toggle = () => {
-      const open = message.hidden;
-      close();
-      message.hidden = !open;
-      button.setAttribute('aria-expanded', String(open));
-    };
-    row.addEventListener('click', toggle);
-    button.addEventListener('click', event => event.stopPropagation());
-  }
-})();
-"#;
-
-const LANE_SCRIPT: &str = r#"document.getElementById('chart').addEventListener('click', event => {
-  const link = event.target instanceof Element ? event.target.closest('a') : null;
-  if (link === null) return;
-  event.preventDefault();
-  window.location.assign(link.getAttribute('href'));
-}, true);"#;
-
-/// Replace every instant the server wrote in UTC with the locale and the time zone of
-/// the visitor. The server stays on UTC; only the presentation moves.
-pub(crate) const LOCALIZE_SCRIPT: &str = r#"const FORMATS = {
-  datetime: { dateStyle: 'medium', timeStyle: 'medium' },
-  time: { hour: '2-digit', minute: '2-digit' },
-  daytime: { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' },
-  date: { dateStyle: 'medium', timeZone: 'UTC' },
-  day: { month: 'short', day: 'numeric', timeZone: 'UTC' },
-};
-const label = (instant, kind) =>
-  new Intl.DateTimeFormat(undefined, FORMATS[kind] ?? FORMATS.datetime).format(instant);
-for (const element of document.querySelectorAll('time[datetime], [data-datetime]')) {
-  const from = new Date(element.getAttribute('data-datetime') ?? element.getAttribute('datetime'));
-  if (Number.isNaN(from.getTime())) continue;
-  const until = element.getAttribute('data-until');
-  const prefix = element.getAttribute('data-prefix') ?? '';
-  const suffix = element.getAttribute('data-suffix') ?? '';
-  element.textContent = prefix + (until === null
-    ? label(from, element.getAttribute('data-format'))
-    : `${label(from, 'datetime')} → ${label(new Date(until), 'datetime')}`) + suffix;
-}"#;
-
-/// The full page: the windows, the chart, the legend, the last disconnections, and the
-/// scripts that follow a lane link and localise the instants.
+/// The full page: the windows, the chart, the legend, the last disconnections.
 pub fn page(
     timelines: &[TargetTimeline],
     downs: &[Fault],
@@ -433,56 +86,13 @@ pub fn page(
     let body = chart(timelines, up_since, window);
     let downs = faults_table(downs, window.to_ms);
 
-    format!(
-        r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="{REFRESH_SECONDS}">
-<title>Network Monitor</title>
-{ICON_LINKS}
-<style>{STYLE}</style>
-</head>
-<body>
-<main>
-<header class="masthead">
-{MARK}
-<div>
-<h1>Network Monitor</h1>
-<p class="tagline">Reachability monitoring</p>
-</div>
-</header>
-<div class="toolbar">
-{span}
-{windows}
-</div>
-<div id="chart">{body}</div>
-<div class="legend">
-  <span><i class="swatch" style="background:#2e7d32"></i>up</span>
-  <span><i class="swatch" style="background:#c62828"></i>down</span>
-  <span><i class="swatch" style="background:#bdbdbd"></i>unknown</span>
-</div>
-{downs}
-{notes}
-</main>
-<script>
-{lane}
-{localize}
-{cause}
-</script>
-</body>
-</html>
-"#,
-        span = window_span(window),
-        windows = window_links(window),
-        body = body,
-        downs = downs,
-        notes = footer(&PAGE_NOTES),
-        lane = LANE_SCRIPT,
-        localize = LOCALIZE_SCRIPT,
-        cause = CAUSE_SCRIPT,
-    )
+    super::templates::load_template("page")
+        .replace("{title}", "Network Monitor")
+        .replace("{brand}", &super::templates::brand())
+        .replace("{span}", &window_span(window))
+        .replace("{windows}", &window_links(window))
+        .replace("{body}", &body)
+        .replace("{downs}", &downs)
 }
 
 /// The links that change the window of the chart.
@@ -886,6 +496,7 @@ pub(crate) fn escape(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::web::templates::{script, stylesheet};
 
     /// No target is up in these pages unless a test says so.
     fn no_streaks() -> HashMap<String, i64> {
@@ -1090,31 +701,32 @@ mod tests {
             "the fault row is the one that toggles it"
         );
         assert!(
-            rendered.contains("querySelectorAll('tr.fault')"),
-            "the page ships the script that opens it"
+            script().contains("querySelectorAll('tr.fault')"),
+            "the shared script opens it"
         );
     }
 
     #[test]
     fn a_table_announces_where_it_begins_and_keeps_its_header() {
+        let style = stylesheet();
         assert!(
-            STYLE.contains("th {\n    position: sticky;"),
+            style.contains("th {\n  position: sticky;"),
             "a long table keeps its header in place"
         );
         assert!(
-            STYLE.contains("border-top: 1px solid var(--rule);"),
+            style.contains("border-top: 1px solid var(--rule);"),
             "a rule marks the first row of the header"
         );
         assert!(
-            STYLE.contains("table {\n    width: 100%;\n    margin: 22px 0 0;"),
+            style.contains("table {\n  width: 100%;\n  margin: 22px 0 0;"),
             "room above the table separates it from what sits above it"
         );
         assert!(
-            STYLE.contains("background: Canvas;"),
+            style.contains("background: Canvas;"),
             "the sticky header is painted with the page background"
         );
         assert!(
-            !STYLE.contains("border-collapse: separate"),
+            !style.contains("border-collapse: separate"),
             "the rules stay the ones the theme already uses"
         );
     }
@@ -1165,11 +777,12 @@ mod tests {
         let rendered = page(&[timeline()], &downs, &no_streaks(), window);
         assert!(rendered.contains("<th class=\"num lasted-head\">lasted</th>"));
         assert!(rendered.contains("<td class=\"num\">12m</td>"));
+        let style = stylesheet();
         assert!(
-            !STYLE.contains(".numeric"),
+            !style.contains(".numeric"),
             "one table style for both pages"
         );
-        assert!(STYLE.contains(".num { text-align: right; }"));
+        assert!(style.contains(".num { text-align: right; }"));
     }
 
     #[test]
@@ -1202,7 +815,7 @@ mod tests {
     }
 
     #[test]
-    fn the_page_reloads_itself_and_keeps_only_the_lane_script() {
+    fn the_page_reloads_itself_and_loads_the_shared_script() {
         let window = Window {
             from_ms: 0,
             to_ms: 7_200_000,
@@ -1210,9 +823,18 @@ mod tests {
         let rendered = page(&[timeline()], &[], &no_streaks(), window);
         assert!(rendered.starts_with("<!doctype html>"));
         assert!(rendered.contains("<meta http-equiv=\"refresh\" content=\"30\">"));
-        assert!(!rendered.contains("wheel"), "no zoom");
-        assert!(!rendered.contains("pointerdown"), "no pan");
-        assert!(!rendered.contains("fetch("));
+        assert!(
+            rendered.contains("<script src=\"/app.js\"></script>"),
+            "the script is a file the browser can debug, not text in the page"
+        );
+        assert!(
+            !rendered.contains("<script>\n"),
+            "no script written into the page"
+        );
+        let script = script();
+        assert!(!script.contains("wheel"), "no zoom");
+        assert!(!script.contains("pointerdown"), "no pan");
+        assert!(!script.contains("fetch("));
     }
 
     #[test]
@@ -1222,7 +844,7 @@ mod tests {
             to_ms: 7_200_000,
         };
         let rendered = page(&[timeline()], &[], &no_streaks(), window);
-        assert!(rendered.contains("closest('a')"));
+        assert!(script().contains("closest('a')"));
         assert!(rendered.contains("href=\"/target?target=1.1.1.1\""));
     }
 
@@ -1515,7 +1137,11 @@ mod tests {
         assert!(rendered.contains(
             "<td><time datetime=\"1970-01-01T01:00:00.000Z\">1970-01-01 01:00:00 UTC</time></td>"
         ));
-        assert!(rendered.contains("Intl.DateTimeFormat"));
+        assert!(rendered.contains("<script src=\"/app.js\"></script>"));
+        assert!(
+            script().contains("Intl.DateTimeFormat"),
+            "the shared script localises the instants"
+        );
     }
 
     #[test]

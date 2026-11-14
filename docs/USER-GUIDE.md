@@ -331,7 +331,11 @@ piped.
 
 ## The web page
 
-`monitor --listen` or `serve --listen` publishes one read-only page:
+`monitor --listen` or `serve --listen` publishes one read-only page. Every page opens with the
+same masthead — the mark, the name of the application, and its tagline — flush left, at the
+same height, so nothing moves when you go from one page to the other. A page may state what it
+is showing at the right end of the masthead, on the same centre line as that block; the
+toolbar under it carries the control that changes what is shown.
 
 - `/` — one lane per target over the selected window (1 h by default; 1, 2, 4, 6, 12, 24 h).
   A lane states the drops, the average `up` run with its spread, the longest run, and how long
@@ -343,6 +347,8 @@ piped.
   stated share of the width (15, 30, 45 and 10 per cent) and every row is the same height.
 - `/target?target=<key>&days=30d` — one target for 30, 60, 90, 180, or 360 days: a bar per day,
   the last 10 faults of that target in the same table as the timeline page, and a per-day table.
+  The masthead states the target at its right end: its label and address, then its status
+  (up/down + duration). A back button in the toolbar returns to the list page.
 - `Download History` — the whole history as a gzipped CSV, from `/export/faults.csv.gz`. The
   address the page used before this version, `/export/disconnections.csv.gz`, still answers and
   redirects to it.

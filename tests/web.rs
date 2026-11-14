@@ -496,9 +496,12 @@ fn every_row_shows_its_statistics_and_links_to_its_detail_page() {
         !detail.contains("class=\"since\""),
         "the target is down, so there is no running up stretch to state"
     );
-    assert!(detail.contains("href=\"/\""), "a way back to the timeline");
     assert!(
-        detail.find("href=\"/\"").unwrap() < detail.find("<svg").unwrap(),
+        detail.contains("class=\"back-button\""),
+        "a way back to the timeline"
+    );
+    assert!(
+        detail.find("class=\"back-button\"").unwrap() < detail.find("<svg").unwrap(),
         "the way back is at the top, before the chart"
     );
 }
@@ -580,10 +583,30 @@ fn the_page_context_and_its_selector_share_one_line() {
 
     let (status, detail) = server.get("/target?target=1.1.1.1");
     assert_eq!(status, 200);
-    assert!(detail.contains(
-        "<div class=\"toolbar\"><p class=\"hint\">1.1.1.1</p>\
-         <nav class=\"windows\" aria-label=\"Period\">"
-    ));
+    assert!(detail.contains("<div class=\"toolbar\">"));
+    assert!(detail.contains("<button class=\"back-button\">"));
+    assert!(
+        !detail.contains("class=\"hint\""),
+        "the masthead states the target, so the toolbar needs no address of its own"
+    );
+    let toolbar_start = detail.find("<div class=\"toolbar\">").expect("a toolbar");
+    let toolbar_end = detail[toolbar_start..]
+        .find("</div>")
+        .expect("the toolbar closes");
+    let toolbar = &detail[toolbar_start..toolbar_start + toolbar_end];
+    assert!(
+        toolbar.contains("<nav class=\"windows\" aria-label=\"Period\">"),
+        "the period selector shares the line with what the page is showing: {toolbar}"
+    );
+    assert!(
+        toolbar.contains("class=\"back-button\""),
+        "the way back opens that line: {toolbar}"
+    );
+    let masthead_end = detail.find("</header>").expect("a closed masthead");
+    assert!(
+        detail[..masthead_end].contains("<div class=\"target-info\">"),
+        "the target of the page closes the masthead, before the toolbar"
+    );
 }
 
 /// Both pages close with the same short manual: a rule narrower than the content, then
@@ -596,7 +619,7 @@ fn both_pages_close_with_a_short_manual() {
     let (status, page) = server.get("/");
     assert_eq!(status, 200);
     assert!(
-        !page.contains(r#"<p class="hint">Times follow"#),
+        !page.contains("class=\"hint\""),
         "the top of the page carries no explanation"
     );
     assert!(page.contains("<footer>\n<hr>\n"));
@@ -610,7 +633,7 @@ fn both_pages_close_with_a_short_manual() {
     assert!(detail.contains("Times follow the time zone of your browser"));
     assert!(
         !detail.contains("times in your time zone"),
-        "the hint under the title states the address only"
+        "the manual under the tables states the time zone, not the masthead"
     );
 }
 
@@ -632,7 +655,10 @@ fn both_pages_show_the_mark_the_server_serves() {
 
     let (status, detail) = server.get("/target?target=1.1.1.1");
     assert_eq!(status, 200);
-    assert!(detail.contains(r#"<header class="masthead"><img class="mark" src="/icon.svg""#));
+    assert!(
+        detail.contains(r#"<div class="brand"><img class="mark" src="/icon.svg""#),
+        "the detail page opens with the same mark, inside the brand block"
+    );
     assert!(detail.contains(r#"href="/icon.svg""#));
 
     let (status, head, body) = server.get_bytes("/icon.svg");
@@ -644,6 +670,98 @@ fn both_pages_show_the_mark_the_server_serves() {
     assert_eq!(status, 200);
     assert!(head.contains("Content-Type: image/png"));
     assert_eq!(&body[..8], b"\x89PNG\r\n\x1a\n");
+}
+
+/// The pages link their stylesheet and their script, and the server serves both as files:
+/// the browser names them in devtools with their own lines, instead of showing them as
+/// text inside the page.
+#[test]
+fn the_pages_link_the_stylesheet_and_the_script_the_server_serves() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    for path in ["/", "/target?target=1.1.1.1"] {
+        let (status, page) = server.get(path);
+        assert_eq!(status, 200);
+        assert!(
+            page.contains(r#"<link rel="stylesheet" href="/style.css">"#),
+            "{path} links its stylesheet"
+        );
+        assert!(
+            page.contains(r#"<script src="/app.js"></script>"#),
+            "{path} loads its script"
+        );
+        assert!(
+            !page.contains("<style>"),
+            "{path} carries no stylesheet of its own"
+        );
+        assert!(
+            !page.contains("<script>\n"),
+            "{path} carries no script of its own"
+        );
+    }
+
+    let (status, head, body) = server.get_bytes("/style.css");
+    assert_eq!(status, 200);
+    assert!(head.contains("Content-Type: text/css; charset=utf-8"));
+    assert!(String::from_utf8_lossy(&body).contains(".masthead"));
+
+    let (status, head, body) = server.get_bytes("/app.js");
+    assert_eq!(status, 200);
+    assert!(head.contains("Content-Type: text/javascript; charset=utf-8"));
+    assert!(String::from_utf8_lossy(&body).contains("Intl.DateTimeFormat"));
+}
+
+/// The identity block at the head of the page — the mark, the name, and the tagline —
+/// is the same on every page and always opens the masthead, flush left. A page may state
+/// what it is showing at its right end, but the identity block never moves.
+#[test]
+fn every_page_opens_with_the_same_brand_block() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, page) = server.get("/");
+    assert_eq!(status, 200);
+    let (status, detail) = server.get("/target?target=1.1.1.1");
+    assert_eq!(status, 200);
+
+    let brand = |html: &str| {
+        let start = html.find(r#"<div class="brand">"#).expect("a brand block");
+        let rest = &html[start..];
+        let end = rest
+            .find(r#"<div class="target-info">"#)
+            .or_else(|| rest.find("</header>"))
+            .expect("the end of the brand block");
+        rest[..end].trim_end().to_string()
+    };
+    assert_eq!(
+        brand(&page),
+        brand(&detail),
+        "one identity block on every page"
+    );
+
+    let after_header = |html: &str| {
+        let start = html
+            .find(r#"<header class="masthead">"#)
+            .expect("a masthead");
+        html[start..]
+            .trim_start_matches(r#"<header class="masthead">"#)
+            .trim_start()
+            .to_string()
+    };
+    assert!(
+        after_header(&page).starts_with(r#"<div class="brand">"#),
+        "the identity block opens the masthead, without anything before it"
+    );
+    assert!(
+        after_header(&detail).starts_with(r#"<div class="brand">"#),
+        "the target of the detail page joins the masthead after the identity block"
+    );
+
+    let shared = brand(&page);
+    assert!(shared.contains(r#"<img class="mark" src="/icon.svg""#));
+    assert!(shared.contains("<h1>Network Monitor</h1>"));
+    assert!(shared.contains(r#"<p class="tagline">Reachability monitoring</p>"#));
 }
 
 #[test]
