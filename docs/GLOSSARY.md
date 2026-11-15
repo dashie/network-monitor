@@ -21,6 +21,7 @@ appears in a requirement, in a component name, or in a public interface.
 | **Notification** | One message the tool sends to the configured Telegram chat, stating a target, the state it reached, the cause when it is a `down`, and the instant. It is created from a recorded state transition and never before it. |
 | **Stable `up` window** | The interval `stabilize_seconds` during which `up` must hold continuously before a recovery is reported. A `down` inside the window cancels the report; `0` reports the recovery at once. |
 | **Probe** | One reachability check of a target, in the transport its method names: an ICMP echo request, a TCP connection, a DNS question, or an HTTP request. |
+| **Priority** | The integer a target states in the configuration to place its lane: the targets that state one come first, the lowest number first, and those without one follow by key. It orders the lanes of the page and the list of the JSON API, and it changes nothing else. |
 | **Probe cycle** | The evaluation of one target that produces one verdict. |
 | **Method** | The transport a target is checked with: `icmp`, `tcp`, `dns`, or `http`. It is part of the target's identity. |
 | **Endpoint** | The method plus the parameters that identify what is checked — an address, a host and port, a name and optional server, a URL — and the expectation, such as the HTTP statuses that count as `up`. |

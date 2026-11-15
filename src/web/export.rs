@@ -115,6 +115,7 @@ mod tests {
             target: target.to_string(),
             interface: Some("eth0".to_string()),
             label: Some("probe".to_string()),
+            priority: None,
             previous_state: previous,
             state,
             occurred_at_ms: at,

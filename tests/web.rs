@@ -129,6 +129,7 @@ fn event(target: &str, previous: TargetState, state: TargetState, at: i64) -> Ev
         target: target.to_string(),
         interface: None,
         label: Some("probe".to_string()),
+        priority: None,
         previous_state: previous,
         state,
         occurred_at_ms: at,
@@ -553,8 +554,8 @@ fn every_row_shows_its_statistics_and_links_to_its_detail_page() {
         "the target has been down for half an hour"
     );
     assert!(
-        !detail.contains("class=\"since\""),
-        "the target is down, so there is no running up stretch to state"
+        detail.contains("<div class=\"stat state down\"><b>down</b>"),
+        "the widget of the state states that the target is down"
     );
     assert!(
         detail.contains("<a class=\"download\" href=\"/export/faults.csv.gz?target=1.1.1.1\">"),
@@ -653,10 +654,10 @@ fn the_page_context_and_its_selector_share_one_line() {
     let (status, detail) = server.get("/target?target=1.1.1.1");
     assert_eq!(status, 200);
     assert!(detail.contains("<div class=\"toolbar\">"));
-    assert!(detail.contains("<a class=\"back-button\" href=\"/\">"));
+    assert!(detail.contains("<a class=\"back-button\" href=\"/\">targets</a>"));
     assert!(
         !detail.contains("class=\"hint\""),
-        "the masthead states the target, so the toolbar needs no address of its own"
+        "nothing explains the page above the chart"
     );
     let toolbar_start = detail.find("<div class=\"toolbar\">").expect("a toolbar");
     let toolbar_end = detail[toolbar_start..]
@@ -671,10 +672,33 @@ fn the_page_context_and_its_selector_share_one_line() {
         toolbar.contains("class=\"back-button\""),
         "the way back opens that line: {toolbar}"
     );
+    let line_start = detail
+        .find("<p class=\"crumbs\">")
+        .expect("what the page shows, on one line");
+    let line_end = detail[line_start..].find("</p>").expect("the line closes");
+    let line = &detail[line_start..line_start + line_end];
+    assert!(
+        line.contains("1.1.1.1") && !line.contains("badge"),
+        "the line states the way back and the target, not the state: {line}"
+    );
+    assert_eq!(
+        detail.matches("<div class=\"stat").count()
+            - detail.matches("<div class=\"stats\">").count(),
+        4,
+        "the state, then the three figures of the period"
+    );
+    assert!(
+        detail.contains("<div class=\"stat state down\"><b>down</b>"),
+        "the state is the first widget of the row"
+    );
+    assert!(
+        !line.contains("\n"),
+        "the line is written as one, so it never breaks on its own: {line}"
+    );
     let masthead_end = detail.find("</header>").expect("a closed masthead");
     assert!(
-        detail[..masthead_end].contains("<div class=\"target-info\">"),
-        "the target of the page closes the masthead, before the toolbar"
+        !detail[..masthead_end].contains("target-info"),
+        "the masthead of the detail page carries the identity block and nothing else"
     );
 }
 
@@ -895,8 +919,8 @@ fn the_open_cause_is_drawn_as_a_note_of_its_fault() {
 }
 
 /// The identity block at the head of the page — the mark, the name, and the tagline —
-/// is the same on every page and always opens the masthead, flush left. A page may state
-/// what it is showing at its right end, but the identity block never moves.
+/// is the same on every page and always opens the masthead, flush left. Nothing joins it:
+/// a page states what it is showing on the line under it, in the toolbar.
 #[test]
 fn every_page_opens_with_the_same_brand_block() {
     let (_directory, database) = seeded_database();
@@ -912,10 +936,7 @@ fn every_page_opens_with_the_same_brand_block() {
             .find(r#"<a class="brand" href="/">"#)
             .expect("a brand block");
         let rest = &html[start..];
-        let end = rest
-            .find(r#"<div class="target-info">"#)
-            .or_else(|| rest.find("</header>"))
-            .expect("the end of the brand block");
+        let end = rest.find("</header>").expect("the end of the brand block");
         rest[..end].trim_end().to_string()
     };
     assert_eq!(
@@ -939,7 +960,7 @@ fn every_page_opens_with_the_same_brand_block() {
     );
     assert!(
         after_header(&detail).starts_with(r#"<a class="brand" href="/">"#),
-        "the target of the detail page joins the masthead after the identity block"
+        "the detail page opens its masthead with the identity block too"
     );
 
     let shared = brand(&page);
@@ -973,6 +994,83 @@ fn the_identity_block_returns_to_the_timeline() {
             "the link covers the mark and the name: {block}"
         );
     }
+}
+
+/// The home page draws the lanes in the order the API lists them: the priority the
+/// configuration gave a target, lowest first, then the targets without one by key. This
+/// is what makes a status board read the way its operator expects.
+#[test]
+fn the_page_draws_the_lanes_in_the_order_of_their_priority() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let path = directory.path().join("events.db");
+    let mut store = Store::open_rw(&path).expect("the database opens");
+    let now = now_ms();
+    for (target, priority) in [
+        ("icmp://1.1.1.1", None),
+        ("icmp://8.8.8.8", Some(20)),
+        ("tcp://1.1.1.1:443", Some(5)),
+        ("https://example.com/health", None),
+    ] {
+        let mut record = event(target, TargetState::Unknown, TargetState::Up, now - 60_000);
+        record.priority = priority;
+        store
+            .record_transition(&record)
+            .expect("the transition is recorded");
+    }
+    drop(store);
+
+    let server = start(&path);
+    let (status, page) = server.get("/");
+    assert_eq!(status, 200);
+    let order = |html: &str| {
+        let mut seen: Vec<String> = Vec::new();
+        for label in [
+            "tcp://1.1.1.1:443",
+            "icmp://8.8.8.8",
+            "https://example.com/health",
+            "icmp://1.1.1.1",
+        ] {
+            let at = html
+                .find(label)
+                .unwrap_or_else(|| panic!("{label} is drawn"));
+            seen.push(format!("{at:08} {label}"));
+        }
+        seen.sort();
+        seen.into_iter()
+            .map(|entry| entry.split(' ').nth(1).unwrap_or_default().to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        order(&page),
+        vec![
+            "tcp://1.1.1.1:443",
+            "icmp://8.8.8.8",
+            "https://example.com/health",
+            "icmp://1.1.1.1",
+        ],
+        "the lane with priority 5 first, then 20, then the two without one by key"
+    );
+
+    let (status, body) = server.json("/api/v1/targets");
+    assert_eq!(status, 200);
+    let mut listed = Vec::new();
+    let mut rest = body.as_str();
+    while let Some(at) = rest.find("\"target\": \"") {
+        rest = &rest[at + "\"target\": \"".len()..];
+        let end = rest.find('"').expect("a closed string");
+        listed.push(rest[..end].to_string());
+        rest = &rest[end..];
+    }
+    assert_eq!(
+        listed,
+        vec![
+            "tcp://1.1.1.1:443",
+            "icmp://8.8.8.8",
+            "https://example.com/health",
+            "icmp://1.1.1.1",
+        ],
+        "the API lists the targets in the order of the page"
+    );
 }
 
 #[test]

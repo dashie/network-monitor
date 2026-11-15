@@ -355,6 +355,8 @@ impl Row {
             target: self.target.clone(),
             interface: self.interface.clone(),
             label: self.label.clone(),
+            // The archive states no priority: the target keeps the one it has.
+            priority: None,
             // The real predecessor is worked out from the timestamps after the writes.
             previous_state: TargetState::Unknown,
             state: self.state,

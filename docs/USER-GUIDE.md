@@ -138,6 +138,7 @@ parse is rejected with a warning and the running configuration stays in effect. 
 |---|---|---|
 | `method` | all | `icmp` (default when omitted), `tcp`, `dns`, `http` |
 | `label` | all | Name in logs and on the page; the key is shown when absent |
+| `priority` | all | Where the lane sits on the page: lowest first, absent = after the others |
 | `timeout_ms` | all | Overrides the global timeout for this target |
 | `interval_ms` | all | Overrides the global interval for this target |
 | `interface` | `icmp`, `tcp` | Bind the probe to a device; refused on the other methods |
@@ -325,8 +326,8 @@ are listed in [Troubleshooting](#troubleshooting), later in this guide.
 `--target` takes `[method:]address[,key=value]…`:
 
 ```bash
---target 1.1.1.1,interface=eth1,label=uplink
---target tcp:1.1.1.1:443,label=cloudflare-https
+--target 1.1.1.1,interface=eth1,label=uplink,priority=1
+--target tcp:1.1.1.1:443,label=cloudflare-https,priority=2
 --target dns:example.com@9.9.9.9,record=AAAA
 --target http:https://example.com/health,expect=204,timeout_ms=1500
 ```
@@ -351,12 +352,13 @@ piped.
 same masthead — the mark, the name of the application, and its tagline — flush left, at the
 same height, so nothing moves when you go from one page to the other. That block is a link:
 selecting the mark, the name, or the tagline returns to the timeline from any page, the API
-reference included. A page may state what it is showing at the right end of the masthead, on
-the same centre line as that block; the toolbar under it carries the control that changes what
-is shown.
+reference included. Nothing joins the identity block: the toolbar under it states what the page
+is showing, on the left of the line, and carries the control that changes it, on the right.
 
 - `/` — one lane per target over the selected window (1 h by default; 1, 2, 4, 6, 12, 24 h).
-  A lane is drawn as one bar: only its two outer ends are rounded, so the bands of the states
+  The lanes are ordered by the `priority` the configuration gives a target, lowest number
+  first; the targets without one follow them, by key. The same order is the one the JSON API
+  lists. A lane is drawn as one bar: only its two outer ends are rounded, so the bands of the states
   meet square. A fault too short to reach a visible width is drawn at a minimum width and
   coloured **orange instead of red**, so a brief outage is not lost in a wide window and its
   width is never mistaken for its duration; hover it for the exact instants.
@@ -369,9 +371,12 @@ is shown.
   stated share of the width (15, 30, 45 and 10 per cent) and every row is the same height.
 - `/target?target=<key>&days=30d` — one target for 30, 60, 90, 180, or 360 days: a bar per day,
   the last 10 faults of that target in the same table as the timeline page, and a per-day table.
-  The masthead states the target at its right end: its label and address, then its status
-  (up/down + duration). A back button in the toolbar always returns to the list page,
-  whatever page you came from.
+  The toolbar states the page on one line, the parts separated by a dot:
+  `targets • <label> (<address>)`. `targets` is the way back to the list page — a link to `/`,
+  whatever page you came from —, and the label with the address in parentheses is the target,
+  in bold. Under the toolbar, four widgets: the first states the state of the target — its word
+  and how long it has held, white on a tile of the colour the chart gives that state —, and the
+  other three state the faults, the down time, and the average `up` run of the period.
 - `Download History` — the whole history as a gzipped CSV, from `/export/faults.csv.gz`, named
   `faults-YYYYMMDD.csv.gz`. On a target page the same link downloads **only that target's**
   history (`/export/faults.csv.gz?target=<key>`) and the file is named after it —

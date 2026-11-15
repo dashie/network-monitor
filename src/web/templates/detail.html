@@ -17,10 +17,6 @@
 <main>
 <header class="masthead">
 {brand}
-<div class="target-info">
-<span class="target-identity">{identity}</span>
-<span class="target-state"><span class="badge {state}">{state}</span>{since}</span>
-</div>
 </header>
 <div class="paused" id="paused" role="status" hidden>
 <svg class="paused-mark" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
@@ -32,10 +28,11 @@
 <button type="button" class="paused-now" id="paused-now">Refresh now</button>
 </div>
 <div class="toolbar">
-<a class="back-button" href="/">← Back</a>
+<p class="crumbs"><a class="back-button" href="/">targets</a><span class="target-identity">{identity}</span></p>
 {periods}
 </div>
 <div class="stats">
+<div class="stat state {state}"><b>{state}</b><span>{held}</span></div>
 <div class="stat"><b>{total} faults</b><span>last {period}</span></div>
 <div class="stat"><b>{down_ms}</b><span>down time in the last {period}</span></div>
 <div class="stat" title="{avg_up_hint}"><b>{avg_up}</b><span>avg up run in {period} · max {longest}</span></div>

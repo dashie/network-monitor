@@ -30,12 +30,15 @@ database = "./tmp/network-monitor.db"
 retention_days = 0
 
 # ICMP echo request, the default method. `interface` is optional: without it the
-# default-route interface is used.
+# default-route interface is used. `priority` (optional) orders the lanes of the page:
+# the targets that state one come first, the lowest number first, and the others follow
+# by key. Two targets may state the same priority: the key then breaks the tie.
 [[targets]]
 method = "icmp"
 ip = "1.1.1.1"
 # interface = "eth1"
 label = "cloudflare-dns"
+priority = 1
 
 [[targets]]
 ip = "192.168.1.1"

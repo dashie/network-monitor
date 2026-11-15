@@ -59,7 +59,18 @@ struct Supervisor {
 impl Supervisor {
     fn start_workers(&mut self) -> Result<(), RunError> {
         let initial_states = {
-            let store = self.store.lock().map_err(|_| RunError::Lock)?;
+            let mut store = self.store.lock().map_err(|_| RunError::Lock)?;
+            // The page orders the lanes by the priority of this configuration. A target
+            // seen before is updated here, so a change takes effect on the page at once
+            // instead of on its next transition; a target seen for the first time carries
+            // its own on the event that creates its row.
+            let priorities: Vec<(String, Option<i64>)> = self
+                .config
+                .targets
+                .iter()
+                .map(|target| (target.key(), target.priority))
+                .collect();
+            store.set_priorities(&priorities)?;
             store.load_states()?
         };
 
@@ -382,6 +393,7 @@ fn monitor_target(
                 target: target.key(),
                 interface: target.interface.clone(),
                 label: target.label.clone(),
+                priority: target.priority,
                 previous_state: transition.from,
                 state: transition.to,
                 occurred_at_ms: now_ms(),

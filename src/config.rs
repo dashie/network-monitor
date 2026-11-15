@@ -87,6 +87,8 @@ pub struct FileTarget {
     pub expect_status: Option<Vec<String>>,
     pub interface: Option<String>,
     pub label: Option<String>,
+    /// Where the lane of this target sits on the page: lower first, absent = after them.
+    pub priority: Option<i64>,
     pub timeout_ms: Option<u64>,
     pub interval_ms: Option<u64>,
 }
@@ -97,6 +99,7 @@ pub struct TargetSpec {
     pub endpoint: Endpoint,
     pub interface: Option<String>,
     pub label: Option<String>,
+    pub priority: Option<i64>,
     pub timeout_ms: Option<u64>,
     pub interval_ms: Option<u64>,
 }
@@ -107,6 +110,7 @@ pub struct Target {
     pub endpoint: Endpoint,
     pub interface: Option<String>,
     pub label: Option<String>,
+    pub priority: Option<i64>,
     pub timeout: Duration,
     pub interval: Duration,
 }
@@ -148,6 +152,7 @@ impl Target {
             endpoint: spec.endpoint,
             interface: spec.interface,
             label: spec.label,
+            priority: spec.priority,
             timeout: millis(spec.timeout_ms, format!("targets[{index}].timeout_ms"))?
                 .unwrap_or(timeout),
             interval: millis(spec.interval_ms, format!("targets[{index}].interval_ms"))?
@@ -168,6 +173,7 @@ impl TargetSpec {
 
         let mut interface = None;
         let mut label = None;
+        let mut priority = None;
         let mut timeout_ms = None;
         let mut interval_ms = None;
         let mut record = None;
@@ -189,6 +195,7 @@ impl TargetSpec {
             match name {
                 "interface" => interface = Some(value.to_string()),
                 "label" => label = Some(value.to_string()),
+                "priority" => priority = Some(parse_priority(value)?),
                 "timeout_ms" => timeout_ms = Some(parse_millis(value)?),
                 "interval_ms" => interval_ms = Some(parse_millis(value)?),
                 "record" => record = Some(value.to_string()),
@@ -196,7 +203,7 @@ impl TargetSpec {
                 other => {
                     return Err(format!(
                         "unknown target attribute '{other}' (expected interface, label, \
-                         timeout_ms, interval_ms, record or expect)"
+                         priority, timeout_ms, interval_ms, record or expect)"
                     ))
                 }
             }
@@ -258,6 +265,7 @@ impl TargetSpec {
             endpoint,
             interface,
             label,
+            priority,
             timeout_ms,
             interval_ms,
         })
@@ -370,6 +378,7 @@ impl TargetSpec {
             endpoint,
             interface: clean(target.interface),
             label: clean(target.label),
+            priority: target.priority,
             timeout_ms: target.timeout_ms,
             interval_ms: target.interval_ms,
         })
@@ -598,6 +607,8 @@ impl Config {
             #[serde(skip_serializing_if = "Option::is_none")]
             label: Option<String>,
             #[serde(skip_serializing_if = "Option::is_none")]
+            priority: Option<i64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             timeout_ms: Option<u64>,
             #[serde(skip_serializing_if = "Option::is_none")]
             interval_ms: Option<u64>,
@@ -637,6 +648,7 @@ impl Config {
                 }
                 serializable.interface = target.interface.clone();
                 serializable.label = target.label.clone();
+                serializable.priority = target.priority;
                 if target.timeout != self.timeout {
                     serializable.timeout_ms = Some(target.timeout.as_millis() as u64);
                 }
@@ -691,6 +703,12 @@ fn millis(value: Option<u64>, key: String) -> Result<Option<Duration>, ConfigErr
         Some(0) => Err(invalid(key, "must be greater than zero")),
         Some(ms) => Ok(Some(Duration::from_millis(ms))),
     }
+}
+
+/// The priority of a target: any integer, lower first. Absent leaves it unordered.
+fn parse_priority(text: &str) -> Result<i64, String> {
+    text.parse::<i64>()
+        .map_err(|_| format!("'{text}' is not a whole number"))
 }
 
 fn parse_millis(text: &str) -> Result<u64, String> {
@@ -1097,6 +1115,50 @@ mod tests {
         assert_eq!(spec.endpoint.method(), Method::Icmp);
         assert_eq!(spec.endpoint.to_string(), "icmp://1.1.1.1");
         assert_eq!(spec.label.as_deref(), Some("cloudflare"));
+    }
+
+    /// A target states where its lane sits on the page, in the file and on the command
+    /// line alike; a whole number, negative ones included.
+    #[test]
+    fn a_target_carries_its_priority() {
+        let spec = TargetSpec::parse_spec("1.1.1.1,priority=3").unwrap();
+        assert_eq!(spec.priority, Some(3));
+        let spec = TargetSpec::parse_spec("1.1.1.1,priority=-2,label=cloudflare").unwrap();
+        assert_eq!(spec.priority, Some(-2));
+        assert_eq!(spec.label.as_deref(), Some("cloudflare"));
+        assert!(TargetSpec::parse_spec("1.1.1.1,priority=high").is_err());
+        assert!(TargetSpec::parse_spec("1.1.1.1,priority=1.5").is_err());
+        assert!(
+            TargetSpec::parse_spec("1.1.1.1,priority=").is_err(),
+            "an empty value is refused like every other attribute"
+        );
+
+        let file = parse(
+            "[[targets]]\nip = \"1.1.1.1\"\npriority = 7\n",
+            std::path::Path::new("test.toml"),
+        )
+        .unwrap();
+        let config = Config::resolve(Some(file), Overrides::default()).unwrap();
+        assert_eq!(config.targets[0].priority, Some(7));
+    }
+
+    /// `--show-config` states the priority the process resolved, and states none when the
+    /// target has none.
+    #[test]
+    fn the_effective_configuration_states_the_priority() {
+        let file = parse(
+            "[[targets]]\nip = \"1.1.1.1\"\npriority = 4\n\n[[targets]]\nip = \"8.8.8.8\"\n",
+            std::path::Path::new("test.toml"),
+        )
+        .unwrap();
+        let config = Config::resolve(Some(file), Overrides::default()).unwrap();
+        let rendered = config.to_toml();
+        assert!(rendered.contains("priority = 4"), "got {rendered}");
+        assert_eq!(
+            rendered.matches("priority").count(),
+            1,
+            "a target without a priority states none: {rendered}"
+        );
     }
 
     #[test]

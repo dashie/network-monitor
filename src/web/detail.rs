@@ -6,11 +6,11 @@
 
 use std::fmt::Write as _;
 
-use crate::store::{DailyDrops, Fault, TargetStateRow, TimelineSegment};
+use crate::store::{DailyDrops, Fault, TargetState, TargetStateRow, TimelineSegment};
 use crate::time::format_rfc3339;
 
 use super::encode;
-use super::page::{escape, faults_table, format_runs, format_span, runs_stats, up_for};
+use super::page::{escape, faults_table, format_runs, format_span, runs_stats};
 use super::stats;
 
 const WIDTH: f64 = 1000.0;
@@ -52,11 +52,12 @@ pub fn target_page(
         .clone()
         .unwrap_or_else(|| target.target.clone());
     let address = escape(&target.target);
-    // The masthead states the target at its right end: the label with the address it names,
-    // or the address alone when the target carries no label.
+    // The toolbar states what the page shows, on one line: the way back to the list, the
+    // target — its label with the address in parentheses, or the address alone — and the
+    // state with how long it has held.
     let identity = match &target.label {
         Some(label) => format!(
-            "<span class=\"target-label\">{}</span> | <span class=\"target-address\">{address}</span>",
+            "<span class=\"target-label\">{}</span> (<span class=\"target-address\">{address}</span>)",
             escape(label)
         ),
         None => format!("<span class=\"target-address\">{address}</span>"),
@@ -69,12 +70,15 @@ pub fn target_page(
         Some(longest_ms) => format_span(longest_ms),
         None => "—".to_string(),
     };
-    let since = match up_for(target.state, target.last_change_at_ms, now_ms) {
-        Some(up_for_ms) => format!(
-            "<span class=\"since\">for {}</span>",
-            format_span(up_for_ms)
+    // The state is the first widget of the page, ahead of the figures of the period: its
+    // value is the state, and its caption how long that state has held. A target that has
+    // never answered has no stretch to measure, so it states the state alone.
+    let held = match target.state {
+        TargetState::Unknown => "current state".to_string(),
+        _ => format!(
+            "for {}",
+            format_span((now_ms - target.last_change_at_ms).max(0))
         ),
-        None => String::new(),
     };
 
     let title = format!(
@@ -93,7 +97,7 @@ pub fn target_page(
         .replace("{brand}", &super::templates::brand())
         .replace("{identity}", &identity)
         .replace("{state}", target.state.as_str())
-        .replace("{since}", &since)
+        .replace("{held}", &held)
         .replace("{periods}", &period_links(&target.target, period_days))
         .replace("{total}", &total.to_string())
         .replace("{period}", &period)
@@ -595,12 +599,8 @@ mod tests {
         );
         assert_eq!(rendered.matches("class=\"back-button\"").count(), 1);
         assert!(
-            rendered.contains("<a class=\"back-button\" href=\"/\">"),
+            rendered.contains("<a class=\"back-button\" href=\"/\">targets</a>"),
             "the way back is a link to the timeline, not a step into the history"
-        );
-        assert!(
-            !rendered.contains("breadcrumb"),
-            "breadcrumb should be removed"
         );
     }
 
@@ -608,7 +608,10 @@ mod tests {
     fn the_page_states_the_state_and_the_total_down_time() {
         let days = [day(0, 2, 90_000), day(1, 0, 0), day(2, 5, 600_000)];
         let rendered = target_page(&target(), &days, &[], &[], NOW, DEFAULT_PERIOD_DAYS);
-        assert!(rendered.contains("<span class=\"badge up\">up</span>"));
+        assert!(
+            rendered.contains("<div class=\"stat state up\"><b>up</b>"),
+            "the state opens the row of widgets, on a tile of its own colour"
+        );
         assert!(rendered.contains("<b>7 faults</b>"));
         assert!(
             rendered.contains("<b>11m</b>"),
@@ -782,8 +785,10 @@ mod tests {
         );
     }
 
+    /// The first widget is the state itself: its value is the state, its caption how long
+    /// that state has held. It is the first of the four, ahead of the figures of the period.
     #[test]
-    fn the_badge_says_how_long_the_target_has_been_up() {
+    fn the_first_widget_states_the_state_and_how_long_it_has_held() {
         let rendered = target_page(
             &target(),
             &[day(0, 1, 60_000)],
@@ -792,11 +797,65 @@ mod tests {
             NOW,
             DEFAULT_PERIOD_DAYS,
         );
-        assert!(rendered.contains("<span class=\"since\">for 16m</span>"));
+        let stats = rendered
+            .find("<div class=\"stats\">")
+            .expect("the row of widgets");
+        let first = &rendered[stats..];
+        let first = &first[..first.find("</div>").expect("the first widget closes")];
+        assert!(
+            first.contains("<b>up</b><span>for 16m</span>"),
+            "the state and its streak share the first widget: {first}"
+        );
+        assert_eq!(
+            rendered.matches("<div class=\"stat").count()
+                - rendered.matches("<div class=\"stats\">").count(),
+            4,
+            "the state, the faults, the down time, and the average up run"
+        );
     }
 
+    /// A target that is down states that, and how long it has been down: the widget
+    /// measures the current state, it does not claim an `up` streak.
     #[test]
-    fn the_masthead_states_the_label_and_the_address_of_the_target() {
+    fn a_target_that_is_not_up_states_its_own_state() {
+        let mut down = target();
+        down.state = TargetState::Down;
+        let rendered = target_page(
+            &down,
+            &[day(0, 1, 60_000)],
+            &[],
+            &[],
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+        );
+        assert!(rendered
+            .contains("<div class=\"stat state down\"><b>down</b><span>for 16m</span></div>"));
+    }
+
+    /// A target that has never answered has no stretch to measure, so its widget states
+    /// the state and nothing it cannot know.
+    #[test]
+    fn an_unknown_state_states_no_stretch() {
+        let mut unknown = target();
+        unknown.state = TargetState::Unknown;
+        let rendered = target_page(
+            &unknown,
+            &[day(0, 1, 60_000)],
+            &[],
+            &[],
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+        );
+        assert!(rendered.contains(
+            "<div class=\"stat state unknown\"><b>unknown</b><span>current state</span></div>"
+        ));
+    }
+
+    /// The toolbar states what the page shows, on the one line above the chart: the way
+    /// back to the list, the target in bold, and its state. The masthead stays the identity
+    /// block of every page, with nothing of the target in it.
+    #[test]
+    fn the_toolbar_states_the_target_the_way_back_and_the_state() {
         let rendered = target_page(
             &target(),
             &[day(0, 1, 60_000)],
@@ -805,17 +864,31 @@ mod tests {
             NOW,
             DEFAULT_PERIOD_DAYS,
         );
+        let crumbs = rendered
+            .find("<p class=\"crumbs\">")
+            .expect("one line under the masthead");
+        let line = &rendered[crumbs..];
+        let line = &line[..line.find("</p>").expect("the line closes")];
         assert!(
-            rendered.contains(
-                "<span class=\"target-label\">cloudflare</span> | \
-                 <span class=\"target-address\">1.1.1.1</span>"
+            line.contains("<a class=\"back-button\" href=\"/\">targets</a>"),
+            "the way back opens the line: {line}"
+        );
+        assert!(
+            line.contains(
+                "<span class=\"target-identity\"><span class=\"target-label\">cloudflare</span> \
+                 (<span class=\"target-address\">1.1.1.1</span>)</span>"
             ),
-            "the label and the address it names share one line, at the top right"
+            "the label with the address it names, in parentheses: {line}"
+        );
+        assert!(
+            !line.contains("badge") && !line.contains("for 16m"),
+            "the state is a widget of its own, not a third part of the line: {line}"
         );
         let masthead_end = rendered.find("</header>").expect("a closed masthead");
         assert!(
-            rendered[..masthead_end].contains("<div class=\"target-info\">"),
-            "the identity of the target sits in the masthead, above the toolbar"
+            !rendered[..masthead_end].contains("target-info")
+                && !rendered[..masthead_end].contains("1.1.1.1"),
+            "the masthead of the detail page is the identity block of every page"
         );
     }
 
@@ -837,22 +910,13 @@ mod tests {
             "one address, with no empty label beside it"
         );
         assert!(!rendered.contains("class=\"target-label\""));
-        assert!(rendered.contains("<span class=\"target-address\">1.1.1.1</span>"));
-    }
-
-    #[test]
-    fn a_target_that_is_not_up_states_no_streak() {
-        let mut down = target();
-        down.state = TargetState::Down;
-        let rendered = target_page(
-            &down,
-            &[day(0, 1, 60_000)],
-            &[],
-            &[],
-            NOW,
-            DEFAULT_PERIOD_DAYS,
+        assert!(
+            rendered.contains(
+                "<span class=\"target-identity\"><span class=\"target-address\">1.1.1.1</span></span>"
+            ),
+            "the address alone, with no empty parentheses"
         );
-        assert!(!rendered.contains("class=\"since\""));
+        assert!(!rendered.contains("()"));
     }
 
     #[test]

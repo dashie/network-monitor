@@ -14,6 +14,7 @@ fn event(index: i64) -> Event {
         target: "1.1.1.1".to_string(),
         interface: Some("eth1".to_string()),
         label: None,
+        priority: None,
         previous_state: if index % 2 == 0 {
             TargetState::Up
         } else {

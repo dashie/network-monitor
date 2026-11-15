@@ -42,6 +42,7 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0028 | Publish a read-only JSON API under `/api/v1` with an envelope and `limit`/`offset` | accepted | 2026-11-14 | Object root with `data` and `meta`, never a bare array; `limit` 1–1000, errors with a stable code; hand-written JSON, no new crate; an OpenAPI document served by the binary; `Access-Control-Allow-Origin: *` on an unauthenticated read-only surface |
 | ADR-0029 | Render the API reference in the browser from the document the binary serves | accepted | 2026-11-15 | `/api/v1/docs` loads a vendored Swagger UI at `/api/v1/openapi.json`, embedded with `include_str!` so no network and no CDN are needed; `validatorUrl` off, `GET`/`HEAD` only; the footer of both pages links to it; a body larger than the socket buffer exposed and fixed a non-blocking accepted socket |
 | ADR-0030 | Hold the reload while a cause is open | accepted | 2026-11-15 | The `meta` moves into `noscript`; the script drives the 30 s countdown and holds it while a cause is open, and the open message states the hold and offers `Refresh now` |
+| ADR-0031 | Order the lanes by a priority the configuration states | accepted | 2026-11-15 | `priority` on a target, stored in `targets.priority` (schema 3) and written by the monitor on start, reload, and the event that creates the row; page and API order by `priority IS NULL, priority, target` |
 
 ## Records
 
@@ -1339,3 +1340,67 @@ when it is able to drive the countdown itself.
   of the page.
 - Fetch the timeline and patch the page instead of reloading: rejected, it is the client-side
   state ADR-0010 removed, for a page a human glances at.
+
+## ADR-0031 — Order the lanes by a priority the configuration states
+
+**Status:** accepted · **Date:** 2026-11-15
+
+### Context
+
+The lanes of the page were ordered by the target key — `ORDER BY target` over the `targets`
+table —, which is alphabetical by scheme and address: a board showed the `dns://` targets first,
+then `https://`, then `icmp://`, then `tcp://`, whatever the operator cared about. The order that
+matters to a person who runs the board is "the link first, then the servers, then the rest", and
+it is a property of that deployment, not of the key.
+
+Two constraints shape any answer:
+
+- The page must be able to state the order. `serve` has no targets at all — it reads the
+  database and nothing else — so an order that lives only in the configuration file cannot reach
+  the page in that mode, and `monitor --listen` would then disagree with `serve`.
+- The order must change when the configuration changes, not when a target happens to transition.
+  A stable target records no event for days, so "the next event carries the new order" is not an
+  answer.
+
+### Decision
+
+1. A target may state `priority = <integer>` in the configuration file or `priority=<integer>` in
+   the command-line target form. Any integer, negative included; absent means "no priority".
+2. The priority is stored in the `targets` projection — `priority INTEGER`, schema version 3 —
+   written by the monitor, which is the only component that has the configuration. The page and
+   the API order the lanes with one shared rule:
+   `ORDER BY priority IS NULL, priority, target`.
+3. The monitor writes it twice, on purpose: on the event that creates a target's row (so a target
+   seen for the first time is ordered from its first event), and for every target it already
+   knows when it starts or applies a reload (so a change reaches an existing row at once, without
+   waiting for a transition).
+4. A database written before version 3 is read in the order it always had — the page never
+   migrates the file (INV-10) — and the column appears at the next writable open.
+5. Two targets may state the same priority: the key breaks the tie, so the order never depends on
+   the order of the writes.
+
+### Consequences
+
+- The page keeps one source of truth for its order, the database, and `serve` keeps working with
+  no configuration at all.
+- The order is a fact about the last configuration a target was seen under: a target removed from
+  the configuration keeps the priority it had, exactly as it keeps its label.
+- The JSON API lists the targets in the same order as the page. `priority` is not published as a
+  property: the contract stays about the state of the targets, and the order is observable
+  without it.
+- The schema moves to version 3. A 0.5 binary reading this database refuses it (BR-9); a binary
+  of this version reading an older database migrates it on the next writable open, as it always
+  did.
+- An imported archive states no priority (the file has no column for it), so an import leaves the
+  priorities of the database as they are.
+
+### Alternatives considered
+
+- Order by label: rejected, it makes the order alphabetical in a field meant for humans and gives
+  no way to say "this one first".
+- Keep the order in the configuration and sort in the web layer: rejected, `serve` has no
+  configuration, so the two modes would disagree.
+- Store the order in a separate table: rejected, `targets` already holds the configuration facts
+  of a target — label and interface — and one more column needs no second table, no join, and no
+  second notion of "a target".
+- Renumber on write so the numbers are dense: rejected, the number is the operator's, not ours.

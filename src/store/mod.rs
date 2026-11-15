@@ -48,6 +48,8 @@ pub struct Event {
     pub target: String,
     pub interface: Option<String>,
     pub label: Option<String>,
+    /// Where the lane of this target sits on the page, as the configuration gave it.
+    pub priority: Option<i64>,
     pub previous_state: TargetState,
     pub state: TargetState,
     pub occurred_at_ms: i64,
@@ -190,6 +192,10 @@ const DAY_MS: i64 = 86_400_000;
 /// open of an older file selects `NULL` in their place.
 const CAUSE_COLUMNS: i64 = 2;
 
+/// The schema version that added `targets.priority`. A read-only open of an older file
+/// orders the lanes as it always did, by key.
+const PRIORITY_COLUMN: i64 = 3;
+
 const FAULTS_SELECT: &str = "
 SELECT e.id, e.target, t.label, e.occurred_at_ms,
        (SELECT MIN(n.occurred_at_ms) FROM events n
@@ -291,6 +297,9 @@ pub struct Store {
     /// Whether the file carries the two cause columns. A read-only open of a database
     /// written before them reads `NULL` in their place instead of migrating the file.
     has_cause: bool,
+    /// Whether the file carries `targets.priority`. A read-only open of a database written
+    /// before it orders the lanes by key, as it always did, instead of migrating the file.
+    has_priority: bool,
 }
 
 /// A connection that cannot write, for every read-only entry point.
@@ -361,6 +370,7 @@ impl Store {
         let mut store = Store {
             connection,
             has_cause: true,
+            has_priority: true,
         };
         store.connection.execute_batch(PRAGMAS)?;
         store.migrate()?;
@@ -380,10 +390,11 @@ impl Store {
         // A database one version behind is read as it is: the two cause columns it lacks
         // are selected as `NULL`, so a read-only process never writes to the file, and a
         // page can run against a snapshot or a volume mounted read-only (INV-10).
-        let has_cause = checked_version(&connection, path)? >= CAUSE_COLUMNS;
+        let version = checked_version(&connection, path)?;
         Ok(Store {
             connection,
-            has_cause,
+            has_cause: version >= CAUSE_COLUMNS,
+            has_priority: version >= PRIORITY_COLUMN,
         })
     }
 
@@ -417,6 +428,9 @@ impl Store {
                 if found < 2 {
                     self.add_cause_columns()?;
                 }
+                if found < PRIORITY_COLUMN {
+                    self.add_priority_column()?;
+                }
                 if found < SCHEMA_VERSION {
                     self.connection.execute(
                         "UPDATE schema_meta SET version = ?1",
@@ -447,6 +461,44 @@ impl Store {
                     .execute_batch(&format!("ALTER TABLE events ADD COLUMN {column} TEXT"))?;
             }
         }
+        Ok(())
+    }
+
+    /// Add the priority column to a version 2 database, keeping every target.
+    ///
+    /// `CREATE TABLE IF NOT EXISTS` cannot add a column to a table that exists, so the
+    /// step is written here: the rows that predate it read `NULL`, which is the same as a
+    /// target the configuration gives no priority.
+    fn add_priority_column(&mut self) -> Result<(), StoreError> {
+        let present: Option<i64> = self
+            .connection
+            .query_row(
+                "SELECT 1 FROM pragma_table_info('targets') WHERE name = 'priority'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if present.is_none() {
+            self.connection
+                .execute_batch("ALTER TABLE targets ADD COLUMN priority INTEGER")?;
+        }
+        Ok(())
+    }
+
+    /// Record the priority the configuration gives each target, for the rows that already
+    /// exist: a target seen for the first time carries its own on its first event, so the
+    /// two together keep the projection in step with the configuration.
+    pub fn set_priorities(&mut self, entries: &[(String, Option<i64>)]) -> Result<(), StoreError> {
+        let transaction = self.connection.transaction()?;
+        {
+            let mut update = transaction.prepare(
+                "UPDATE targets SET priority = ?2 WHERE target = ?1 AND priority IS NOT ?2",
+            )?;
+            for (target, priority) in entries {
+                update.execute(params![target, priority])?;
+            }
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -491,12 +543,13 @@ impl Store {
 
         transaction.execute(
             "INSERT INTO targets
-                (target, interface, label, current_state,
+                (target, interface, label, priority, current_state,
                  first_seen_at_ms, last_change_at_ms, last_rtt_us)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)
              ON CONFLICT(target) DO UPDATE SET
                 interface         = excluded.interface,
                 label             = excluded.label,
+                priority          = excluded.priority,
                 current_state     = excluded.current_state,
                 last_change_at_ms = excluded.last_change_at_ms,
                 last_rtt_us       = excluded.last_rtt_us",
@@ -504,6 +557,7 @@ impl Store {
                 event.target,
                 event.interface,
                 event.label,
+                event.priority,
                 event.state.as_str(),
                 event.occurred_at_ms,
                 event.rtt_us,
@@ -662,12 +716,13 @@ impl Store {
 
     /// Current state of every target, ordered by address.
     pub fn states(&self) -> Result<Vec<TargetStateRow>, StoreError> {
-        let mut statement = self.connection.prepare(
+        let mut statement = self.connection.prepare(&format!(
             "SELECT target, interface, label, current_state,
                     first_seen_at_ms, last_change_at_ms, last_rtt_us
              FROM targets
-             ORDER BY target",
-        )?;
+             ORDER BY {}",
+            self.lane_order()
+        ))?;
         let rows = statement.query_map([], |row| {
             let state: String = row.get(3)?;
             Ok(TargetStateRow {
@@ -683,6 +738,17 @@ impl Store {
 
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StoreError::from)
+    }
+
+    /// The order of the lanes: the priority the configuration gave a target, lowest
+    /// first, then the targets without one, by key. A file written before the priority
+    /// column existed orders by key alone, as it always did.
+    fn lane_order(&self) -> &'static str {
+        if self.has_priority {
+            "priority IS NULL, priority, target"
+        } else {
+            "target"
+        }
     }
 
     /// The faults query, with the cause columns it can read from this file.
@@ -1036,9 +1102,10 @@ impl Store {
             return Ok(Vec::new());
         }
 
-        let mut targets_statement = self
-            .connection
-            .prepare("SELECT target, label FROM targets ORDER BY target")?;
+        let mut targets_statement = self.connection.prepare(&format!(
+            "SELECT target, label FROM targets ORDER BY {}",
+            self.lane_order()
+        ))?;
         let targets = targets_statement
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
@@ -1118,6 +1185,7 @@ mod tests {
             target: target.to_string(),
             interface: None,
             label: None,
+            priority: None,
             previous_state: previous,
             state,
             occurred_at_ms: at,
@@ -1166,6 +1234,152 @@ mod tests {
 
         let states = store.load_states().unwrap();
         assert_eq!(states.get("1.1.1.1"), Some(&TargetState::Up));
+    }
+
+    /// The lanes of the page and of the API follow the configured priority: the targets
+    /// that state one come first, lowest number first, and the others follow by key.
+    #[test]
+    fn the_lanes_follow_the_configured_priority() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        let mut with_priority = |target: &str, priority: Option<i64>, at: i64| {
+            let mut record = event(target, TargetState::Unknown, TargetState::Up, at);
+            record.priority = priority;
+            store.record_transition(&record).unwrap();
+        };
+        with_priority("icmp://1.1.1.1", None, 1_000);
+        with_priority("icmp://8.8.8.8", Some(20), 2_000);
+        with_priority("tcp://1.1.1.1:443", Some(10), 3_000);
+        with_priority("https://example.com/", None, 4_000);
+
+        let ordered = |rows: Vec<String>| rows;
+        assert_eq!(
+            ordered(
+                store
+                    .states()
+                    .unwrap()
+                    .into_iter()
+                    .map(|row| row.target)
+                    .collect()
+            ),
+            vec![
+                "tcp://1.1.1.1:443",
+                "icmp://8.8.8.8",
+                "https://example.com/",
+                "icmp://1.1.1.1",
+            ],
+            "the lowest priority first, then the targets without one by key"
+        );
+        assert_eq!(
+            ordered(
+                store
+                    .timeline(0, 5_000)
+                    .unwrap()
+                    .into_iter()
+                    .map(|lane| lane.target)
+                    .collect()
+            ),
+            vec![
+                "tcp://1.1.1.1:443",
+                "icmp://8.8.8.8",
+                "https://example.com/",
+                "icmp://1.1.1.1",
+            ],
+            "the chart draws the lanes in the same order as the API lists them"
+        );
+
+        // A configuration change reaches the rows that already exist, before the target
+        // records anything else.
+        store
+            .set_priorities(&[
+                ("icmp://1.1.1.1".to_string(), Some(5)),
+                ("https://example.com/".to_string(), Some(30)),
+            ])
+            .unwrap();
+        assert_eq!(
+            ordered(
+                store
+                    .states()
+                    .unwrap()
+                    .into_iter()
+                    .map(|row| row.target)
+                    .collect()
+            ),
+            vec![
+                "icmp://1.1.1.1",
+                "tcp://1.1.1.1:443",
+                "icmp://8.8.8.8",
+                "https://example.com/",
+            ],
+            "the priority the configuration states now wins"
+        );
+    }
+
+    /// Two targets may state the same priority: the key breaks the tie, so the order of
+    /// the lanes never depends on the order of the writes.
+    #[test]
+    fn targets_of_equal_priority_are_ordered_by_key() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        for (target, at) in [("icmp://8.8.8.8", 1_000), ("icmp://1.1.1.1", 2_000)] {
+            let mut record = event(target, TargetState::Unknown, TargetState::Up, at);
+            record.priority = Some(1);
+            store.record_transition(&record).unwrap();
+        }
+        let order: Vec<String> = store
+            .states()
+            .unwrap()
+            .into_iter()
+            .map(|row| row.target)
+            .collect();
+        assert_eq!(order, vec!["icmp://1.1.1.1", "icmp://8.8.8.8"]);
+    }
+
+    /// A database written before the priority column is read as it is, in the order it
+    /// always had, and the column appears only when a writing process opens it.
+    #[test]
+    fn a_database_without_the_priority_column_is_read_by_key() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("events.db");
+        {
+            let mut store = Store::open_rw(&path).unwrap();
+            for (target, at) in [("icmp://8.8.8.8", 1_000), ("icmp://1.1.1.1", 2_000)] {
+                store
+                    .record_transition(&event(target, TargetState::Unknown, TargetState::Up, at))
+                    .unwrap();
+            }
+            // Take the file back to the shape a 0.3 binary wrote: no priority column.
+            store
+                .connection
+                .execute_batch(
+                    "ALTER TABLE targets DROP COLUMN priority;
+                     UPDATE schema_meta SET version = 2;",
+                )
+                .unwrap();
+        }
+
+        let reader = Store::open_ro(&path).expect("an older database is read as it is");
+        let order: Vec<String> = reader
+            .states()
+            .unwrap()
+            .into_iter()
+            .map(|row| row.target)
+            .collect();
+        assert_eq!(order, vec!["icmp://1.1.1.1", "icmp://8.8.8.8"]);
+        assert_eq!(reader.timeline(0, 5_000).unwrap().len(), 2);
+        let version: i64 = reader
+            .connection
+            .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2, "a read-only open writes nothing at all");
+        drop(reader);
+
+        let writer = Store::open_rw(&path).unwrap();
+        let version: i64 = writer
+            .connection
+            .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION, "a writing open migrates the file");
     }
 
     /// The export of a detail page covers one target and nothing else.
@@ -1616,7 +1830,23 @@ mod tests {
             .connection
             .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2, "the migration stamps the new version");
+        assert_eq!(
+            version, SCHEMA_VERSION,
+            "the migration stamps the new version"
+        );
+        let priority: Option<i64> = store
+            .connection
+            .query_row(
+                "SELECT 1 FROM pragma_table_info('targets') WHERE name = 'priority'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(
+            priority.is_some(),
+            "the same migration adds the priority column"
+        );
 
         let faults = store.recent_faults(10).unwrap();
         assert_eq!(faults.len(), 1, "the event written by 0.2 is still there");
@@ -1679,7 +1909,7 @@ mod tests {
             .connection
             .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     #[test]

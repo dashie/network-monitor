@@ -4,7 +4,7 @@
 //! "Data ownership" in docs/ARCHITECTURE.md).
 
 /// Schema version written to `schema_meta` by this binary.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Connection pragmas: WAL for concurrent readers, `NORMAL` sync for throughput,
 /// and a busy timeout so a reader never fails on a short write lock.
@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS targets (
     target            TEXT PRIMARY KEY,
     interface         TEXT,
     label             TEXT,
+    priority          INTEGER,
     current_state     TEXT    NOT NULL,
     first_seen_at_ms  INTEGER NOT NULL,
     last_change_at_ms INTEGER NOT NULL,

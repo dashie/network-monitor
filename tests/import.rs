@@ -21,6 +21,7 @@ fn transition(target: &str, previous: TargetState, state: TargetState, at: i64) 
         target: format!("icmp://{target}"),
         interface: Some("eth0".to_string()),
         label: Some("probe".to_string()),
+        priority: None,
         previous_state: previous,
         state,
         occurred_at_ms: at,

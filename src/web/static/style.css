@@ -50,34 +50,45 @@ h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
   text-transform: uppercase;
   opacity: 0.55;
 }
-/* The target of the detail page sits at the right end of the masthead, on the same
-   centre line as the identity block: its label and address on one line, its state and
-   duration under them. The identity block stays flush left, where it sits on every
-   other page. */
-.masthead .target-info {
+/* The detail page states what it shows on the one line of its toolbar: the way back to
+   the list, then the target, the second after a dot. The masthead stays exactly what it is
+   on every other page — the mark, the name, and the tagline — because the page it belongs
+   to is already stated under it, and the state is a widget of the row below. */
+.toolbar .crumbs {
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 2px;
-  text-align: right;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  min-width: 0;
+  font-size: 13px;
 }
-.masthead .target-identity { font-size: 14px; font-weight: 500; }
-.masthead .target-label { font-weight: 600; }
-.masthead .target-address { opacity: 0.8; font-variant-numeric: tabular-nums; }
-.masthead .target-state { display: inline-flex; align-items: center; gap: 6px; }
-.masthead .target-state .since { font-size: 12px; }
+/* The dots between the parts are decoration: no space in the markup, no word read out. */
+.toolbar .crumbs > * + *::before {
+  content: "•";
+  margin-right: 8px;
+  opacity: 0.4;
+}
+.toolbar .crumbs .target-identity { font-weight: 600; }
+.toolbar .crumbs .target-address {
+  font-weight: inherit;
+  opacity: 0.8;
+  font-variant-numeric: tabular-nums;
+}
 .toolbar .back-button {
-  padding: 4px 12px;
+  padding: 0;
   background: none;
   border: none;
+  border-bottom: 1px dotted var(--rule);
   color: inherit;
   cursor: pointer;
   font-size: 13px;
-  opacity: 0.7;
+  opacity: 0.8;
   text-decoration: none;
 }
 .toolbar .back-button:hover {
   opacity: 1;
+  border-bottom-color: currentColor;
 }
 h2 {
   display: flex;
@@ -144,19 +155,6 @@ footer p:last-child { margin-bottom: 0; }
   font-weight: 600;
 }
 .title { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-.badge {
-  padding: 2px 9px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: #ffffff;
-}
-.badge.up { background: #2e7d32; }
-.badge.down { background: #c62828; }
-.badge.unknown { background: #9e9e9e; }
-.since { font-size: 13px; opacity: var(--muted); font-variant-numeric: tabular-nums; }
 .stats { display: flex; flex-wrap: wrap; gap: 12px; margin: 20px 0 0; }
 .stat {
   flex: 1 1 150px;
@@ -171,6 +169,17 @@ footer p:last-child { margin-bottom: 0; }
   font-variant-numeric: tabular-nums;
 }
 .stat span { font-size: 12px; opacity: var(--muted); }
+/* The first widget states the state itself, and it is the only one drawn as a filled tile:
+   the colour the chart uses for that state under white type, so the state of the target is
+   the first thing the page says. The three figures beside it keep the surface of the page. */
+.stat.state {
+  border-color: transparent;
+  background: #2e7d32;
+  color: #ffffff;
+}
+.stat.state.down { background: #c62828; }
+.stat.state.unknown { background: #9e9e9e; }
+.stat.state span { opacity: 0.85; }
 .window {
   margin: 0 0 10px;
   font-size: 13px;
