@@ -724,7 +724,7 @@ fn both_pages_show_the_mark_the_server_serves() {
     let (status, detail) = server.get("/target?target=1.1.1.1");
     assert_eq!(status, 200);
     assert!(
-        detail.contains(r#"<div class="brand"><img class="mark" src="/icon.svg""#),
+        detail.contains(r#"<a class="brand" href="/"><img class="mark" src="/icon.svg""#),
         "the detail page opens with the same mark, inside the brand block"
     );
     assert!(detail.contains(r#"href="/icon.svg""#));
@@ -794,7 +794,9 @@ fn every_page_opens_with_the_same_brand_block() {
     assert_eq!(status, 200);
 
     let brand = |html: &str| {
-        let start = html.find(r#"<div class="brand">"#).expect("a brand block");
+        let start = html
+            .find(r#"<a class="brand" href="/">"#)
+            .expect("a brand block");
         let rest = &html[start..];
         let end = rest
             .find(r#"<div class="target-info">"#)
@@ -818,11 +820,11 @@ fn every_page_opens_with_the_same_brand_block() {
             .to_string()
     };
     assert!(
-        after_header(&page).starts_with(r#"<div class="brand">"#),
+        after_header(&page).starts_with(r#"<a class="brand" href="/">"#),
         "the identity block opens the masthead, without anything before it"
     );
     assert!(
-        after_header(&detail).starts_with(r#"<div class="brand">"#),
+        after_header(&detail).starts_with(r#"<a class="brand" href="/">"#),
         "the target of the detail page joins the masthead after the identity block"
     );
 
@@ -830,6 +832,33 @@ fn every_page_opens_with_the_same_brand_block() {
     assert!(shared.contains(r#"<img class="mark" src="/icon.svg""#));
     assert!(shared.contains("<h1>Network Monitor</h1>"));
     assert!(shared.contains(r#"<p class="tagline">Reachability monitoring</p>"#));
+}
+
+/// The identity block is the way home: on every page, the reference included, a selection
+/// anywhere on the mark, the name, or the tagline returns to the timeline.
+#[test]
+fn the_identity_block_returns_to_the_timeline() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    for path in ["/", "/target?target=1.1.1.1", "/api/v1/docs"] {
+        let (status, page) = server.get(path);
+        assert_eq!(status, 200, "{path} answers");
+        assert!(
+            page.contains(r#"<a class="brand" href="/">"#),
+            "{path} opens its identity block with a link to the timeline"
+        );
+        let start = page
+            .find(r#"<a class="brand" href="/">"#)
+            .expect("a brand block");
+        let block = &page[start..];
+        let end = block.find("</a>").expect("the identity block closes");
+        let block = &block[..end];
+        assert!(
+            block.contains(r#"<img class="mark""#) && block.contains("<h1>Network Monitor</h1>"),
+            "the link covers the mark and the name: {block}"
+        );
+    }
 }
 
 #[test]

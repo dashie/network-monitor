@@ -349,9 +349,11 @@ piped.
 
 `monitor --listen` or `serve --listen` publishes one read-only page. Every page opens with the
 same masthead — the mark, the name of the application, and its tagline — flush left, at the
-same height, so nothing moves when you go from one page to the other. A page may state what it
-is showing at the right end of the masthead, on the same centre line as that block; the
-toolbar under it carries the control that changes what is shown.
+same height, so nothing moves when you go from one page to the other. That block is a link:
+selecting the mark, the name, or the tagline returns to the timeline from any page, the API
+reference included. A page may state what it is showing at the right end of the masthead, on
+the same centre line as that block; the toolbar under it carries the control that changes what
+is shown.
 
 - `/` — one lane per target over the selected window (1 h by default; 1, 2, 4, 6, 12, 24 h).
   A lane is drawn as one bar: only its two outer ends are rounded, so the bands of the states

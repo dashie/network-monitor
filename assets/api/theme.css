@@ -5,15 +5,16 @@
    colours the chart already uses. System colours carry it into dark mode with the page. */
 
 /* The reference is a page of the application, masthead included: its own link follows
-   the text, as the rest of the reference does. */
-.masthead a {
+   the text, as the rest of the reference does. The identity block is not that link — it
+   is the way home on every page —, so it keeps the shape `style.css` gives it. */
+.masthead .target-info a {
   color: inherit;
   text-decoration: underline;
   text-decoration-color: var(--rule);
   text-underline-offset: 2px;
 }
 
-.masthead a:hover {
+.masthead .target-info a:hover {
   text-decoration-color: currentColor;
 }
 
