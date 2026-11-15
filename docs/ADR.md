@@ -39,6 +39,7 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0025 | Give every failure a code and a message, record the cause of a fault, and call the rows faults | accepted | 2026-11-14 | `probe::failure` holds the closed set of codes and one template each; schema version 2 adds `cause` and `cause_message`; the CSV grows two trailing columns and `/export/faults.csv.gz` replaces `/export/disconnections.csv.gz`, which answers `308` |
 | ADR-0026 | Expose the host personal skills read-only instead of copying them | accepted | 2026-11-14 | One read-only bind of `~/.copilot/skills` onto the same path; nothing else from the host home |
 | ADR-0027 | Notify state changes over Telegram, with a stabilisation window and a dedicated delivery thread | accepted | 2026-11-14 | Global `[telegram]` section read from the file only, token redacted everywhere; one message per incident; bounded queue and five attempts off the probe path |
+| ADR-0028 | Publish a read-only JSON API under `/api/v1` with an envelope and `limit`/`offset` | accepted | 2026-11-14 | Object root with `data` and `meta`, never a bare array; `limit` 1–1000, errors with a stable code; hand-written JSON, no new crate; an OpenAPI document served by the binary; `Access-Control-Allow-Origin: *` on an unauthenticated read-only surface |
 
 ## Records
 
@@ -1102,3 +1103,102 @@ probe or change the record: `INV-1`, `INV-5` and `INV-7` stay what they are.
   cover the load-shedding answer of the Bot API, and a sixth variant of the retry loop
   would be complexity without a requirement.
 
+## ADR-0028 — Publish a read-only JSON API under `/api/v1` with an envelope and `limit`/`offset`
+
+**Status:** accepted · **Date:** 2026-11-14
+
+### Context
+
+The history is machine-readable only where a machine would have to be placed next to it: the
+SQLite file needs the volume, `query --format json` needs a shell on the host, and the CSV
+export is a bulk transfer. The page answers people, one window at a time, and offers no filter
+beyond the target. A dashboard, a status page, or a bot of the operator's own cannot read the
+history over the network the page already uses.
+
+Adding a second surface has two real risks: a dependency that the single executable does not
+need, and a contract that drifts from the page and from the store. Both are addressed here
+rather than later.
+
+### Decision
+
+1. One prefix, `/api/v1`, on the socket `--listen` already binds. No new listener, no new
+   thread, no configuration key, no schema change. The API is as public as the page: it reads
+   the database read-only and needs no credential (`BR-8`).
+2. An envelope, never a bare array: `{"data": …, "meta": …}` on success and
+   `{"error": …, "meta": …}` on failure. `meta` echoes the page (`limit`, `offset`), the
+   resolved filters, the total matching rows, and the instant the answer was built, so a client
+   never guesses what it asked for or how much there is.
+3. `limit` and `offset` on every array, `limit` bounded at 1 000 and defaulting to 100. Cursor
+   paging was rejected: the queries are indexed and a page is cheap, and a cursor would add
+   state to a stateless read.
+4. A closed parameter set per route: a name the route does not accept is a `400`, not something
+   silently ignored, and every error states a stable `code` and the offending `parameter`.
+5. No new crate. The project already renders JSON by hand for `query`; those primitives moved
+   to `json`, and the API uses them. The alternative — `serde_json` — buys nothing for a
+   handful of fixed shapes and would be the first dependency this binary does not need.
+6. The OpenAPI 3.1 document is hand-written, embedded with `include_str!`, and served at
+   `/api/v1/openapi.json`. The test that guards it checks both directions: every documented
+   property is answered, and every documented path answers.
+7. Records state every measured fact and no constant. A fault opens on a `down` event, so its
+   state is `down` and its round-trip time is `NULL` by construction: both are omitted, and the
+   interface the probe left from — which alternates — is added.
+8. `Access-Control-Allow-Origin: *` with an `OPTIONS` preflight. The data is already public on
+   the same host, no credential is read and nothing is written, so a wildcard grants exactly
+   what the page grants and lets a dashboard on another origin read it.
+9. A data answer is streamed: `Transfer-Encoding: chunked`, one record per chunk, gzip through
+   a `GzEncoder` writing into the same chunked stream, and no `Content-Length`. Buffering the
+   document and relying on the `limit` cap was rejected: the cap bounds a request, not the
+   memory a slow client can make the process hold, and the export already proved the chunked
+   writer. `/api/v1/faults` reads in keyset pages of 200 with `(occurred_at_ms, id)` as the
+   cursor, so a walk never repeats a row that a concurrent insert pushed down.
+10. One file per route: `web/api/mod.rs` states the contract and `targets.rs`, `faults.rs`,
+    `daily.rs`, and `openapi.rs` hold one route each. A single `api.rs` was the first form and
+    was rejected as it grew: a route is now read, tested, and changed in isolation.
+11. An error states a fixed message and the store detail goes to the log. The database path and
+    the SQLite text are not part of a public, unauthenticated answer, and the request path is
+    not echoed back.
+12. The accepted instant range is stated rather than implied, and it is a **fixed calendar
+    window**: `1970-01-01T00:00:00Z` to `2100-01-01T00:00:00Z`, both bounds accepted, refused
+    with `400` outside it, validated once in `parse_instant` so no route and no formula keeps its
+    own copy of the rule. A ceiling anchored to `now` was rejected: on any day of a month, "this
+    month" asks for the first day of the next, so a mobile bound refuses the most natural window
+    there is. The arithmetic of the daily boundaries saturates as well, as defence in depth for
+    callers outside this API. Two guards, one rule, and no input reaches an expression that can
+    panic — the full `i64` range could not keep that promise, because calendar arithmetic over
+    ±292 million years both overflows and runs for 2×10¹¹ days.
+13. The connection accounting is panic-safe: a `Slot` guard counts a worker and releases the
+    count from its `Drop`, so a handler that unwinds costs its answer and never a slot. The
+    count is the 32-connection gate, and a leaked slot used to make the whole surface deaf.
+
+### Consequences
+
+- The API is a second contract to keep in step with the store and the page. The drift is held
+  by tests that run the real server and by the OpenAPI document served from the binary itself.
+- A day total applies the rule of `FR-17` instead of a second definition: runs are split at
+  midnight and the UTC day still running states the last 24 hours, flagged `partial`.
+- Paging a list that grows at the top can repeat a record between two requests. This is stated
+  in the user guide with the remedy — a fixed `from`/`to` window — rather than solved with a
+  cursor, which would put state on a read-only endpoint.
+- A streamed answer has no length, so a client must read it to the end and a failure after the
+  status line cannot change the status: the connection ends truncated and the log states why.
+  `HEAD` mirrors the streamed headers and states no `Content-Length`.
+- The cursor is internal: clients still page with `limit`/`offset`, and the first read of a
+  response honours their `offset`, so the transport changed without the contract changing.
+- Anyone who does not want the API exposed must not pass `--listen`, the rule the page already
+  follows. A flag to publish the page without the API was rejected: it would split one
+  read-only surface into two configurations of the same thing.
+- The failure contract is part of the API: a request that fails inside the server closes its
+  connection with no status line and leaves the next request served normally. Both statements
+  were forced by a denial of service found in review — an extreme instant panicked a handler,
+  and the panic skipped the release of its connection slot — so a client must treat a silent
+  close as a failed request, and the server must never trade capacity for a failure.
+- The daily route reads only the page it answers and starts its timeline at the page whenever
+  the page lies in the future; a window that reaches the present still adds the last 24 hours
+  for the day still running.
+- A window may end in the future, and the days it states that have not begun carry no
+  measurement: an open disconnection ends at the end of the window but never later than the
+  present, and the timeline is read to the present, so no answer invents down time or an `up`
+  run for time that has not happened.
+- A library caller that hands `up_runs_per_day` or `day_slices` a span wider than the domain
+  still pays for the span, day by day: both walks are proved to terminate, not to be constant
+  time, and the domain is what keeps the API inside a bounded cost (47 482 days at most).

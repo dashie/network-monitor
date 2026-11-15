@@ -68,8 +68,13 @@ pub fn up_runs_per_day(segments: &[TimelineSegment], day_ms: i64) -> BTreeMap<i6
     for (from_ms, to_ms) in up_ranges(segments) {
         let mut cursor = from_ms;
         while cursor < to_ms {
-            let day = cursor.div_euclid(day_ms) * day_ms;
-            let end = (day + day_ms).min(to_ms);
+            // The walk advances by construction: the day start and the day end saturate, and a
+            // step that does not move forward ends the run instead of looping on it.
+            let day = cursor.div_euclid(day_ms).saturating_mul(day_ms);
+            let end = day.saturating_add(day_ms).min(to_ms);
+            if end <= cursor {
+                break;
+            }
             days.entry(day).or_default().push(end - cursor);
             cursor = end;
         }
@@ -111,6 +116,52 @@ pub fn summarize(runs: &[i64]) -> RunStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A run that ends at the top of the range must be split as far as the range goes and then
+    /// stop: the walk used to add `DAY_MS` to a day start with no room left, which panicked in
+    /// debug and looped for ever in release.
+    #[test]
+    fn a_run_that_reaches_the_top_of_the_range_is_split_and_stops() {
+        const DAY: i64 = 86_400_000;
+        let segments = [TimelineSegment {
+            state: TargetState::Up,
+            from_ms: i64::MAX - 3 * DAY,
+            to_ms: i64::MAX,
+        }];
+
+        let days = up_runs_per_day(&segments, DAY);
+
+        assert_eq!(days.len(), 4, "the four days the run covers: {days:?}");
+        let total: i64 = days.values().flatten().sum();
+        assert_eq!(total, 3 * DAY, "the run is fully accounted for");
+        assert!(
+            days.values().flatten().all(|piece| *piece > 0),
+            "no empty or negative piece: {days:?}"
+        );
+    }
+
+    /// `i64::MIN` is not a day boundary, so the day that contains it starts at the clamped
+    /// minimum: what matters is that the walk stops, that no piece is empty, and that the whole
+    /// run is accounted for.
+    #[test]
+    fn a_run_that_starts_at_the_bottom_of_the_range_is_split_and_stops() {
+        const DAY: i64 = 86_400_000;
+        let segments = [TimelineSegment {
+            state: TargetState::Up,
+            from_ms: i64::MIN,
+            to_ms: i64::MIN + 3 * DAY,
+        }];
+
+        let days = up_runs_per_day(&segments, DAY);
+
+        assert!(days.len() <= 5, "a bounded number of days: {days:?}");
+        let total: i64 = days.values().flatten().sum();
+        assert_eq!(total, 3 * DAY, "the run is fully accounted for");
+        assert!(
+            days.values().flatten().all(|piece| *piece > 0),
+            "no empty or negative piece: {days:?}"
+        );
+    }
 
     fn segment(state: TargetState, from_s: i64, to_s: i64) -> TimelineSegment {
         TimelineSegment {

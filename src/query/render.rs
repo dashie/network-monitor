@@ -1,6 +1,7 @@
 //! Rendering of query results: an aligned table for people, JSON for scripts.
 
 use crate::cli::Format;
+use crate::json;
 use crate::store::{EventRow, TargetStateRow};
 use crate::time::format_rfc3339;
 
@@ -32,17 +33,17 @@ pub fn states(rows: &[TargetStateRow], format: Format) -> String {
                     format!(
                         "  {{\"target\":{}, \"interface\":{}, \"label\":{}, \"state\":{}, \
                          \"since\":{}, \"sinceMs\":{}, \"rttUs\":{}}}",
-                        json_string(&row.target),
-                        json_option(&row.interface),
-                        json_option(&row.label),
-                        json_string(row.state.as_str()),
-                        json_string(&format_rfc3339(row.last_change_at_ms)),
+                        json::string(&row.target),
+                        json::option_string(&row.interface),
+                        json::option_string(&row.label),
+                        json::string(row.state.as_str()),
+                        json::string(&format_rfc3339(row.last_change_at_ms)),
                         row.last_change_at_ms,
-                        json_number(row.last_rtt_us),
+                        json::option_i64(row.last_rtt_us),
                     )
                 })
                 .collect();
-            array(items)
+            json::array(items)
         }
     }
 }
@@ -84,28 +85,20 @@ pub fn events(rows: &[EventRow], format: Format) -> String {
                          \"state\":{}, \"occurredAt\":{}, \"occurredAtMs\":{}, \"rttUs\":{}, \
                          \"cause\":{}, \"causeMessage\":{}}}",
                         row.id,
-                        json_string(&row.target),
-                        json_option(&row.interface),
-                        json_string(row.previous_state.as_str()),
-                        json_string(row.state.as_str()),
-                        json_string(&format_rfc3339(row.occurred_at_ms)),
+                        json::string(&row.target),
+                        json::option_string(&row.interface),
+                        json::string(row.previous_state.as_str()),
+                        json::string(row.state.as_str()),
+                        json::string(&format_rfc3339(row.occurred_at_ms)),
                         row.occurred_at_ms,
-                        json_number(row.rtt_us),
-                        json_option(&row.cause),
-                        json_option(&row.cause_message),
+                        json::option_i64(row.rtt_us),
+                        json::option_string(&row.cause),
+                        json::option_string(&row.cause_message),
                     )
                 })
                 .collect();
-            array(items)
+            json::array(items)
         }
-    }
-}
-
-fn array(items: Vec<String>) -> String {
-    if items.is_empty() {
-        "[]".to_string()
-    } else {
-        format!("[\n{}\n]", items.join(",\n"))
     }
 }
 
@@ -114,40 +107,6 @@ fn millis(microseconds: Option<i64>) -> String {
         Some(value) => format!("{:.3} ms", value as f64 / 1_000.0),
         None => "-".to_string(),
     }
-}
-
-fn json_number(value: Option<i64>) -> String {
-    match value {
-        Some(value) => value.to_string(),
-        None => "null".to_string(),
-    }
-}
-
-fn json_option(value: &Option<String>) -> String {
-    match value {
-        Some(value) => json_string(value),
-        None => "null".to_string(),
-    }
-}
-
-fn json_string(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len() + 2);
-    escaped.push('"');
-    for character in value.chars() {
-        match character {
-            '"' => escaped.push_str("\\\""),
-            '\\' => escaped.push_str("\\\\"),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            control if (control as u32) < 0x20 => {
-                escaped.push_str(&format!("\\u{:04x}", control as u32))
-            }
-            other => escaped.push(other),
-        }
-    }
-    escaped.push('"');
-    escaped
 }
 
 /// Left-aligned columns, two spaces apart, no trailing spaces.

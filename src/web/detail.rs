@@ -396,6 +396,7 @@ mod tests {
             event_id: 1,
             target: "1.1.1.1".to_string(),
             label: Some("cloudflare".to_string()),
+            interface: None,
             started_at_ms: 3_600_000,
             ended_at_ms: Some(4_320_000),
             cause: None,

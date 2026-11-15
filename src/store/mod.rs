@@ -91,7 +91,27 @@ pub struct TargetStateRow {
 pub struct EventFilter {
     pub target: Option<String>,
     pub since_ms: Option<i64>,
+    /// Exclusive upper bound: an event at this instant is not part of the page.
+    pub until_ms: Option<i64>,
     pub limit: Option<u32>,
+    pub offset: Option<u32>,
+}
+
+/// Filters for the fault history.
+#[derive(Debug, Clone, Default)]
+pub struct FaultFilter {
+    pub target: Option<String>,
+    pub from_ms: Option<i64>,
+    /// Exclusive upper bound: a fault that started at this instant is not part of the page.
+    pub to_ms: Option<i64>,
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+    /// Keyset cursor: the start instant of the last fault already read. Together with
+    /// `after_id` it walks the history without an `offset`, so a walk over a table that
+    /// grows at the top neither repeats nor skips a row.
+    pub after_ms: Option<i64>,
+    /// Keyset cursor: the id of the last fault already read.
+    pub after_id: Option<i64>,
 }
 
 /// One interval of constant state on a timeline.
@@ -150,6 +170,8 @@ pub struct Fault {
     pub target: String,
     /// The label of the target, so the list names it the way the chart does.
     pub label: Option<String>,
+    /// The interface the probe that saw the failure left from, when one was configured.
+    pub interface: Option<String>,
     pub started_at_ms: i64,
     /// `None` while the target is still down.
     pub ended_at_ms: Option<i64>,
@@ -161,8 +183,9 @@ pub struct Fault {
 
 const DAY_MS: i64 = 86_400_000;
 
-/// The columns of one fault: event id, target, label, start, end, and the two of the
-/// cause. The end is `NULL` while the target is still down. Shared by both pages.
+/// The columns of one fault: event id, target, label, start, end, the two of the cause,
+/// and the interface the probe left from. The end is `NULL` while the target is still
+/// down. Shared by both pages and the API.
 /// The schema version that added `events.cause` and `events.cause_message`. A read-only
 /// open of an older file selects `NULL` in their place.
 const CAUSE_COLUMNS: i64 = 2;
@@ -171,20 +194,26 @@ const FAULTS_SELECT: &str = "
 SELECT e.id, e.target, t.label, e.occurred_at_ms,
        (SELECT MIN(n.occurred_at_ms) FROM events n
          WHERE n.target = e.target AND n.occurred_at_ms > e.occurred_at_ms),
-       {cause}
+       {cause}, e.interface
 FROM events e
 LEFT JOIN targets t ON t.target = e.target
 WHERE e.state = 'down'";
 
 /// Split the part of `[start_ms, end_ms)` that falls inside `[from_ms, to_ms)` into
 /// per-UTC-day slices: the start of the day and the milliseconds spent inside it.
+///
+/// The walk advances by construction — the day start and the day end saturate, and a step that
+/// does not move forward ends the walk — so no pair of instants can make it loop.
 fn day_slices(start_ms: i64, end_ms: i64, from_ms: i64, to_ms: i64) -> Vec<(i64, i64)> {
     let mut slices = Vec::new();
     let mut cursor = start_ms.max(from_ms);
     let end = end_ms.min(to_ms);
     while cursor < end {
-        let day = cursor.div_euclid(DAY_MS) * DAY_MS;
-        let next = (day + DAY_MS).min(end);
+        let day = cursor.div_euclid(DAY_MS).saturating_mul(DAY_MS);
+        let next = day.saturating_add(DAY_MS).min(end);
+        if next <= cursor {
+            break;
+        }
         slices.push((day, next - cursor));
         cursor = next;
     }
@@ -670,6 +699,68 @@ impl Store {
         }
     }
 
+    /// The columns of [`FAULTS_SELECT`], read in one place so a new column is one edit.
+    fn fault(row: &rusqlite::Row<'_>) -> rusqlite::Result<Fault> {
+        Ok(Fault {
+            event_id: row.get(0)?,
+            target: row.get(1)?,
+            label: row.get(2)?,
+            started_at_ms: row.get(3)?,
+            ended_at_ms: row.get(4)?,
+            cause: row.get(5)?,
+            cause_message: row.get(6)?,
+            interface: row.get(7)?,
+        })
+    }
+
+    /// One page of faults, newest first.
+    pub fn faults(&self, filter: &FaultFilter) -> Result<Vec<Fault>, StoreError> {
+        let query = format!(
+            "{} AND (?1 IS NULL OR e.target = ?1)
+                AND (?2 IS NULL OR e.occurred_at_ms >= ?2)
+                AND (?3 IS NULL OR e.occurred_at_ms < ?3)
+                AND (?6 IS NULL OR e.occurred_at_ms < ?6
+                     OR (e.occurred_at_ms = ?6 AND e.id < ?7))
+             ORDER BY e.occurred_at_ms DESC, e.id DESC
+             LIMIT COALESCE(?4, -1) OFFSET COALESCE(?5, 0)",
+            self.faults_select()
+        );
+        let mut statement = self.connection.prepare(&query)?;
+        let rows = statement
+            .query_map(
+                params![
+                    filter.target,
+                    filter.from_ms,
+                    filter.to_ms,
+                    filter.limit,
+                    filter.offset,
+                    filter.after_ms,
+                    filter.after_id
+                ],
+                Self::fault,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// How many faults the filter matches, `limit` and `offset` aside.
+    pub fn count_faults(&self, filter: &FaultFilter) -> Result<i64, StoreError> {
+        let query = format!(
+            "SELECT COUNT(*) FROM (
+                 {} AND (?1 IS NULL OR e.target = ?1)
+                    AND (?2 IS NULL OR e.occurred_at_ms >= ?2)
+                    AND (?3 IS NULL OR e.occurred_at_ms < ?3)
+             )",
+            self.faults_select()
+        );
+        let count = self.connection.query_row(
+            &query,
+            params![filter.target, filter.from_ms, filter.to_ms],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
     /// Recorded transitions, newest first.
     pub fn events(&self, filter: &EventFilter) -> Result<Vec<EventRow>, StoreError> {
         let mut statement = self.connection.prepare(&format!(
@@ -678,12 +769,19 @@ impl Store {
              FROM events
              WHERE (?1 IS NULL OR target = ?1)
                AND (?2 IS NULL OR occurred_at_ms >= ?2)
+               AND (?3 IS NULL OR occurred_at_ms < ?3)
              ORDER BY occurred_at_ms DESC, id DESC
-             LIMIT COALESCE(?3, -1)",
+             LIMIT COALESCE(?4, -1) OFFSET COALESCE(?5, 0)",
             cause = self.cause_columns(),
         ))?;
         let rows = statement.query_map(
-            params![filter.target, filter.since_ms, filter.limit],
+            params![
+                filter.target,
+                filter.since_ms,
+                filter.until_ms,
+                filter.limit,
+                filter.offset
+            ],
             |row| {
                 let previous_state: String = row.get(3)?;
                 let state: String = row.get(4)?;
@@ -773,21 +871,24 @@ impl Store {
     ///
     /// A disconnection that opened before the window is not counted as a drop, but the
     /// part of it that falls inside the window is counted as down time. An open
-    /// disconnection ends at `to_ms`, the end of the window.
+    /// disconnection ends at the end of the window, and never later than `now_ms`: the
+    /// time that has not happened yet is not down time, so a window that reaches into the
+    /// future states the window's days with nothing in them until the present.
     pub fn daily_drops(
         &self,
-        target: &str,
+        target: Option<&str>,
         from_ms: i64,
         to_ms: i64,
+        now_ms: i64,
     ) -> Result<Vec<DailyDrops>, StoreError> {
         let query = format!(
-            "{} AND e.target = ?1 AND e.occurred_at_ms < ?2",
+            "{} AND (?1 IS NULL OR e.target = ?1) AND e.occurred_at_ms < ?2",
             self.faults_select()
         );
         let mut statement = self.connection.prepare(&query)?;
 
         let mut buckets: HashMap<i64, DailyDrops> = HashMap::new();
-        let mut day = from_ms.div_euclid(DAY_MS) * DAY_MS;
+        let mut day = from_ms.div_euclid(DAY_MS).saturating_mul(DAY_MS);
         while day < to_ms {
             buckets.insert(
                 day,
@@ -797,7 +898,7 @@ impl Store {
                     down_ms: 0,
                 },
             );
-            day += DAY_MS;
+            day = day.saturating_add(DAY_MS);
         }
 
         let episodes = statement.query_map(params![target, to_ms], |row| {
@@ -805,10 +906,10 @@ impl Store {
         })?;
         for episode in episodes {
             let (started_at_ms, ended_at_ms) = episode?;
-            let ended_at_ms = ended_at_ms.unwrap_or(to_ms);
+            let ended_at_ms = ended_at_ms.unwrap_or_else(|| to_ms.min(now_ms));
             if started_at_ms >= from_ms && started_at_ms < to_ms {
-                if let Some(bucket) = buckets.get_mut(&(started_at_ms.div_euclid(DAY_MS) * DAY_MS))
-                {
+                let drop_day = started_at_ms.div_euclid(DAY_MS).saturating_mul(DAY_MS);
+                if let Some(bucket) = buckets.get_mut(&drop_day) {
                     bucket.drops += 1;
                 }
             }
@@ -820,12 +921,12 @@ impl Store {
         }
 
         let mut days = Vec::new();
-        let mut day = from_ms.div_euclid(DAY_MS) * DAY_MS;
+        let mut day = from_ms.div_euclid(DAY_MS).saturating_mul(DAY_MS);
         while day < to_ms {
             if let Some(bucket) = buckets.remove(&day) {
                 days.push(bucket);
             }
-            day += DAY_MS;
+            day = day.saturating_add(DAY_MS);
         }
         Ok(days)
     }
@@ -893,17 +994,7 @@ impl Store {
         let mut statement = self.connection.prepare(&query)?;
 
         let rows = statement
-            .query_map(params![limit], |row| {
-                Ok(Fault {
-                    event_id: row.get(0)?,
-                    target: row.get(1)?,
-                    label: row.get(2)?,
-                    started_at_ms: row.get(3)?,
-                    ended_at_ms: row.get(4)?,
-                    cause: row.get(5)?,
-                    cause_message: row.get(6)?,
-                })
-            })?
+            .query_map(params![limit], Self::fault)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -917,17 +1008,7 @@ impl Store {
         let mut statement = self.connection.prepare(&query)?;
 
         let rows = statement
-            .query_map(params![target, limit], |row| {
-                Ok(Fault {
-                    event_id: row.get(0)?,
-                    target: row.get(1)?,
-                    label: row.get(2)?,
-                    started_at_ms: row.get(3)?,
-                    ended_at_ms: row.get(4)?,
-                    cause: row.get(5)?,
-                    cause_message: row.get(6)?,
-                })
-            })?
+            .query_map(params![target, limit], Self::fault)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -944,17 +1025,7 @@ impl Store {
         let mut statement = self.connection.prepare(&query)?;
 
         let rows = statement
-            .query_map(params![after_id, limit], |row| {
-                Ok(Fault {
-                    event_id: row.get(0)?,
-                    target: row.get(1)?,
-                    label: row.get(2)?,
-                    started_at_ms: row.get(3)?,
-                    ended_at_ms: row.get(4)?,
-                    cause: row.get(5)?,
-                    cause_message: row.get(6)?,
-                })
-            })?
+            .query_map(params![after_id, limit], Self::fault)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -1151,7 +1222,9 @@ mod tests {
             .events(&EventFilter {
                 target: Some("1.1.1.1".to_string()),
                 since_ms: Some(1_500),
+                until_ms: None,
                 limit: None,
+                offset: None,
             })
             .unwrap();
         assert_eq!(filtered.len(), 1);
@@ -1298,7 +1371,9 @@ mod tests {
             ))
             .unwrap();
 
-        let days = store.daily_drops("1.1.1.1", 0, 3 * DAY_MS).unwrap();
+        let days = store
+            .daily_drops(Some("1.1.1.1"), 0, 3 * DAY_MS, i64::MAX)
+            .unwrap();
         assert_eq!(days.len(), 3);
         assert_eq!(days[0].drops, 2);
         assert_eq!(days[1].drops, 1);
@@ -1330,7 +1405,7 @@ mod tests {
             .unwrap();
 
         let days = store
-            .daily_drops("1.1.1.1", 2 * DAY_MS, 4 * DAY_MS)
+            .daily_drops(Some("1.1.1.1"), 2 * DAY_MS, 4 * DAY_MS, i64::MAX)
             .unwrap();
         assert_eq!(days.len(), 2);
         assert_eq!(days[0].drops, 0);
@@ -1709,5 +1784,301 @@ mod tests {
             Store::open_ro(&empty),
             Err(StoreError::Uninitialized { .. })
         ));
+    }
+    #[test]
+    fn events_accept_an_exclusive_upper_bound_and_an_offset() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        store
+            .record_transition(&event(
+                "1.1.1.1",
+                TargetState::Unknown,
+                TargetState::Up,
+                1_000,
+            ))
+            .unwrap();
+        store
+            .record_transition(&event("1.1.1.1", TargetState::Up, TargetState::Down, 2_000))
+            .unwrap();
+        store
+            .record_transition(&event("1.1.1.1", TargetState::Down, TargetState::Up, 3_000))
+            .unwrap();
+
+        let bounded = store
+            .events(&EventFilter {
+                until_ms: Some(3_000),
+                ..EventFilter::default()
+            })
+            .unwrap();
+        assert_eq!(
+            bounded.len(),
+            2,
+            "the event at `to` is not part of the page"
+        );
+        assert_eq!(bounded[0].occurred_at_ms, 2_000);
+
+        let paged = store
+            .events(&EventFilter {
+                limit: Some(1),
+                offset: Some(1),
+                ..EventFilter::default()
+            })
+            .unwrap();
+        assert_eq!(paged.len(), 1);
+        assert_eq!(paged[0].occurred_at_ms, 2_000);
+    }
+
+    #[test]
+    fn faults_are_filtered_by_target_and_range_and_paged() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        store
+            .record_transition(&event(
+                "1.1.1.1",
+                TargetState::Unknown,
+                TargetState::Up,
+                500,
+            ))
+            .unwrap();
+        store
+            .record_transition(&event("1.1.1.1", TargetState::Up, TargetState::Down, 1_000))
+            .unwrap();
+        store
+            .record_transition(&event("1.1.1.1", TargetState::Down, TargetState::Up, 1_500))
+            .unwrap();
+        store
+            .record_transition(&event("1.1.1.1", TargetState::Up, TargetState::Down, 2_000))
+            .unwrap();
+        store
+            .record_transition(&event(
+                "8.8.8.8",
+                TargetState::Unknown,
+                TargetState::Up,
+                600,
+            ))
+            .unwrap();
+        let mut bound = event("8.8.8.8", TargetState::Up, TargetState::Down, 1_200);
+        bound.interface = Some("eth1".to_string());
+        store.record_transition(&bound).unwrap();
+        store
+            .record_transition(&event("8.8.8.8", TargetState::Down, TargetState::Up, 1_300))
+            .unwrap();
+
+        let all = store.faults(&FaultFilter::default()).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].started_at_ms, 2_000, "newest first");
+
+        let only = store
+            .faults(&FaultFilter {
+                target: Some("8.8.8.8".to_string()),
+                ..FaultFilter::default()
+            })
+            .unwrap();
+        assert_eq!(only.len(), 1);
+        assert_eq!(only[0].interface.as_deref(), Some("eth1"));
+
+        let window = store
+            .faults(&FaultFilter {
+                from_ms: Some(1_000),
+                to_ms: Some(2_000),
+                ..FaultFilter::default()
+            })
+            .unwrap();
+        assert_eq!(window.len(), 2, "from is inclusive and to is exclusive");
+
+        let paged = store
+            .faults(&FaultFilter {
+                limit: Some(1),
+                offset: Some(1),
+                ..FaultFilter::default()
+            })
+            .unwrap();
+        assert_eq!(paged.len(), 1);
+        assert_eq!(paged[0].started_at_ms, 1_200);
+    }
+
+    #[test]
+    fn counting_the_faults_ignores_the_page() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        store
+            .record_transition(&event(
+                "1.1.1.1",
+                TargetState::Unknown,
+                TargetState::Down,
+                1_000,
+            ))
+            .unwrap();
+        store
+            .record_transition(&event("1.1.1.1", TargetState::Down, TargetState::Up, 2_000))
+            .unwrap();
+        store
+            .record_transition(&event("1.1.1.1", TargetState::Up, TargetState::Down, 3_000))
+            .unwrap();
+
+        let all = FaultFilter::default();
+        assert_eq!(store.count_faults(&all).unwrap(), 2);
+        let paged = FaultFilter {
+            limit: Some(1),
+            offset: Some(1),
+            ..FaultFilter::default()
+        };
+        assert_eq!(store.count_faults(&paged).unwrap(), 2);
+        let window = FaultFilter {
+            from_ms: Some(2_500),
+            ..FaultFilter::default()
+        };
+        assert_eq!(store.count_faults(&window).unwrap(), 1);
+    }
+
+    #[test]
+    fn the_daily_totals_of_every_target_are_summed_into_one_day() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        store
+            .record_transition(&event(
+                "1.1.1.1",
+                TargetState::Unknown,
+                TargetState::Down,
+                1_000,
+            ))
+            .unwrap();
+        store
+            .record_transition(&event("1.1.1.1", TargetState::Down, TargetState::Up, 2_000))
+            .unwrap();
+        store
+            .record_transition(&event(
+                "8.8.8.8",
+                TargetState::Unknown,
+                TargetState::Down,
+                3_000,
+            ))
+            .unwrap();
+        store
+            .record_transition(&event("8.8.8.8", TargetState::Down, TargetState::Up, 5_000))
+            .unwrap();
+
+        let days = store.daily_drops(None, 0, DAY_MS, i64::MAX).unwrap();
+        assert_eq!(days.len(), 1);
+        assert_eq!(days[0].drops, 2);
+        assert_eq!(days[0].down_ms, 3_000);
+    }
+    /// Five faults of one target, newest at 5 000 ms, oldest at 1 000 ms.
+    fn store_with_five_faults() -> (tempfile::TempDir, Store) {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        let mut previous = TargetState::Unknown;
+        for step in 0..10 {
+            let state = if step % 2 == 0 {
+                TargetState::Up
+            } else {
+                TargetState::Down
+            };
+            store
+                .record_transition(&event("1.1.1.1", previous, state, (step + 1) as i64 * 500))
+                .unwrap();
+            previous = state;
+        }
+        (directory, store)
+    }
+
+    fn page_after(store: &Store, size: u32, after: (Option<i64>, Option<i64>)) -> Vec<Fault> {
+        store
+            .faults(&FaultFilter {
+                limit: Some(size),
+                after_ms: after.0,
+                after_id: after.1,
+                ..FaultFilter::default()
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn the_keyset_cursor_walks_every_fault_once_newest_first() {
+        let (_directory, store) = store_with_five_faults();
+
+        let mut seen = Vec::new();
+        let mut after = (None, None);
+        loop {
+            let page = page_after(&store, 2, after);
+            if page.is_empty() {
+                break;
+            }
+            seen.extend(page.iter().map(|fault| fault.started_at_ms));
+            let last = page.last().expect("a page holds at least one fault");
+            after = (Some(last.started_at_ms), Some(last.event_id));
+            if page.len() < 2 {
+                break;
+            }
+        }
+
+        assert_eq!(seen, vec![5_000, 4_000, 3_000, 2_000, 1_000]);
+    }
+
+    #[test]
+    fn a_fault_recorded_between_two_pages_is_not_seen_twice() {
+        let (_directory, mut store) = store_with_five_faults();
+
+        let first = page_after(&store, 2, (None, None));
+        let mut seen: Vec<i64> = first.iter().map(|fault| fault.started_at_ms).collect();
+        let last = first.last().expect("the first page is not empty");
+        let mut after = (Some(last.started_at_ms), Some(last.event_id));
+
+        // A newer fault lands between the two reads.
+        store
+            .record_transition(&event("1.1.1.1", TargetState::Down, TargetState::Up, 5_500))
+            .unwrap();
+        store
+            .record_transition(&event("1.1.1.1", TargetState::Up, TargetState::Down, 6_000))
+            .unwrap();
+
+        loop {
+            let page = page_after(&store, 2, after);
+            if page.is_empty() {
+                break;
+            }
+            seen.extend(page.iter().map(|fault| fault.started_at_ms));
+            let last = page.last().expect("a page holds at least one fault");
+            after = (Some(last.started_at_ms), Some(last.event_id));
+            if page.len() < 2 {
+                break;
+            }
+        }
+
+        assert_eq!(
+            seen,
+            vec![5_000, 4_000, 3_000, 2_000, 1_000],
+            "the walk neither repeats a fault nor picks up a newer one"
+        );
+    }
+
+    /// The day walk of an episode must stop at the edges of `i64` instead of adding `DAY_MS` to
+    /// a day start with no room left — the panic of review round 5 — and every slice it yields
+    /// must be positive and inside the window it was asked about.
+    #[test]
+    fn the_day_walk_stops_at_the_edges_of_the_range() {
+        // `i64::MIN` is not a day boundary and the day containing it starts at the clamped
+        // minimum, so the window can yield one slice more than it holds days: what matters is
+        // that the walk stops, that nothing is empty, and that the window is fully accounted for.
+        let slices = day_slices(i64::MIN, i64::MAX, i64::MIN, i64::MIN + 5 * DAY_MS);
+        assert!(slices.len() <= 6, "a bounded number of slices: {slices:?}");
+        assert!(
+            slices.iter().all(|(_, inside)| *inside > 0),
+            "no empty or negative slice: {slices:?}"
+        );
+        let total: i64 = slices.iter().map(|(_, inside)| *inside).sum();
+        assert_eq!(total, 5 * DAY_MS, "the window is fully accounted for");
+
+        // The same at the top: the last day is clipped by the end of the range, so a five-day
+        // window can hold six slices and the last piece is the one that fits.
+        let end = i64::MAX;
+        let slices = day_slices(0, end, end - 5 * DAY_MS, end);
+        assert!(slices.len() <= 6, "a bounded number of slices: {slices:?}");
+        assert!(
+            slices.iter().all(|(_, inside)| *inside > 0),
+            "no empty or negative slice: {slices:?}"
+        );
+        let total: i64 = slices.iter().map(|(_, inside)| *inside).sum();
+        assert_eq!(total, 5 * DAY_MS, "the window is fully accounted for");
     }
 }

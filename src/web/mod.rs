@@ -4,6 +4,7 @@
 //!
 //! Minimal HTTP/1.1 by hand: no framework, no template engine, no port unless asked.
 
+pub mod api;
 pub mod detail;
 pub mod export;
 pub mod page;
@@ -121,12 +122,11 @@ pub fn serve(
                     drop(stream);
                     continue;
                 }
-                active.fetch_add(1, Ordering::Relaxed);
                 let database = Arc::clone(&database);
                 let active = Arc::clone(&active);
                 workers.push(thread::spawn(move || {
+                    let _slot = Slot::enter(&active);
                     handle(stream, &database, compression);
-                    active.fetch_sub(1, Ordering::Relaxed);
                 }));
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -146,6 +146,31 @@ pub fn serve(
     Ok(())
 }
 
+/// One connection in flight, and the count of them.
+///
+/// The count is the `MAX_CONNECTIONS` gate, so it must fall however the worker ends: the
+/// guard's `Drop` releases the slot on the way out of a panic too, and a failing request
+/// costs its answer, not the capacity of the server.
+struct Slot {
+    active: Arc<AtomicUsize>,
+}
+
+impl Slot {
+    /// Count one more worker; the caller has already checked the limit.
+    fn enter(active: &Arc<AtomicUsize>) -> Slot {
+        active.fetch_add(1, Ordering::Relaxed);
+        Slot {
+            active: Arc::clone(active),
+        }
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 fn handle(mut stream: TcpStream, database: &Path, compression: Compression) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
@@ -163,6 +188,31 @@ fn handle(mut stream: TcpStream, database: &Path, compression: Compression) {
     let method = parts.next().unwrap_or_default();
     let target = parts.next().unwrap_or("/");
 
+    // A `HEAD` states the headers of the answer it mirrors; anything else gets the body,
+    // so a refused `POST` still says why.
+    let include_body = method != "HEAD";
+    let gzip = compression == Compression::Auto && accepts_gzip(&request);
+
+    let (path, query) = match target.split_once('?') {
+        Some((path, query)) => (path, query),
+        None => (target, ""),
+    };
+
+    // The JSON API answers for itself: it owns its methods, its errors, and its CORS
+    // headers, and it never falls back to the plain-text form of the pages.
+    if path == "/api/v1" || path.starts_with("/api/v1/") {
+        api::handle(
+            &mut stream,
+            method,
+            path,
+            query,
+            database,
+            include_body,
+            gzip,
+        );
+        return;
+    }
+
     if method != "GET" && method != "HEAD" {
         respond(
             &mut stream,
@@ -173,13 +223,6 @@ fn handle(mut stream: TcpStream, database: &Path, compression: Compression) {
         );
         return;
     }
-    let include_body = method == "GET";
-    let gzip = compression == Compression::Auto && accepts_gzip(&request);
-
-    let (path, query) = match target.split_once('?') {
-        Some((path, query)) => (path, query),
-        None => (target, ""),
-    };
 
     match path {
         "/" => {
@@ -261,7 +304,7 @@ fn handle(mut stream: TcpStream, database: &Path, compression: Compression) {
             let now = now_ms();
             let period_days = params.days.unwrap_or(detail::DEFAULT_PERIOD_DAYS);
             let from_ms = now - i64::from(period_days) * DAY_MS;
-            let days = match store.daily_drops(&target.target, from_ms, now) {
+            let days = match store.daily_drops(Some(&target.target), from_ms, now, now) {
                 Ok(days) => days,
                 Err(error) => {
                     query_failed(&mut stream, &error, include_body);
@@ -470,14 +513,43 @@ fn respond_redirect(stream: &mut TcpStream, location: &str) {
 ///
 /// `HEAD` states the same headers as `GET` would, compressed length included.
 fn respond_page(stream: &mut TcpStream, body: &str, include_body: bool, gzip: bool) {
-    let content_type = "text/html; charset=utf-8";
-    if !gzip {
-        let head = head(200, content_type, VARY, body.len());
+    respond_compressed(
+        stream,
+        200,
+        "text/html; charset=utf-8",
+        body,
+        include_body,
+        gzip,
+        "",
+    );
+}
+
+/// A body compressed when the request advertises gzip and the operator allows it, with
+/// the headers of the caller appended.
+///
+/// The page and the JSON API share it, so `HEAD`, `Content-Length`, `Vary`, and the fall
+/// back to a plain body never differ between the two.
+fn respond_compressed(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &str,
+    include_body: bool,
+    gzip: bool,
+    extra: &str,
+) {
+    let plain = |stream: &mut TcpStream| {
+        let headers = format!("{extra}{VARY}");
+        let head = head(status, content_type, &headers, body.len());
         let _ = stream.write_all(head.as_bytes());
         if include_body {
             let _ = stream.write_all(body.as_bytes());
         }
         let _ = stream.flush();
+    };
+
+    if !gzip {
+        plain(stream);
         return;
     }
 
@@ -487,18 +559,13 @@ fn respond_page(stream: &mut TcpStream, body: &str, include_body: bool, gzip: bo
         .and_then(|()| encoder.finish())
         .ok();
     let Some(compressed) = compressed else {
-        // A compression failure must not cost the page: fall back to the plain body.
-        let head = head(200, content_type, VARY, body.len());
-        let _ = stream.write_all(head.as_bytes());
-        if include_body {
-            let _ = stream.write_all(body.as_bytes());
-        }
-        let _ = stream.flush();
+        // A compression failure must not cost the answer: fall back to the plain body.
+        plain(stream);
         return;
     };
 
-    let extra = format!("Content-Encoding: gzip\r\n{VARY}");
-    let head = head(200, content_type, &extra, compressed.len());
+    let headers = format!("Content-Encoding: gzip\r\n{VARY}{extra}");
+    let head = head(status, content_type, &headers, compressed.len());
     let _ = stream.write_all(head.as_bytes());
     if include_body {
         let _ = stream.write_all(&compressed);
@@ -513,6 +580,7 @@ const VARY: &str = "Vary: Accept-Encoding\r\n";
 fn head(status: u16, content_type: &str, extra: &str, length: usize) -> String {
     let reason = match status {
         200 => "OK",
+        400 => "Bad Request",
         204 => "No Content",
         404 => "Not Found",
         405 => "Method Not Allowed",
@@ -768,6 +836,36 @@ fn resolve_window(from: Option<i64>, to: Option<i64>, hours: Option<u8>, now: i6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_slot_counts_a_worker_and_gives_the_count_back_on_the_way_out() {
+        let active = Arc::new(AtomicUsize::new(0));
+        {
+            let _slot = Slot::enter(&active);
+            assert_eq!(active.load(Ordering::Relaxed), 1, "the worker is counted");
+        }
+        assert_eq!(active.load(Ordering::Relaxed), 0, "the slot is released");
+    }
+
+    #[test]
+    fn a_panicking_worker_still_gives_its_slot_back() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&active);
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let outcome = std::panic::catch_unwind(move || {
+            let _slot = Slot::enter(&counted);
+            panic!("a handler that fails");
+        });
+        std::panic::set_hook(hook);
+
+        assert!(outcome.is_err(), "the worker did panic");
+        assert_eq!(
+            active.load(Ordering::Relaxed),
+            0,
+            "an unwind releases the slot, so the limit never leaks"
+        );
+    }
 
     /// The file of one target says whose history it holds; the whole history says only
     /// when it was taken.

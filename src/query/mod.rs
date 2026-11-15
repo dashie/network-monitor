@@ -52,7 +52,9 @@ pub fn run(config: &Config, what: &QueryCommand) -> Result<(), QueryError> {
             let filter = EventFilter {
                 target: resolved,
                 since_ms,
+                until_ms: None,
                 limit: Some(*limit),
+                offset: None,
             };
             let rows = store.events(&filter)?;
             println!("{}", render::events(&rows, *format));

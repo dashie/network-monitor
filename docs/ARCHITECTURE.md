@@ -180,7 +180,41 @@ C4Container
 
 - **Input:** the database path and an optional `window`/`from`/`to`/`target` query string; a bound listener in tests.
 - **Output:** the timeline page with one lane per target — drops, the average `up` run with its spread, the longest `up` run of the window, and how long the target has been up without a drop, in that order, the statistics computed by `web::stats` from the same segments that draw the bands, the streak from the age of the current state in the `targets` table — plus the last 10 faults, each stating its target as a label over its key, the start, the code of its cause and, last, the duration — the four columns keeping a stated share of the width —, with the standard message underneath the row that opens it; the detail page of one target — opened with the identity block of the application and the target stated at the right end of the masthead with its state and how long it has held, a way back to the timeline — a link to `/`, not a step into the browser history —, a period selector for the last 30, 60, 90, 180, or 360 days (30 when the query names none, the choice in `?days=90d`), then its per-day chart for that period, labelled with the count of every day while the columns have room for it — the quiet ones stating a muted zero at the baseline — and unlabelled past about seven weeks, when the table takes over, the last 10 faults of that target in the table the timeline draws, before the day-by-day table, and a per-day table of faults, down time, and average `up` run with the longest run under the mean, whose current-day row states the last 24 hours instead, tagged and styled apart, the figure being labelled `AVG UP` on both pages — ; a streamed gzipped CSV of every event — `/export/faults.csv.gz`, of one target's events when the query names it (`?target=…`, the name of the target in the file name), with the older `/export/disconnections.csv.gz` answering `308` —, a footer that states the manual of the page in small type under a rule narrower than the content, the icon both pages open with and advertise (`/icon.svg` as the masthead mark and the favicon, `/icon.png` for the browsers without SVG support, both embedded in the executable), a plain-text health check, or a plain-text error. The CSV columns are `target,label,interface,state,occurred_at,rtt_us,cause,cause_message`: the same file the import reads back, and an archive that ends after `rtt_us` still imports.
-- **Guarantees:** every request opens the database read-only and writes nothing, a database one version behind being read without the columns it lacks; a statistic is derived from the rendered segments only, with an `up` run clipped by the window counted as it appears, so a figure can never disagree with the chart above it; only `GET` and `HEAD` are answered; dynamic text is HTML-escaped; the window is one of the offered spans — 1, 2, 4, 6, 12, or 24 hours, 1 by default, an unknown `window` falling back to the default — clamped to the last 30 days and never past now; every instant is emitted in UTC (`<time datetime>`, `data-datetime`) and formatted by the browser with `Intl`, so the server needs neither a locale nor a time zone and a page is identical for every reader; no row is written, and the socket exists only while the process that bound it runs. The export is streamed as HTTP chunks and deflated on the fly, in pages of 1 000 events: the response holds no copy of the file and no long read transaction.
+- **Guarantees:** every request opens the database read-only and writes nothing, a database one version behind being read without the columns it lacks; a statistic is derived from the rendered segments only, with an `up` run clipped by the window counted as it appears, so a figure can never disagree with the chart above it; only `GET` and `HEAD` are answered; dynamic text is HTML-escaped; the window is one of the offered spans — 1, 2, 4, 6, 12, or 24 hours, 1 by default, an unknown `window` falling back to the default — clamped to the last 30 days and never past now; every instant is emitted in UTC (`<time datetime>`, `data-datetime`) and formatted by the browser with `Intl`, so the server needs neither a locale nor a time zone and a page is identical for every reader; no row is written, and the socket exists only while the process that bound it runs. The export is streamed as HTTP chunks and deflated on the fly, in pages of 1 000 events: the response holds no copy of the file and no long read transaction. The count of the 32 connections in flight is held by a guard whose `Drop` releases it, so a handler that unwinds costs its answer and never a slot, and the surface stays available to the next request.
+
+### `web::api`
+
+- **Input:** the HTTP method, the path under `/api/v1`, the query string, and the database path
+  of the process that bound the socket.
+- **Output:** one JSON object per request — `data` and `meta` on success, `error` and `meta` on
+  failure — the OpenAPI document, or the log lines of a refused request.
+- **Guarantees:** the database is opened read-only for every request and nothing is written; an
+  array is never the root of an answer; every parameter is validated against the closed set the
+  route declares and bound as a SQL parameter, `limit` never exceeding 1 000, so one request
+  cannot ask for the whole history; `meta` states the filters it resolved and the total matching
+  rows, so a client pages without guessing; the page and the API share `web::respond_compressed`,
+  the same `no-store`, `Vary`, and `HEAD` behaviour, and `json`, the one escaper of the binary;
+  a date is read with `time::parse_rfc3339` or as epoch milliseconds; the fault records and the
+  day totals come from the same store queries the page reads, and a day total applies the rule
+  of `FR-17` — runs split at midnight, the UTC day still running stating the last 24 hours —, a
+  day at either edge of the window counting only the part inside it (the rule `Page` states once
+  and every read is clipped by), and states the target it belongs to, or `null` when the answer
+  aggregates every target.
+  A data answer is streamed: `web::api::Envelope` writes the head, one record per chunk, then
+  `meta`, through the `Chunked` writer the CSV export already uses, so no answer builds the JSON
+  text in memory and none states a `Content-Length`; `/api/v1/faults` walks keyset pages of 200
+  faults (`FaultFilter::after_ms`/`after_id`), the first read honouring the request's `offset`,
+  so its memory is one page whatever `limit` says, while `/api/v1/targets` is bounded by the
+  number of targets and `/api/v1/faults/daily` by the days of the page it answers, which `limit`
+  caps at 1 000 — the window may be as wide as the domain allows (47 482 days at most), because
+  the route reads only the days it returns and starts its timeline at the page whenever the page
+  lies in the future; an accepted instant lies in the fixed calendar domain
+  `1970-01-01T00:00:00Z … 2100-01-01T00:00:00Z`, validated once in `parse_instant` and refused with `400` outside it, and the day walks of
+  `web::stats` and `store` saturate and stop when they cannot advance, so no input reaches an
+  expression that can panic and no input can make a walk loop; a window may end in the future,
+  and an open disconnection ends at the end of the window but never later than the present, so
+  the days that have not begun state no down time and no `up` run; an error states a fixed
+  message and keeps the store detail in the log, and no answer echoes the request path.
 
 ### `import`
 

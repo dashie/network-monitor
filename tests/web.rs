@@ -913,3 +913,984 @@ fn a_url_shaped_key_survives_the_link_and_the_query() {
         "the address of the target is shown escaped"
     );
 }
+
+// ---- the JSON API under /api/v1 ----
+
+impl Server {
+    /// The status and the body of a JSON answer, the headers left out.
+    fn json(&self, path: &str) -> (u16, String) {
+        let (status, head, body) = self.get_bytes(path);
+        let body = if head.contains("Transfer-Encoding: chunked") {
+            dechunk(&body)
+        } else {
+            body
+        };
+        (
+            status,
+            String::from_utf8(body).expect("a JSON answer is UTF-8"),
+        )
+    }
+}
+
+/// The integer a rendered record states for `name`.
+fn field_number(body: &str, name: &str) -> i64 {
+    let needle = format!("\"{name}\": ");
+    let start = body.find(&needle).expect("the field is there") + needle.len();
+    body[start..]
+        .chars()
+        .take_while(|character| character.is_ascii_digit() || *character == '-')
+        .collect::<String>()
+        .parse()
+        .expect("a number")
+}
+
+#[test]
+fn every_api_route_answers_an_object_with_data_and_meta() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    for path in ["/api/v1/targets", "/api/v1/faults", "/api/v1/faults/daily"] {
+        let (status, body) = server.json(path);
+        assert_eq!(status, 200, "{path} answered {status}: {body}");
+        assert!(
+            body.starts_with("{\n  \"data\": "),
+            "an array is never the root of {path}: {body}"
+        );
+        assert!(body.contains("\"limit\": 100, \"offset\": 0"), "got {body}");
+        assert!(body.contains("\"total\": "), "got {body}");
+        assert!(body.contains("\"filters\": {"), "got {body}");
+        assert!(body.contains("\"generatedAt\": \""), "got {body}");
+    }
+}
+
+#[test]
+fn the_targets_state_every_property_and_page_by_limit_and_offset() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, body) = server.json("/api/v1/targets");
+    assert_eq!(status, 200);
+    for key in [
+        "\"target\"",
+        "\"label\"",
+        "\"interface\"",
+        "\"state\"",
+        "\"stateSince\"",
+        "\"stateSinceMs\"",
+        "\"firstSeenAt\"",
+        "\"firstSeenAtMs\"",
+        "\"lastRttUs\"",
+        "\"upForMs\"",
+    ] {
+        assert!(body.contains(key), "{key} is missing from {body}");
+    }
+    assert!(body.contains("\"total\": 2"), "got {body}");
+    assert!(body.contains("\"target\": \"1.1.1.1\""), "got {body}");
+    assert!(body.contains("\"target\": \"9.9.9.9\""), "got {body}");
+
+    let (_, page) = server.json("/api/v1/targets?limit=1&offset=1");
+    assert!(page.contains("\"total\": 2"), "the total is the whole list");
+    assert!(page.contains("\"limit\": 1, \"offset\": 1"), "got {page}");
+    assert!(page.contains("\"target\": \"9.9.9.9\""), "got {page}");
+    assert!(!page.contains("\"target\": \"1.1.1.1\""), "got {page}");
+}
+
+#[test]
+fn the_faults_state_their_lifecycle_and_keep_from_inclusive_and_to_exclusive() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, body) = server.json("/api/v1/faults");
+    assert_eq!(status, 200);
+    for key in [
+        "\"id\"",
+        "\"target\"",
+        "\"label\"",
+        "\"interface\"",
+        "\"occurredAt\"",
+        "\"occurredAtMs\"",
+        "\"cause\"",
+        "\"causeMessage\"",
+        "\"endedAt\"",
+        "\"endedAtMs\"",
+        "\"durationMs\"",
+        "\"ongoing\"",
+    ] {
+        assert!(body.contains(key), "{key} is missing from {body}");
+    }
+    assert!(body.contains("\"total\": 1"), "got {body}");
+    assert!(body.contains("\"ongoing\": true"), "still down: {body}");
+    assert!(body.contains("\"endedAt\": null"), "no return: {body}");
+    assert!(body.contains("\"durationMs\": null"), "open fault: {body}");
+
+    let at = field_number(&body, "occurredAtMs");
+    let (_, from) = server.json(&format!("/api/v1/faults?from={at}"));
+    assert!(from.contains("\"total\": 1"), "from is inclusive: {from}");
+    let (_, to) = server.json(&format!("/api/v1/faults?to={at}"));
+    assert!(to.contains("\"total\": 0"), "to is exclusive: {to}");
+}
+
+#[test]
+fn a_fault_filter_resolves_the_label_as_well_as_the_key() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (_, by_key) = server.json("/api/v1/faults?target=1.1.1.1");
+    let (_, by_label) = server.json("/api/v1/faults?target=probe");
+    assert!(by_key.contains("\"total\": 1"), "got {by_key}");
+    assert_eq!(
+        field_number(&by_key, "id"),
+        field_number(&by_label, "id"),
+        "the label names the same target"
+    );
+    assert!(
+        by_label.contains("\"filters\": {\"target\": \"1.1.1.1\""),
+        "the meta echoes the resolved key: {by_label}"
+    );
+
+    let (_, other) = server.json("/api/v1/faults?target=9.9.9.9");
+    assert!(other.contains("\"total\": 0"), "no fault there: {other}");
+}
+
+#[test]
+fn the_daily_totals_state_the_faults_the_down_time_and_the_up_runs() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, body) = server.json("/api/v1/faults/daily");
+    assert_eq!(status, 200);
+    for key in [
+        "\"target\"",
+        "\"day\"",
+        "\"dayStart\"",
+        "\"dayStartMs\"",
+        "\"faults\"",
+        "\"downMs\"",
+        "\"avgUpRunMs\"",
+        "\"longestUpRunMs\"",
+        "\"partial\"",
+    ] {
+        assert!(body.contains(key), "{key} is missing from {body}");
+    }
+    assert!(body.contains("\"faults\": 1"), "the seeded fault: {body}");
+    assert!(
+        body.contains("\"partial\": true"),
+        "the UTC day still running is marked: {body}"
+    );
+    assert!(
+        body.contains("\"partial\": false"),
+        "the closed days of the window: {body}"
+    );
+    assert!(
+        body.contains("\"filters\": {\"target\": null, \"from\": \""),
+        "the meta echoes the window it applied: {body}"
+    );
+
+    let (_, quiet) = server.json("/api/v1/faults/daily?target=9.9.9.9");
+    assert!(
+        !quiet.contains("\"faults\": 1"),
+        "a target with no fault states zeros: {quiet}"
+    );
+}
+
+#[test]
+fn the_api_refuses_a_parameter_it_does_not_understand() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    for (query, code) in [
+        ("limit=0", "INVALID_PARAMETER"),
+        ("limit=1001", "INVALID_PARAMETER"),
+        ("limit=abc", "INVALID_PARAMETER"),
+        ("offset=-1", "INVALID_PARAMETER"),
+        ("bogus=1", "INVALID_PARAMETER"),
+        ("from=yesterday", "INVALID_PARAMETER"),
+        (
+            "from=2026-11-15T00:00:00Z&to=2026-11-14T00:00:00Z",
+            "INVALID_RANGE",
+        ),
+    ] {
+        let (status, body) = server.json(&format!("/api/v1/faults?{query}"));
+        assert_eq!(status, 400, "{query} answered {status}: {body}");
+        assert!(body.contains(code), "{query} states {code}: {body}");
+        assert!(body.contains("\"status\": 400"), "got {body}");
+    }
+
+    let (status, body) = server.json("/api/v1/faults?limit=0");
+    assert_eq!(status, 400);
+    assert!(
+        body.contains("\"parameter\": \"limit\""),
+        "the refused parameter is named: {body}"
+    );
+
+    let (status, body) = server.json("/api/v1/targets?target=1.1.1.1");
+    assert_eq!(status, 400, "the route states its own parameters: {body}");
+    assert!(body.contains("\"parameter\": \"target\""), "got {body}");
+
+    let (status, body) = server.json("/api/v1/nope");
+    assert_eq!(status, 404, "got {body}");
+    assert!(body.contains("\"code\": \"NOT_FOUND\""), "got {body}");
+}
+
+#[test]
+fn an_unknown_target_is_a_404_that_names_it() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    for route in ["/api/v1/faults", "/api/v1/faults/daily"] {
+        let (status, body) = server.json(&format!("{route}?target=nowhere"));
+        assert_eq!(status, 404, "{route} answered {status}: {body}");
+        assert!(body.contains("\"code\": \"UNKNOWN_TARGET\""), "got {body}");
+        assert!(body.contains("\"parameter\": \"target\""), "got {body}");
+        assert!(body.contains("nowhere"), "the answer names it: {body}");
+    }
+}
+
+#[test]
+fn the_api_states_cors_and_answers_the_preflight() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, response) = request(
+        &server.address,
+        "OPTIONS /api/v1/targets HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    assert_eq!(status, 204);
+    assert!(
+        response.contains("Access-Control-Allow-Origin: *"),
+        "{response}"
+    );
+    assert!(
+        response.contains("Access-Control-Allow-Methods: GET, HEAD, OPTIONS"),
+        "{response}"
+    );
+    assert!(
+        response.contains("Access-Control-Max-Age: 600"),
+        "{response}"
+    );
+
+    let (_, plain) = server.get("/api/v1/targets");
+    assert!(
+        plain.contains("Access-Control-Allow-Origin: *"),
+        "every answer is readable from another origin"
+    );
+
+    let (status, response) = request(
+        &server.address,
+        "POST /api/v1/targets HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    assert_eq!(status, 405);
+    assert!(response.contains("Allow: GET, HEAD, OPTIONS"), "{response}");
+    assert!(
+        response.contains("\"code\": \"METHOD_NOT_ALLOWED\""),
+        "{response}"
+    );
+}
+
+#[test]
+fn an_api_answer_is_gzipped_only_when_the_client_accepts_it() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, head, plain) = server.get_bytes("/api/v1/targets");
+    assert_eq!(status, 200);
+    assert!(!head.contains("Content-Encoding"), "{head}");
+    assert!(head.contains("Vary: Accept-Encoding"), "{head}");
+    assert!(head.contains("Content-Type: application/json; charset=utf-8"));
+
+    assert!(String::from_utf8(dechunk(&plain))
+        .expect("the plain answer is UTF-8")
+        .contains("\"total\": 2"));
+
+    let (status, head, compressed) =
+        server.get_bytes_with("/api/v1/targets", "Accept-Encoding: gzip\r\n");
+    assert_eq!(status, 200);
+    assert!(head.contains("Content-Encoding: gzip"), "{head}");
+    assert!(head.contains("Transfer-Encoding: chunked"), "{head}");
+    let decoded = gunzip(&dechunk(&compressed));
+    assert!(
+        decoded.starts_with("{\n  \"data\": ["),
+        "the body decompresses to the document: {decoded}"
+    );
+    assert!(decoded.contains("\"total\": 2"), "got {decoded}");
+}
+
+#[test]
+fn a_head_of_an_api_route_states_the_stream_and_sends_no_body() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, response) = request(
+        &server.address,
+        "HEAD /api/v1/targets HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    assert_eq!(status, 200);
+    assert!(
+        response.contains("Content-Type: application/json; charset=utf-8"),
+        "{response}"
+    );
+    assert!(
+        response.contains("Transfer-Encoding: chunked"),
+        "{response}"
+    );
+    assert!(
+        !response.contains("Content-Length"),
+        "a streamed answer states no length: {response}"
+    );
+    let (_, body) = response.split_once("\r\n\r\n").expect("the headers end");
+    assert!(body.is_empty(), "HEAD sends no body");
+}
+
+#[test]
+fn the_openapi_document_names_the_routes_and_every_property_they_answer() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    const TARGET_KEYS: [&str; 10] = [
+        "target",
+        "label",
+        "interface",
+        "state",
+        "stateSince",
+        "stateSinceMs",
+        "firstSeenAt",
+        "firstSeenAtMs",
+        "lastRttUs",
+        "upForMs",
+    ];
+    const FAULT_KEYS: [&str; 12] = [
+        "id",
+        "target",
+        "label",
+        "interface",
+        "occurredAt",
+        "occurredAtMs",
+        "cause",
+        "causeMessage",
+        "endedAt",
+        "endedAtMs",
+        "durationMs",
+        "ongoing",
+    ];
+    const DAY_KEYS: [&str; 9] = [
+        "target",
+        "day",
+        "dayStart",
+        "dayStartMs",
+        "faults",
+        "downMs",
+        "avgUpRunMs",
+        "longestUpRunMs",
+        "partial",
+    ];
+
+    let (status, head, bytes) = server.get_bytes("/api/v1/openapi.json");
+    assert_eq!(status, 200);
+    assert!(head.contains("Content-Type: application/json; charset=utf-8"));
+    let document = String::from_utf8(bytes).expect("the document is UTF-8");
+    assert!(
+        document.contains("\"openapi\": \"3.1.0\""),
+        "got {document}"
+    );
+    for schema in [
+        "TargetEnvelope",
+        "FaultEnvelope",
+        "DayTotalEnvelope",
+        "Meta",
+        "ErrorEnvelope",
+    ] {
+        assert!(document.contains(schema), "{schema} is missing");
+    }
+
+    let expected: [(&str, &[&str]); 3] = [
+        ("/api/v1/targets", &TARGET_KEYS),
+        ("/api/v1/faults", &FAULT_KEYS),
+        ("/api/v1/faults/daily", &DAY_KEYS),
+    ];
+    for (path, keys) in expected {
+        assert!(
+            document.contains(&format!("\"{path}\"")),
+            "the document does not name {path}"
+        );
+        let (status, body) = server.json(path);
+        assert_eq!(status, 200, "the documented {path} must answer");
+        for key in keys {
+            assert!(
+                document.contains(&format!("\"{key}\"")),
+                "the document does not state {key} of {path}"
+            );
+            assert!(
+                body.contains(&format!("\"{key}\":")),
+                "{path} answers no {key}: {body}"
+            );
+        }
+    }
+}
+
+/// A history of `faults` faults: an `up` and a `down` per fault, one second apart.
+fn database_with_faults(faults: usize) -> (tempfile::TempDir, PathBuf) {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let path = directory.path().join("events.db");
+    let mut store = Store::open_rw(&path).expect("the database opens");
+    let mut previous = TargetState::Unknown;
+    for step in 0..faults * 2 {
+        let state = if step % 2 == 0 {
+            TargetState::Up
+        } else {
+            TargetState::Down
+        };
+        store
+            .record_transition(&event(
+                "1.1.1.1",
+                previous,
+                state,
+                1_000 + (step as i64) * 1_000,
+            ))
+            .expect("the transition is recorded");
+        previous = state;
+    }
+    (directory, path)
+}
+
+#[test]
+fn a_data_route_is_streamed_without_a_length() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, head, body) = server.get_bytes("/api/v1/targets");
+    assert_eq!(status, 200);
+    assert!(head.contains("Transfer-Encoding: chunked"), "{head}");
+    assert!(
+        !head.contains("Content-Length"),
+        "a streamed answer states no length: {head}"
+    );
+
+    let text = String::from_utf8(dechunk(&body)).expect("the answer is UTF-8");
+    assert!(text.starts_with("{\n  \"data\": [\n"), "got {text}");
+    assert!(text.ends_with("}\n"), "the document closes: {text}");
+    assert!(text.contains("\"total\": 2"), "got {text}");
+    assert!(text.contains("\"target\": \"1.1.1.1\""), "got {text}");
+}
+
+#[test]
+fn a_page_of_faults_larger_than_one_keyset_read_comes_back_whole() {
+    const FAULTS: usize = 250;
+    let (_directory, database) = database_with_faults(FAULTS);
+    let server = start(&database);
+
+    let (status, body) = server.json(&format!("/api/v1/faults?limit={FAULTS}"));
+    assert_eq!(status, 200, "got {body}");
+    assert!(
+        body.contains(&format!("\"total\": {FAULTS}")),
+        "the total is the whole history: {body}"
+    );
+
+    let ids: Vec<i64> = body
+        .split("{\"id\": ")
+        .skip(1)
+        .filter_map(|rest| rest.split(',').next()?.trim().parse().ok())
+        .collect();
+    assert_eq!(ids.len(), FAULTS, "every fault is written once");
+    assert!(
+        ids.windows(2).all(|pair| pair[0] > pair[1]),
+        "the faults arrive newest first"
+    );
+
+    let (_, page) = server.json(&format!("/api/v1/faults?limit=10&offset={}", FAULTS - 10));
+    let last: Vec<i64> = page
+        .split("{\"id\": ")
+        .skip(1)
+        .filter_map(|rest| rest.split(',').next()?.trim().parse().ok())
+        .collect();
+    assert_eq!(last.len(), 10, "the last page holds the oldest ten");
+    assert_eq!(
+        last[9],
+        ids[FAULTS - 1],
+        "the offset still reaches the tail"
+    );
+}
+
+#[test]
+fn a_store_failure_states_a_fixed_message_and_no_path() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+    std::fs::remove_file(&database).expect("the database is removed");
+
+    let (status, body) = server.json("/api/v1/faults");
+    assert_eq!(status, 503, "got {body}");
+    assert!(
+        body.contains("\"code\": \"DATABASE_UNAVAILABLE\""),
+        "got {body}"
+    );
+    assert!(
+        body.contains("\"message\": \"cannot read the event database\""),
+        "got {body}"
+    );
+    assert!(!body.contains(".db"), "no path reaches the reader: {body}");
+    assert!(
+        !body.contains("does not exist"),
+        "no store detail reaches the reader: {body}"
+    );
+}
+
+#[test]
+fn an_unknown_api_route_does_not_echo_the_request() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, body) = server.json("/api/v1/secret-looking-path");
+    assert_eq!(status, 404, "got {body}");
+    assert!(
+        body.contains("\"message\": \"no such route\""),
+        "got {body}"
+    );
+    assert!(
+        !body.contains("secret-looking-path"),
+        "the request path is not echoed: {body}"
+    );
+}
+
+#[test]
+fn the_daily_totals_name_the_target_or_state_null() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (_, filtered) = server.json("/api/v1/faults/daily?target=1.1.1.1");
+    assert!(
+        filtered.contains("{\"target\": \"1.1.1.1\", \"day\": "),
+        "a filtered answer names the target on every record: {filtered}"
+    );
+
+    let (_, all) = server.json("/api/v1/faults/daily");
+    assert!(
+        all.contains("{\"target\": null, \"day\": "),
+        "an aggregate answer states null: {all}"
+    );
+}
+
+#[test]
+fn the_api_root_and_a_repeated_parameter_answer_the_envelope() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, body) = server.json("/api/v1");
+    assert_eq!(
+        status, 404,
+        "the prefix without a route is not a page: {body}"
+    );
+    assert!(body.contains("\"code\": \"NOT_FOUND\""), "got {body}");
+    assert!(
+        body.contains("\"message\": \"no such route\""),
+        "got {body}"
+    );
+
+    let (status, body) = server.json("/api/v1/faults?limit=5&limit=6");
+    assert_eq!(status, 400, "a repeated parameter is refused: {body}");
+    assert!(body.contains("\"parameter\": \"limit\""), "got {body}");
+    assert!(body.contains("more than once"), "got {body}");
+}
+
+#[test]
+fn the_daily_page_holds_only_the_days_it_states() {
+    const DAY: i64 = 86_400_000;
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let path = directory.path().join("events.db");
+    let first_day = 1_700_006_400_000i64.div_euclid(DAY) * DAY;
+    {
+        let mut store = Store::open_rw(&path).expect("the database opens");
+        store
+            .record_transition(&event(
+                "1.1.1.1",
+                TargetState::Unknown,
+                TargetState::Up,
+                first_day - 60_000,
+            ))
+            .expect("the first transition is recorded");
+        store
+            .record_transition(&event(
+                "1.1.1.1",
+                TargetState::Up,
+                TargetState::Down,
+                first_day + 3_600_000,
+            ))
+            .expect("the fault is recorded");
+        store
+            .record_transition(&event(
+                "1.1.1.1",
+                TargetState::Down,
+                TargetState::Up,
+                first_day + 4_200_000,
+            ))
+            .expect("the return is recorded");
+    }
+    let server = start(&path);
+
+    let to = first_day + 10 * DAY;
+    let (status, body) = server.json(&format!(
+        "/api/v1/faults/daily?from={first_day}&to={to}&limit=10"
+    ));
+    assert_eq!(status, 200, "got {body}");
+    assert_eq!(
+        field_number(&body, "total"),
+        10,
+        "the window holds ten days"
+    );
+    assert_eq!(
+        body.matches("\"day\": \"").count(),
+        10,
+        "one record per day of the page: {body}"
+    );
+    assert!(
+        body.contains("\"faults\": 1, \"downMs\": 600000"),
+        "the only fault is on the first day: {body}"
+    );
+
+    let (_, later) = server.json(&format!(
+        "/api/v1/faults/daily?from={first_day}&to={to}&limit=3&offset=1"
+    ));
+    assert!(
+        later.contains("\"faults\": 0"),
+        "the day after states no fault: {later}"
+    );
+    assert_eq!(field_number(&later, "total"), 10, "the total is the window");
+}
+
+#[test]
+fn a_window_since_1970_states_its_total_and_returns_only_the_page() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, body) = server.json("/api/v1/faults/daily?from=0&limit=5");
+    assert_eq!(status, 200, "got {body}");
+    assert!(
+        field_number(&body, "total") > 20_000,
+        "the total counts every day of the window: {body}"
+    );
+    assert_eq!(
+        body.matches("\"day\": \"").count(),
+        5,
+        "the answer holds the page, not the window: {body}"
+    );
+    assert!(
+        body.contains("\"day\": \"1970-01-01\""),
+        "the page starts at the oldest day: {body}"
+    );
+}
+
+#[test]
+fn a_daily_page_past_the_end_still_states_the_total_of_the_window() {
+    const DAY: i64 = 86_400_000;
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let first_day = 1_700_006_400_000i64.div_euclid(DAY) * DAY;
+    let to = first_day + 10 * DAY;
+    let (status, body) = server.json(&format!(
+        "/api/v1/faults/daily?from={first_day}&to={to}&limit=10&offset=1000"
+    ));
+
+    assert_eq!(status, 200, "got {body}");
+    assert!(
+        body.contains("\"data\": []"),
+        "the page past the end is empty: {body}"
+    );
+    assert_eq!(
+        field_number(&body, "total"),
+        10,
+        "the total is the window, whatever the page holds: {body}"
+    );
+}
+
+#[test]
+fn the_first_day_of_a_daily_page_is_clipped_to_the_requested_from() {
+    const DAY: i64 = 86_400_000;
+    const HOUR: i64 = 3_600_000;
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let path = directory.path().join("events.db");
+    let first_day = 1_700_006_400_000i64.div_euclid(DAY) * DAY;
+    {
+        let mut store = Store::open_rw(&path).expect("the database opens");
+        store
+            .record_transition(&event(
+                "1.1.1.1",
+                TargetState::Unknown,
+                TargetState::Up,
+                first_day + 8 * HOUR,
+            ))
+            .expect("the first transition is recorded");
+        store
+            .record_transition(&event(
+                "1.1.1.1",
+                TargetState::Up,
+                TargetState::Down,
+                first_day + 9 * HOUR,
+            ))
+            .expect("the fault is recorded");
+        store
+            .record_transition(&event(
+                "1.1.1.1",
+                TargetState::Down,
+                TargetState::Up,
+                first_day + 11 * HOUR,
+            ))
+            .expect("the return is recorded");
+    }
+    let server = start(&path);
+
+    // The window opens at 10:00, inside the fault: only 10:00-11:00 is down time.
+    let (status, body) = server.json(&format!(
+        "/api/v1/faults/daily?from={}&to={}&limit=2",
+        first_day + 10 * HOUR,
+        first_day + DAY
+    ));
+
+    assert_eq!(status, 200, "got {body}");
+    assert_eq!(
+        field_number(&body, "faults"),
+        0,
+        "the fault opened before the window, so it is not a drop inside it: {body}"
+    );
+    assert_eq!(
+        field_number(&body, "downMs"),
+        HOUR,
+        "only the part after `from` is down time: {body}"
+    );
+    assert_eq!(
+        field_number(&body, "avgUpRunMs"),
+        13 * HOUR,
+        "the up run starts at 11:00, not at the day start: {body}"
+    );
+}
+
+#[test]
+fn the_current_utc_day_states_the_up_runs_of_the_last_24_hours() {
+    const HOUR: i64 = 3_600_000;
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let path = directory.path().join("events.db");
+    let now = now_ms();
+    {
+        let mut store = Store::open_rw(&path).expect("the database opens");
+        store
+            .record_transition(&event(
+                "1.1.1.1",
+                TargetState::Unknown,
+                TargetState::Up,
+                now - 2 * HOUR,
+            ))
+            .expect("the first transition is recorded");
+        store
+            .record_transition(&event(
+                "1.1.1.1",
+                TargetState::Up,
+                TargetState::Down,
+                now - HOUR,
+            ))
+            .expect("the fault is recorded");
+        store
+            .record_transition(&event(
+                "1.1.1.1",
+                TargetState::Down,
+                TargetState::Up,
+                now - HOUR / 2,
+            ))
+            .expect("the return is recorded");
+    }
+    let server = start(&path);
+
+    // A one-hour window that holds only the UTC day still running.
+    let (status, body) = server.json(&format!(
+        "/api/v1/faults/daily?from={}&to={}",
+        now - HOUR / 2,
+        now
+    ));
+    assert_eq!(status, 200, "got {body}");
+
+    let day = body
+        .lines()
+        .find(|line| line.contains("\"partial\": true"))
+        .expect("the day still running is marked");
+
+    // The runs of the last 24 hours: one hour, then the half hour still open.
+    assert_eq!(
+        field_number(day, "longestUpRunMs"),
+        HOUR,
+        "the longest run of the last 24 hours: {day}"
+    );
+    let average = field_number(day, "avgUpRunMs");
+    assert!(
+        (2_700_000..2_700_000 + 30_000).contains(&average),
+        "the mean of one hour and the half hour still running: {average} in {day}"
+    );
+}
+
+#[test]
+fn an_instant_outside_the_accepted_domain_is_refused() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    // The domain is `1970-01-01T00:00:00Z .. 2100-01-01T00:00:00Z`. The last shape — a `to` with
+    // no `from`, at the bottom of the range — is the one whose default window used to run off
+    // the end of the range.
+    for (path, parameter) in [
+        ("/api/v1/faults/daily?from=-1", "from"),
+        ("/api/v1/faults/daily?to=4102444800001", "to"),
+        ("/api/v1/faults/daily?from=1900-01-01T00:00:00Z", "from"),
+        ("/api/v1/faults/daily?to=2100-01-02T00:00:00Z", "to"),
+        ("/api/v1/faults/daily?from=-9223372036854775808", "from"),
+        ("/api/v1/faults/daily?to=9223372036854775807", "to"),
+        ("/api/v1/faults/daily?to=-9223372036854775800", "to"),
+        ("/api/v1/faults?from=-1", "from"),
+    ] {
+        let (status, body) = server.json(path);
+        assert_eq!(status, 400, "{path} answered {status}: {body}");
+        assert!(
+            body.contains("\"code\": \"INVALID_PARAMETER\""),
+            "{path}: {body}"
+        );
+        assert!(
+            body.contains(&format!("\"parameter\": \"{parameter}\"")),
+            "{path} names {parameter}: {body}"
+        );
+        assert!(
+            body.contains("1970-01-01T00:00:00.000Z") && body.contains("2100-01-01T00:00:00.000Z"),
+            "{path} states the domain: {body}"
+        );
+    }
+}
+
+#[test]
+fn the_two_ends_of_the_domain_are_accepted() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    for path in [
+        "/api/v1/faults/daily?from=1970-01-01T00:00:00Z&limit=1",
+        "/api/v1/faults/daily?to=2100-01-01T00:00:00Z&limit=1",
+        "/api/v1/faults/daily?from=0&to=4102444800000&limit=1",
+        "/api/v1/faults?from=1970-01-01T00:00:00Z&to=2100-01-01T00:00:00Z&limit=1",
+    ] {
+        let (status, body) = server.json(path);
+        assert_eq!(status, 200, "{path} answered {status}: {body}");
+        assert!(body.starts_with("{\n  \"data\": ["), "got {body}");
+        assert!(body.contains("\"meta\": "), "got {body}");
+    }
+}
+
+/// The whole domain is the widest window a client may ask for, and it must cost what the page
+/// costs, not what the span costs: 47 482 days exist, 1 000 are read.
+#[test]
+fn the_widest_window_answers_only_the_page_it_was_asked_for() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, body) = server
+        .json("/api/v1/faults/daily?from=1970-01-01T00:00:00Z&to=2100-01-01T00:00:00Z&limit=1000");
+    assert_eq!(status, 200, "got {body}");
+    assert_eq!(
+        field_number(&body, "total"),
+        47_482,
+        "the days of the domain"
+    );
+    assert_eq!(
+        body.matches("\"dayStartMs\"").count(),
+        1000,
+        "only the requested page is stated"
+    );
+}
+
+/// The windows people actually write end in the future: "this month", "this year". A `to` after
+/// today is valid, and the days that have not begun yet state nothing and are not `partial`.
+#[test]
+fn a_window_that_ends_in_the_future_is_answered_whole() {
+    const DAY: i64 = 86_400_000;
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let today = now_ms().div_euclid(DAY) * DAY;
+    // Ten days before today to twenty days after it: the 30 days of a month, ending in the future.
+    let (status, body) = server.json(&format!(
+        "/api/v1/faults/daily?from={}&to={}&limit=40",
+        today - 10 * DAY,
+        today + 20 * DAY
+    ));
+    assert_eq!(status, 200, "got {body}");
+    assert_eq!(field_number(&body, "total"), 30, "the days of the window");
+    assert_eq!(body.matches("\"dayStartMs\"").count(), 30, "one per day");
+    assert!(
+        body.contains(&format!("\"dayStartMs\": {}", today + 19 * DAY)),
+        "the last day is in the future: {body}"
+    );
+
+    let future_day = body
+        .lines()
+        .find(|line| line.contains(&format!("\"dayStartMs\": {}", today + 19 * DAY)))
+        .expect("the last day of the window");
+    assert_eq!(field_number(future_day, "faults"), 0, "{future_day}");
+    assert_eq!(field_number(future_day, "downMs"), 0, "{future_day}");
+    assert!(
+        future_day.contains("\"partial\": false"),
+        "only the day still running is partial: {future_day}"
+    );
+
+    // A year, the same way: 365 days ending five days after today.
+    let (status, body) = server.json(&format!(
+        "/api/v1/faults/daily?from={}&to={}&limit=1000",
+        today - 360 * DAY,
+        today + 5 * DAY
+    ));
+    assert_eq!(status, 200, "got {body}");
+    assert_eq!(field_number(&body, "total"), 365, "the days of the year");
+}
+
+/// A `to` at the bottom of the domain leaves no room for the default 30-day window: that is an
+/// empty range, stated as such, not an underflowed `from`.
+#[test]
+fn a_to_at_the_lower_bound_of_the_domain_is_an_empty_range() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, body) = server.json("/api/v1/faults/daily?to=1970-01-01T00:00:00Z");
+    assert_eq!(status, 400, "got {body}");
+    assert!(body.contains("\"code\": \"INVALID_RANGE\""), "got {body}");
+}
+
+#[test]
+fn an_instant_beyond_the_integer_range_is_refused() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    for path in [
+        "/api/v1/faults/daily?from=9223372036854775808",
+        "/api/v1/faults/daily?to=-9223372036854775809",
+    ] {
+        let (status, body) = server.json(path);
+        assert_eq!(status, 400, "{path} answered {status}: {body}");
+        assert!(
+            body.contains("\"code\": \"INVALID_PARAMETER\""),
+            "got {body}"
+        );
+    }
+}
+
+/// Every answered request gives its connection slot back, so a long run of requests — the
+/// widest window the daily route accepts included — never leaves the server silent.
+#[test]
+fn a_run_of_requests_never_consumes_a_connection_slot_for_good() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    for round in 0..40 {
+        let (status, body) =
+            server.json("/api/v1/faults/daily?from=1970-01-01T00:00:00Z&limit=100");
+        assert_eq!(status, 200, "round {round} answered {status}: {body}");
+        // A refused request must not leak a slot either.
+        let (status, body) = server.json("/api/v1/faults/daily?to=9223372036854775807");
+        assert_eq!(status, 400, "round {round} answered {status}: {body}");
+    }
+
+    let (status, _) = server.get("/healthz");
+    assert_eq!(status, 200, "the health check still answers");
+    let (status, page) = server.get("/");
+    assert_eq!(status, 200, "the page still answers");
+    assert!(page.contains("1.1.1.1"), "and it still holds the history");
+}

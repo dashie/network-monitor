@@ -1,0 +1,72 @@
+//! `GET /api/v1/targets`: every target, ordered by key.
+
+use std::net::TcpStream;
+use std::path::Path;
+
+use crate::json;
+use crate::store::TargetStateRow;
+use crate::time::{format_rfc3339, now_ms};
+use crate::web::page;
+
+use super::{
+    close, open, reject, truncated, Envelope, Meta, Params, Rejection, Reply, StreamError,
+};
+
+/// Every target, ordered by key, streamed one record at a time.
+pub(super) fn route(stream: &mut TcpStream, query: &str, database: &Path, reply: Reply) {
+    let params = match Params::parse(query, &["limit", "offset"]) {
+        Ok(params) => params,
+        Err(rejection) => return reject(stream, rejection, reply),
+    };
+    let Some(store) = open(stream, database, reply) else {
+        return;
+    };
+    let states = match store.states() {
+        Ok(states) => states,
+        Err(error) => return reject(stream, Rejection::failed(&error), reply),
+    };
+
+    let now = now_ms();
+    let meta = Meta {
+        limit: params.limit,
+        offset: params.offset,
+        total: states.len() as i64,
+        target: None,
+        from: None,
+        to: None,
+        generated_at: now,
+    };
+
+    let mut envelope = Envelope::begin(stream, reply);
+    let page = states
+        .iter()
+        .skip(params.offset as usize)
+        .take(params.limit as usize);
+    for row in page {
+        if let Err(error) = envelope.record(&target_record(row, now)) {
+            return truncated(StreamError::Write(error));
+        }
+    }
+    if let Err(error) = envelope.finish(&meta) {
+        return truncated(StreamError::Write(error));
+    }
+    close(stream, reply);
+}
+
+fn target_record(row: &TargetStateRow, now: i64) -> String {
+    format!(
+        "  {{\"target\": {}, \"label\": {}, \"interface\": {}, \"state\": {}, \
+         \"stateSince\": {}, \"stateSinceMs\": {}, \"firstSeenAt\": {}, \"firstSeenAtMs\": {}, \
+         \"lastRttUs\": {}, \"upForMs\": {}}}",
+        json::string(&row.target),
+        json::option_string(&row.label),
+        json::option_string(&row.interface),
+        json::string(row.state.as_str()),
+        json::string(&format_rfc3339(row.last_change_at_ms)),
+        row.last_change_at_ms,
+        json::string(&format_rfc3339(row.first_seen_at_ms)),
+        row.first_seen_at_ms,
+        json::option_i64(row.last_rtt_us),
+        json::option_i64(page::up_for(row.state, row.last_change_at_ms, now)),
+    )
+}

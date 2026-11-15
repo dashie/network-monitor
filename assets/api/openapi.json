@@ -1,0 +1,386 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "network-monitor — read-only API",
+    "summary": "The reachability history the page shows, as JSON",
+    "description": "Read-only and unauthenticated, served on the socket the page already binds: it never writes and it never needs a credential. Every success is an object whose `data` holds an array and whose `meta` echoes the request; every failure is an object with a stable `code` and a fixed `message`. The data routes stream: `Transfer-Encoding: chunked`, no `Content-Length`, gzip on the fly when the client accepts it. A breaking change means a new `/api/vN` prefix.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    { "url": "/" }
+  ],
+  "paths": {
+    "/api/v1/targets": {
+      "get": {
+        "operationId": "listTargets",
+        "summary": "Every target, ordered by key",
+        "parameters": [
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/Offset" }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of targets",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TargetEnvelope" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "500": { "$ref": "#/components/responses/Failed" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/faults": {
+      "get": {
+        "operationId": "listFaults",
+        "summary": "The faults, newest first",
+        "parameters": [
+          { "$ref": "#/components/parameters/Target" },
+          { "$ref": "#/components/parameters/From" },
+          { "$ref": "#/components/parameters/To" },
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/Offset" }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of faults",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/FaultEnvelope" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/UnknownTarget" },
+          "500": { "$ref": "#/components/responses/Failed" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/faults/daily": {
+      "get": {
+        "operationId": "listDailyTotals",
+        "summary": "Faults, down time, and up runs per UTC day, oldest first",
+        "description": "The window is the last 30 days when the request names none, and it may be as wide as the accepted domain allows (47 482 days at most): only the days the page returns are read, so the cost follows `limit`, not the span. A day that the window clips at its edges counts only what falls inside it; a day that has not begun yet states no faults, no down time and no up run, because unelapsed time is not measured; and the UTC day still running is flagged `partial`: its average and longest up run cover the last 24 hours, like the detail page.",
+        "parameters": [
+          { "$ref": "#/components/parameters/Target" },
+          { "$ref": "#/components/parameters/From" },
+          { "$ref": "#/components/parameters/To" },
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/Offset" }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of days",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/DayTotalEnvelope" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/UnknownTarget" },
+          "500": { "$ref": "#/components/responses/Failed" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/openapi.json": {
+      "get": {
+        "operationId": "getOpenApi",
+        "summary": "This document",
+        "responses": {
+          "200": {
+            "description": "The OpenAPI 3.1 description of the API",
+            "content": {
+              "application/json": { "schema": { "type": "object" } }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "Target": {
+        "name": "target",
+        "in": "query",
+        "required": false,
+        "description": "Canonical key (`icmp://1.1.1.1`) or the label of a target. An unknown value answers `404 UNKNOWN_TARGET`.",
+        "schema": { "type": "string" }
+      },
+      "From": {
+        "name": "from",
+        "in": "query",
+        "required": false,
+        "description": "Start of the window, inclusive: an RFC 3339 UTC instant such as `2026-11-14T22:00:00.000Z`, or epoch milliseconds. An instant lies between `1970-01-01T00:00:00Z` and `2100-01-01T00:00:00Z`, both accepted; a value outside answers `400 INVALID_PARAMETER`.",
+        "schema": { "type": "string" }
+      },
+      "To": {
+        "name": "to",
+        "in": "query",
+        "required": false,
+        "description": "End of the window, exclusive, in the same two forms and inside the same calendar domain as `from`. It must be later than `from`, and it may be in the future, so a whole month or year can be asked for; the days after today state no faults and no down time.",
+        "schema": { "type": "string" }
+      },
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "description": "How many records the page holds.",
+        "schema": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 100 }
+      },
+      "Offset": {
+        "name": "offset",
+        "in": "query",
+        "required": false,
+        "description": "How many records to skip. Paging a list that grows at the top can repeat a record; use `from`/`to` for a stable window.",
+        "schema": { "type": "integer", "minimum": 0, "default": 0 }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "A parameter the route does not accept, a value out of range, or a window that ends before it starts",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+          }
+        }
+      },
+      "UnknownTarget": {
+        "description": "The `target` filter names no target in the database",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+          }
+        }
+      },
+      "Failed": {
+        "description": "The database refused the query",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+          }
+        }
+      },
+      "Unavailable": {
+        "description": "The database is missing or was never opened by this tool",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "TargetEnvelope": {
+        "type": "object",
+        "required": ["data", "meta"],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Target" }
+          },
+          "meta": { "$ref": "#/components/schemas/Meta" }
+        }
+      },
+      "FaultEnvelope": {
+        "type": "object",
+        "required": ["data", "meta"],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Fault" }
+          },
+          "meta": { "$ref": "#/components/schemas/Meta" }
+        }
+      },
+      "DayTotalEnvelope": {
+        "type": "object",
+        "required": ["data", "meta"],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/DayTotal" }
+          },
+          "meta": { "$ref": "#/components/schemas/Meta" }
+        }
+      },
+      "Meta": {
+        "type": "object",
+        "required": ["limit", "offset", "total", "filters", "generatedAt"],
+        "properties": {
+          "limit": { "type": "integer" },
+          "offset": { "type": "integer" },
+          "total": {
+            "type": "integer",
+            "description": "How many records match the filters, whatever the page holds"
+          },
+          "filters": { "$ref": "#/components/schemas/Filters" },
+          "generatedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "Filters": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": ["string", "null"],
+            "description": "The canonical key the filter resolved to, or null"
+          },
+          "from": {
+            "type": ["string", "null"],
+            "format": "date-time",
+            "description": "The start actually applied, defaults included"
+          },
+          "to": {
+            "type": ["string", "null"],
+            "format": "date-time",
+            "description": "The end actually applied, defaults included"
+          }
+        }
+      },
+      "Target": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "The canonical key of the target"
+          },
+          "label": {
+            "type": ["string", "null"],
+            "description": "The label of the target, or null"
+          },
+          "interface": {
+            "type": ["string", "null"],
+            "description": "The interface the probe is bound to, or null for the default route"
+          },
+          "state": { "type": "string", "enum": ["up", "down", "unknown"] },
+          "stateSince": { "type": "string", "format": "date-time" },
+          "stateSinceMs": { "type": "integer", "description": "The same instant in epoch milliseconds" },
+          "firstSeenAt": { "type": "string", "format": "date-time" },
+          "firstSeenAtMs": { "type": "integer" },
+          "lastRttUs": {
+            "type": ["integer", "null"],
+            "description": "The round-trip time of the last successful probe, in microseconds"
+          },
+          "upForMs": {
+            "type": ["integer", "null"],
+            "description": "How long the target has been up without a drop; null while it is not up"
+          }
+        }
+      },
+      "Fault": {
+        "type": "object",
+        "description": "One fault: the `down` transition that opened it, its cause, and the return that closed it. A fault always opens on a `down` event, so no `state` and no round-trip time are stated: both would be constants.",
+        "properties": {
+          "id": {
+            "type": "integer",
+            "description": "The id of the `down` event"
+          },
+          "target": { "type": "string" },
+          "label": { "type": ["string", "null"] },
+          "interface": { "type": ["string", "null"] },
+          "occurredAt": { "type": "string", "format": "date-time" },
+          "occurredAtMs": { "type": "integer" },
+          "cause": {
+            "type": ["string", "null"],
+            "description": "The code of the failure, such as ICMP.NO_REPLY"
+          },
+          "causeMessage": {
+            "type": ["string", "null"],
+            "description": "The standard message of that cause, as it was rendered"
+          },
+          "endedAt": {
+            "type": ["string", "null"],
+            "format": "date-time",
+            "description": "The instant the target came back; null while it is still down"
+          },
+          "endedAtMs": { "type": ["integer", "null"] },
+          "durationMs": {
+            "type": ["integer", "null"],
+            "description": "How long the fault lasted; null while it is still open"
+          },
+          "ongoing": {
+            "type": "boolean",
+            "description": "True while the target is still down"
+          }
+        }
+      },
+      "DayTotal": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": ["string", "null"],
+            "description": "The canonical key of the target when the request filters by one; null when the record aggregates every target"
+          },
+          "day": {
+            "type": "string",
+            "description": "The UTC day, YYYY-MM-DD"
+          },
+          "dayStart": { "type": "string", "format": "date-time" },
+          "dayStartMs": { "type": "integer" },
+          "faults": {
+            "type": "integer",
+            "description": "Faults that started inside the day and the window"
+          },
+          "downMs": {
+            "type": "integer",
+            "description": "Time spent down inside the day, clipped to the window"
+          },
+          "avgUpRunMs": {
+            "type": ["integer", "null"],
+            "description": "Mean of the up runs inside the day; null when the day holds none"
+          },
+          "longestUpRunMs": {
+            "type": ["integer", "null"],
+            "description": "The longest up run inside the day"
+          },
+          "partial": {
+            "type": "boolean",
+            "description": "True for the UTC day still running: its runs cover the last 24 hours"
+          }
+        }
+      },
+      "ErrorEnvelope": {
+        "type": "object",
+        "required": ["error", "meta"],
+        "properties": {
+          "error": { "$ref": "#/components/schemas/Error" },
+          "meta": {
+            "type": "object",
+            "properties": {
+              "generatedAt": { "type": "string", "format": "date-time" }
+            }
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "required": ["status", "code", "parameter", "message"],
+        "properties": {
+          "status": { "type": "integer", "description": "The HTTP status of the answer" },
+          "code": {
+            "type": "string",
+            "enum": [
+              "INVALID_PARAMETER",
+              "INVALID_RANGE",
+              "UNKNOWN_TARGET",
+              "NOT_FOUND",
+              "METHOD_NOT_ALLOWED",
+              "DATABASE_UNAVAILABLE",
+              "QUERY_FAILED"
+            ]
+          },
+          "parameter": {
+            "type": ["string", "null"],
+            "description": "The query parameter the answer is about, when there is one"
+          },
+          "message": { "type": "string" }
+        }
+      }
+    }
+  }
+}

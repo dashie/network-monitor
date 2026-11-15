@@ -41,11 +41,15 @@ network-monitor/
 ├── docker-compose.yml    self-contained compose project (host networking)
 ├── .dockerignore         keeps the build context to the sources
 ├── network-monitor.toml  example configuration, kept in sync with the defaults
+├── assets/
+│   ├── icon/             the mark, the favicon, and the PNG of both
+│   └── api/openapi.json  the contract of the read-only API, served at /api/v1/openapi.json
 ├── src/
 │   ├── main.rs           entry point, subcommand dispatch, exit codes
 │   ├── lib.rs            library surface used by the integration tests
 │   ├── cli.rs            command-line surface, one flag per configuration key
 │   ├── config.rs         defaults, TOML loading, precedence, validation
+│   ├── json.rs           the JSON escaping and assembly shared by query and the API
 │   ├── logging.rs        line-based diagnostics on stderr
 │   ├── reload.rs         configuration file watcher
 │   ├── shutdown.rs       stop handle, signal handler, shutdown-aware pause
@@ -77,6 +81,12 @@ network-monitor/
 │   ├── import.rs         restore a history from the exported CSV (path, URL, stdin)
 │   └── web/
 │       ├── mod.rs        HTTP loop, routes, window parsing
+│       ├── api/
+│       │   ├── mod.rs    the API contract: dispatch, params, envelope, stream, errors
+│       │   ├── targets.rs  GET /api/v1/targets
+│       │   ├── faults.rs   GET /api/v1/faults
+│       │   ├── daily.rs    GET /api/v1/faults/daily
+│       │   └── openapi.rs  GET /api/v1/openapi.json
 │       ├── page.rs       timeline page: the lanes, the chart, the tables
 │       ├── detail.rs     detail page of one target: per-day chart and table
 │       ├── templates.rs  the templates and assets of both pages: read in debug, embedded

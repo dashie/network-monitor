@@ -7,7 +7,9 @@ appears in a requirement, in a component name, or in a public interface.
 | Term | Definition |
 |---|---|
 | **Config file** | The TOML file that declares global defaults and the list of targets; read once at startup. |
+| **Day total** | The record the JSON API states for one UTC day: the faults that started in it, the time spent down, the mean and the longest `up` run, and whether the day is still running. A day the window clips counts only what falls inside it. |
 | **Default interface** | The interface the operating system routing table selects for a destination when no interface is configured for the probe. |
+| **Envelope** | The shape of every answer of the JSON API: an object whose `data` holds the records and whose `meta` states the page, the filters applied, the total matching records, and the instant the answer was built. A bare array is never the root, and an error states `error` instead of `data`. |
 | **Event** | One persisted row describing a single state transition of a single target. |
 | **Event database** | The SQLite file that holds the `events` and `targets` tables and is the only integration point of the tool. |
 | **Interface binding** | Constraining a probe's packet to a named interface, with the semantics of `ping -I <interface> <address>`. |

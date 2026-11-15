@@ -14,9 +14,10 @@ needed, so the manual can be read and distributed on its own.
 4. [Configuration](#configuration)
 5. [Command line](#command-line)
 6. [The web page](#the-web-page)
-7. [Operations](#operations)
-8. [Troubleshooting](#troubleshooting)
-9. [Limits and deliberate choices](#limits-and-deliberate-choices)
+7. [REST API](#rest-api)
+8. [Operations](#operations)
+9. [Troubleshooting](#troubleshooting)
+10. [Limits and deliberate choices](#limits-and-deliberate-choices)
 
 ## What the tool does
 
@@ -318,7 +319,7 @@ are listed in [Troubleshooting](#troubleshooting), later in this guide.
 | `--retention-days <n>` | Retention window |
 | `--target <spec>` | Target list, replaces the file list; repeatable |
 | `--log-level <level>` | `error`, `warn`, `info`, `debug` |
-| `--compression <mode>` | `auto` (default) gzips the HTML pages when the browser accepts it; `off` sends them plain, for a proxy that compresses |
+| `--compression <mode>` | `auto` (default) gzips the HTML pages and the JSON answers when the client accepts it; `off` sends them plain, for a proxy that compresses |
 | `--show-config` | Print the effective configuration and exit |
 
 `--target` takes `[method:]address[,key=value]…`:
@@ -413,6 +414,125 @@ The CSV columns are `target,label,interface,state,occurred_at,rtt_us,cause,cause
 `target` is the key, and the last two state the code and the message of the cause, empty on a
 return to `up`. The same file is what `import` reads back, and an archive written before the
 cause columns existed — six columns, ending after `rtt_us` — imports with no cause.
+
+## REST API
+
+The same server publishes the history as JSON under `/api/v1`: the targets, the faults, and
+the per-day totals. It is read-only, needs no authentication — anyone who can open the page can
+read it — and it answers on the address given to `--listen`. The contract is served by the
+binary itself: `GET /api/v1/openapi.json` is an OpenAPI 3.1 document naming every route,
+parameter, and property.
+
+| Route | What it returns |
+|---|---|
+| `GET /api/v1/targets` | Every target, ordered by key |
+| `GET /api/v1/faults` | The faults, newest first |
+| `GET /api/v1/faults/daily` | Faults, down time, and `up` runs per UTC day, oldest first |
+| `GET /api/v1/openapi.json` | The OpenAPI document of the routes above |
+
+| Parameter | Routes | Accepted | Default |
+|---|---|---|---|
+| `target` | faults, daily | canonical key (`icmp://1.1.1.1`) or label | every target |
+| `from` | faults, daily | RFC 3339 UTC (`2026-11-14T00:00:00Z`) or epoch milliseconds, inclusive, inside the calendar domain below | none on faults; 30 days before `to` on daily |
+| `to` | faults, daily | the same two forms, exclusive, inside the same domain | none on faults; now on daily |
+| `limit` | all | `1` to `1000` | `100` |
+| `offset` | all | `0` or more | `0` |
+
+An instant lies between `1970-01-01T00:00:00Z` and `2100-01-01T00:00:00Z`, both bounds
+accepted, in either form; a value outside is `400 INVALID_PARAMETER`, naming the parameter and
+both bounds. `to` may be in the future — that is how a whole month or year is asked for:
+`from=2026-11-01T00:00:00Z&to=2026-12-01T00:00:00Z` is November 2026 on any day of November, and
+the days after today state `0` faults, `0` down time and no `up` run, because the time that has
+not happened yet is not measured.
+
+A parameter the route does not accept, a parameter given twice, a value out of range, and a
+`from` that is not earlier than `to` answer `400` and name the parameter, so a typo is never read
+as a default. An empty `target=` is the same as naming none.
+
+Every answer is an object, and the records sit in `data`:
+
+```json
+{
+  "data": [
+    {
+      "id": 42,
+      "target": "icmp://1.1.1.1",
+      "label": "cloudflare-dns",
+      "interface": "eth1",
+      "occurredAt": "2026-11-14T20:15:00.000Z",
+      "occurredAtMs": 1763151300000,
+      "cause": "ICMP.NO_REPLY",
+      "causeMessage": "no reply within 2000 ms",
+      "endedAt": "2026-11-14T20:17:30.000Z",
+      "endedAtMs": 1763151450000,
+      "durationMs": 150000,
+      "ongoing": false
+    }
+  ],
+  "meta": {
+    "limit": 100,
+    "offset": 0,
+    "total": 1,
+    "filters": {"target": "icmp://1.1.1.1", "from": null, "to": null},
+    "generatedAt": "2026-11-14T22:00:00.000Z"
+  }
+}
+```
+
+`meta.total` is how many records match the filters, whatever the page holds, so a client pages
+by adding `limit` to `offset` until it reaches the total.
+
+`/api/v1/faults/daily` covers the last 30 days unless `from` names an earlier instant, so a
+longer history is asked for explicitly; every record states its `target`, or `null` when the
+answer aggregates every target into one series. The window may be any width the domain allows:
+only the days the page returns are read, so the cost follows `limit`, not the span. A day at
+either edge of the window counts only the part that falls inside it — a fault that opened before `from` is down time
+inside the window but not a fault of it — and the UTC day still running states its average and
+longest `up` run over the last 24 hours.
+
+The data routes stream their answer: the response is `Transfer-Encoding: chunked`, carries no
+`Content-Length`, and is compressed on the fly when the client advertises `gzip`. A client reads
+the document to the end rather than waiting for a length, and `HEAD` states the same headers and
+no body. `/api/v1/faults` reads the history in pages of 200 faults, so a `limit` of 1000 is one
+answer of ten short reads rather than a thousand rows held in memory. Paging a list that grows at the top —
+faults always do — can repeat a record between two requests; use `from` and `to` for a window
+that does not move.
+
+An error states the status, a stable code, the offending parameter when there is one, and one
+sentence:
+
+```json
+{
+  "error": {
+    "status": 400,
+    "code": "INVALID_PARAMETER",
+    "parameter": "limit",
+    "message": "limit must be an integer between 1 and 1000"
+  },
+  "meta": {"generatedAt": "2026-11-14T22:00:00.000Z"}
+}
+```
+
+The message is a fixed sentence: the detail of a failure — a database path, a SQLite error —
+stays in the log of the process and never reaches a reader. The codes are
+`INVALID_PARAMETER`, `INVALID_RANGE`, `UNKNOWN_TARGET`, `NOT_FOUND`,
+`METHOD_NOT_ALLOWED`, `DATABASE_UNAVAILABLE` — the `503` the page also states, for a database
+that is missing or was never opened by this tool — and `QUERY_FAILED`.
+
+A failure inside a request costs that request only: the connection closes without a status
+line, the reason is logged by the process, and the next request is served normally. A request
+that fails never takes capacity away from the ones that follow.
+
+```bash
+curl -s '127.0.0.1:8642/api/v1/targets'
+curl -s '127.0.0.1:8642/api/v1/faults?target=cloudflare-dns&from=2026-11-01T00:00:00Z&limit=50'
+curl -s '127.0.0.1:8642/api/v1/faults/daily?to=2026-11-15T00:00:00Z'
+curl -s '127.0.0.1:8642/api/v1/faults/daily?target=icmp://1.1.1.1&from=2026-07-01T00:00:00Z'
+```
+
+The answers are gzipped when the client advertises `gzip` and `--compression` is `auto`, state
+`Cache-Control: no-store`, and carry `Access-Control-Allow-Origin: *` with an `OPTIONS`
+preflight, so a dashboard on another origin reads the same public history.
 
 ## Operations
 

@@ -7,6 +7,7 @@
 pub mod cli;
 pub mod config;
 pub mod import;
+pub mod json;
 pub mod logging;
 pub mod monitor;
 pub mod notify;
