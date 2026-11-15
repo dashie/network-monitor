@@ -5,7 +5,10 @@
   color-scheme: light dark;
   --rule: rgba(127, 127, 127, 0.28);
   --muted: 0.65;
+  /* The red of a fault, lightened on a dark background so the sign stays legible. */
+  --alert: #c62828;
 }
+@media (prefers-color-scheme: dark) { :root { --alert: #ff8a80; } }
 * { box-sizing: border-box; }
 body {
   margin: 0;
@@ -303,32 +306,39 @@ td.current { background: rgba(127, 127, 127, 0.1); }
 .sub { font-size: 11px; opacity: 0.65; font-variant-numeric: tabular-nums; }
 td.down { color: #c62828; }
 /* An open cause holds the reload, and the page says so across its whole width, above the
-   content: the same tinted surface and left bar an open cause wears, the statement at the
-   left and the refresh the hold withholds at the right. It is in the flow, so it never
-   covers the table, and `[hidden]` keeps it out of the page until a cause is open. */
+   content: an alert, in the red of a fault — tinted surface, bar at the left, warning sign —
+   with the statement beside the sign and the refresh the hold withholds at the right. The
+   tint is translucent, so it sits on Canvas in either scheme; the text stays the colour of
+   the page, and the sign and the bar carry the red. It is in the flow, so it never covers
+   the table, and `[hidden]` keeps it out of the page until a cause is open. */
 .paused {
   display: flex;
-  align-items: baseline;
-  gap: 12px;
+  align-items: center;
+  gap: 10px;
   margin: 0 0 18px;
-  padding: 9px 7px 9px 14px;
-  border-left: 3px solid var(--rule);
-  background: rgba(127, 127, 127, 0.06);
+  padding: 9px 7px 9px 12px;
+  border-left: 3px solid var(--alert);
+  border-radius: 0 6px 6px 0;
+  background: rgba(198, 40, 40, 0.1);
   font-size: 13px;
+  line-height: 1.45;
 }
 .paused[hidden] { display: none; }
+/* The page sizes every `svg` to its width for the charts: the sign keeps its own box,
+   centred on the line of the statement. */
+.paused-mark { flex: none; width: 18px; height: 18px; color: var(--alert); }
+.paused span { margin-right: auto; }
 .paused-now {
-  margin-left: auto;
   padding: 0;
   border: 0;
-  border-bottom: 1px dotted var(--rule);
+  border-bottom: 1px dotted currentColor;
   background: none;
-  color: inherit;
+  color: var(--alert);
   font: inherit;
   font-size: 12px;
+  font-weight: 600;
   letter-spacing: 0.04em;
   white-space: nowrap;
   cursor: pointer;
 }
-.paused-now:hover { border-bottom-color: currentColor; }
 @media (max-width: 620px) { body { padding: 20px 16px 40px; } }

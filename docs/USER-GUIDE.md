@@ -385,10 +385,10 @@ opens it too. The message is drawn as part of that row and not as a fault of its
 share one surface and one bar down their left, the fault gives up the rule between them while
 the message is open, and the message sits indented inside that bar, which closes the pair. Its
 text is the standard sentence of that failure, with the details of the occurrence in it, for
-example "the connection to 9.9.9.9:443 was refused". While a cause is open, a banner across the
-top of the page states that the automatic reload is held, and offers `Refresh now`. A browser
-without JavaScript shows the same message on hover, and keeps its plain 30 s reload. A row
-recorded before this version states no cause and opens nothing.
+example "the connection to 9.9.9.9:443 was refused". While a cause is open, a red banner with a
+warning sign across the top of the page states that the automatic reload is held, and offers
+`Refresh now`. A browser without JavaScript shows the same message on hover, and keeps its plain
+30 s reload. A row recorded before this version states no cause and opens nothing.
 
 The causes an operator will meet, by the layer that reported them:
 
@@ -415,7 +415,8 @@ does the compression. The archive is a gzip file and is never compressed twice.
 
 The page reloads itself every 30 s and formats the instants in your browser's time zone. It
 holds that reload while a cause is open, so a message you are reading is never taken away: a
-banner at the top of the page says so, and offers `Refresh now` for the moment you are done. It has
+red banner at the top of the page says so, and offers `Refresh now` for the moment you are done.
+It has
 **no authentication**: anyone who can reach the port reads the history. Keep the default bind
 (`127.0.0.1`) or firewall the port.
 

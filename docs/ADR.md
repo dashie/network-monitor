@@ -1305,7 +1305,9 @@ when it is able to drive the countdown itself.
    and offers `Refresh now` there. The hold belongs to the page, not to the message: one banner
    states it wherever the reader is, and because the banner sits in the flow it covers neither the
    chart nor the table. It is `hidden` while no cause is open, so a page with nothing open carries
-   no empty band.
+   no empty band. It is drawn as an alert — the red of a fault, a warning sign at its left on the
+   centre line of the text, and the action in the same red — because it reports a condition the
+   reader did not choose, and the colour is the one the chart already uses for `down`.
 4. Nothing else moves: no `fetch`, no polling, no client-side data state.
 
 ### Consequences

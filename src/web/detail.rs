@@ -584,7 +584,11 @@ mod tests {
         let back = rendered
             .find("class=\"back-button\"")
             .expect("the back button in the toolbar");
-        let chart = rendered.find("<svg").expect("the chart");
+        // The banner of a held reload opens with a small `svg` of its own, so the chart is
+        // the first `svg` the generator draws, not the first one in the document.
+        let chart = rendered
+            .find("<svg xmlns=\"http://www.w3.org/2000/svg\"")
+            .expect("the chart");
         assert!(
             back < chart,
             "the back button comes before the chart, so it needs no scrolling"

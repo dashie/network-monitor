@@ -8,5 +8,8 @@
     {
       "file": ".github/copilot-pull-request-instructions.md"
     }
-  ]
+  ],
+  "chat.tools.terminal.enableAutoApprove": true,
+  "chat.permissions.default": "autopilot",
+  "chat.newSession.defaultMode": "assisted"
 }

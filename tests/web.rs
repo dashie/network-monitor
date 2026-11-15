@@ -564,8 +564,13 @@ fn every_row_shows_its_statistics_and_links_to_its_detail_page() {
         detail.contains("<a class=\"back-button\" href=\"/\">"),
         "a way back to the timeline, whatever page the reader came from"
     );
+    // The banner of a held reload opens with a small `svg` of its own, so the chart is the
+    // page's chart, not the first `svg` in the document.
     assert!(
-        detail.find("class=\"back-button\"").unwrap() < detail.find("<svg").unwrap(),
+        detail.find("class=\"back-button\"").unwrap()
+            < detail
+                .find("<svg xmlns=\"http://www.w3.org/2000/svg\"")
+                .unwrap(),
         "the way back is at the top, before the chart"
     );
 }
@@ -805,13 +810,20 @@ fn an_open_cause_holds_the_reload() {
             "{path} states the interval the script drives"
         );
         assert!(
-            page.contains(
-                "<div class=\"paused\" id=\"paused\" role=\"status\" hidden>\n\
-                 <span>Automatic refresh is paused while a cause is open.</span>\n\
-                 <button type=\"button\" class=\"paused-now\" id=\"paused-now\">Refresh now</button>\n\
-                 </div>"
-            ),
+            page.contains("<div class=\"paused\" id=\"paused\" role=\"status\" hidden>"),
             "{path} states the hold across the page, closed until a cause is open"
+        );
+        assert!(
+            page.contains("<svg class=\"paused-mark\""),
+            "{path} opens the alert with its warning sign"
+        );
+        assert!(
+            page.contains("<span>Automatic refresh is paused while a cause is open.</span>"),
+            "{path} states what the pause is about"
+        );
+        assert!(
+            page.contains("<button type=\"button\" class=\"paused-now\" id=\"paused-now\">"),
+            "{path} offers the refresh the hold withholds"
         );
     }
 
@@ -837,6 +849,14 @@ fn an_open_cause_holds_the_reload() {
     assert!(
         stylesheet.contains(".paused[hidden] { display: none; }"),
         "the banner is a page bar, out of the layout until a cause is open"
+    );
+    assert!(
+        stylesheet.contains("align-items: center"),
+        "the sign and the statement of the alert share one centre line"
+    );
+    assert!(
+        stylesheet.contains(".paused-mark { flex: none; width: 18px; height: 18px;"),
+        "the sign carries the colour of the alert"
     );
 }
 
