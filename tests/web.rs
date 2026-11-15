@@ -228,8 +228,12 @@ fn serves_the_page_with_a_band_per_state() {
     assert!(response.contains("#2e7d32"), "green for up");
     assert!(response.contains("#c62828"), "red for down");
     assert!(
-        response.contains("<meta http-equiv=\"refresh\" content=\"30\">"),
-        "the page reloads itself every 30 s"
+        response.contains("<noscript><meta http-equiv=\"refresh\" content=\"30\"></noscript>"),
+        "a browser without the script reloads the page itself every 30 s"
+    );
+    assert!(
+        response.contains("<body data-refresh=\"30\">"),
+        "with the script, the countdown is the one the script drives"
     );
     assert!(!response.contains("wheel"), "the timeline has no zoom");
     assert!(
@@ -778,6 +782,96 @@ fn the_pages_link_the_stylesheet_and_the_script_the_server_serves() {
     assert_eq!(status, 200);
     assert!(head.contains("Content-Type: text/javascript; charset=utf-8"));
     assert!(String::from_utf8_lossy(&body).contains("Intl.DateTimeFormat"));
+}
+
+/// The page reloads itself every 30 s, but a cause being read must not be taken away by
+/// that reload: the `meta` only serves a browser without the script, the script drives the
+/// interval the body states and holds it while a message is open, and the open message
+/// states the hold with the refresh it offers.
+#[test]
+fn an_open_cause_holds_the_reload() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    for path in ["/", "/target?target=1.1.1.1"] {
+        let (status, page) = server.get(path);
+        assert_eq!(status, 200, "{path} answers");
+        assert!(
+            page.contains("<noscript><meta http-equiv=\"refresh\" content=\"30\"></noscript>"),
+            "{path} reloads itself every 30 s without the script"
+        );
+        assert!(
+            page.contains("<body data-refresh=\"30\">"),
+            "{path} states the interval the script drives"
+        );
+        assert!(
+            page.contains(
+                "<div class=\"paused\" id=\"paused\" role=\"status\" hidden>\n\
+                 <span>Automatic refresh is paused while a cause is open.</span>\n\
+                 <button type=\"button\" class=\"paused-now\" id=\"paused-now\">Refresh now</button>\n\
+                 </div>"
+            ),
+            "{path} states the hold across the page, closed until a cause is open"
+        );
+    }
+
+    let (status, _, body) = server.get_bytes("/app.js");
+    assert_eq!(status, 200);
+    let script = String::from_utf8(body).expect("the script is UTF-8");
+    assert!(
+        script.contains("getAttribute('data-refresh')"),
+        "the script takes the interval from the page"
+    );
+    assert!(
+        script.contains("clearTimeout"),
+        "the script can hold the countdown it started"
+    );
+    assert!(
+        script.contains("getElementById('paused-now')"),
+        "the refresh the hold withholds is bound"
+    );
+
+    let (status, _, body) = server.get_bytes("/style.css");
+    assert_eq!(status, 200);
+    let stylesheet = String::from_utf8(body).expect("the stylesheet is UTF-8");
+    assert!(
+        stylesheet.contains(".paused[hidden] { display: none; }"),
+        "the banner is a page bar, out of the layout until a cause is open"
+    );
+}
+
+/// An open cause is drawn as a note of its fault, never as a row of the table: the page
+/// states the two classes (see `web::page`), the script marks the fault whose message is
+/// open, and the stylesheet joins the pair. Three files agree on one class name, so a
+/// rename in any of them is caught here.
+#[test]
+fn the_open_cause_is_drawn_as_a_note_of_its_fault() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, _, body) = server.get_bytes("/app.js");
+    assert_eq!(status, 200);
+    let script = String::from_utf8(body).expect("the script is UTF-8");
+    assert!(
+        script.contains("'tr.fault'"),
+        "the script drives the rows that open a cause"
+    );
+    assert!(
+        script.contains("classList.toggle('expanded'"),
+        "the script marks the fault row whose message is open"
+    );
+
+    let (status, _, body) = server.get_bytes("/style.css");
+    assert_eq!(status, 200);
+    let stylesheet = String::from_utf8(body).expect("the stylesheet is UTF-8");
+    assert!(
+        stylesheet.contains("tr.fault.expanded td"),
+        "the fault gives up the rule between it and its open message"
+    );
+    assert!(
+        stylesheet.contains("tr.cause-row td"),
+        "a message is drawn as a note of its fault"
+    );
 }
 
 /// The identity block at the head of the page — the mark, the name, and the tagline —

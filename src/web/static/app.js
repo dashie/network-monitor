@@ -16,11 +16,41 @@ if (chart !== null) {
 
 // Opens the standard message of a fault under its own row, one fault at a time. The button
 // carries `aria-expanded` and the message lives in a real row, so the table stays a table
-// for a screen reader; a browser without JavaScript keeps the `title`.
+// for a screen reader; a browser without JavaScript keeps the `title`. The open fault is
+// marked `expanded`, and the stylesheet joins it to its message, so the pair reads as one
+// block instead of two rows.
+//
+// The page reloads itself every 30 s. The countdown lives here: the `meta` of the head sits
+// in a `noscript`, so only a browser without the script reloads on its own, and a cause
+// being read can hold the countdown instead of losing it to the reload. The banner states
+// the hold across the page and offers the refresh it withholds, and the countdown starts
+// again when the message closes.
 (() => {
   const rows = document.querySelectorAll('tr.fault');
+  const paused = document.getElementById('paused');
+  const refresh = document.getElementById('paused-now');
+  const seconds = Number(document.body.getAttribute('data-refresh'));
+  let countdown = 0;
+  const schedule = () => {
+    if (!(seconds > 0)) return;
+    window.clearTimeout(countdown);
+    countdown = window.setTimeout(() => window.location.reload(), seconds * 1000);
+  };
+  schedule();
+  // What the page is doing is read from the page itself, so the countdown and the banner
+  // can never disagree with the message on screen.
+  const hold = () => {
+    const open = document.querySelector('tr.cause-row:not([hidden])') !== null;
+    if (paused !== null) paused.hidden = !open;
+    if (open) window.clearTimeout(countdown);
+    else schedule();
+  };
+  if (refresh !== null) refresh.addEventListener('click', () => window.location.reload());
   const close = () => {
     for (const row of document.querySelectorAll('tr.cause-row')) row.hidden = true;
+    for (const row of document.querySelectorAll('tr.fault.expanded')) {
+      row.classList.remove('expanded');
+    }
     for (const button of document.querySelectorAll('button.cause')) {
       button.setAttribute('aria-expanded', 'false');
     }
@@ -34,10 +64,17 @@ if (chart !== null) {
       const open = message.hidden;
       close();
       message.hidden = !open;
+      row.classList.toggle('expanded', open);
       button.setAttribute('aria-expanded', String(open));
+      hold();
     };
     row.addEventListener('click', toggle);
-    button.addEventListener('click', event => event.stopPropagation());
+    // The code is part of the control: it carries `aria-expanded`, so a click or a keypress
+    // on it opens the message, and the event stops before the row toggles it back.
+    button.addEventListener('click', event => {
+      event.stopPropagation();
+      toggle();
+    });
   }
 })();
 

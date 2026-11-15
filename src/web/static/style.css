@@ -176,7 +176,13 @@ footer p:last-child { margin-bottom: 0; }
 }
 svg { width: 100%; height: auto; display: block; }
 a:hover text { text-decoration: underline; }
-.legend { display: flex; gap: 18px; margin-top: 14px; font-size: 13px; opacity: 0.8; }
+.legend { 
+  display: flex; 
+  gap: 18px; 
+  margin-top: 14px; 
+  font-size: 13px; 
+  opacity: 0.8; 
+}
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
 .swatch { width: 14px; height: 10px; border-radius: 2px; display: inline-block; }
 /* One table style for both pages: as wide as `main`, text left, numbers right.
@@ -191,7 +197,11 @@ table {
   border-collapse: collapse;
   font-variant-numeric: tabular-nums;
 }
-th, td { text-align: left; padding: 7px 18px 7px 0; }
+/* A cell keeps the same 7 px on every side it pads, so the first column is as far from
+   the left edge as the last is from the right, and a rule that appears at the left edge
+   never touches the text. */
+th, td { text-align: left; padding: 7px 7px 7px 0; }
+th:first-child, td:first-child { padding-left: 7px; }
 th {
   position: sticky;
   top: 0;
@@ -223,7 +233,9 @@ tbody tr:hover { background: rgba(127, 127, 127, 0.07); }
 tr.fault { cursor: pointer; }
 /* The four columns keep their share of the width whatever they carry, so a long name never
    squeezes the date and a short code never leaves a gap: 15, 30, 45 and 10 per cent. */
-table.faults { table-layout: fixed; }
+table.faults { 
+  table-layout: fixed; 
+}
 table.faults th:nth-child(1) { width: 15%; }
 table.faults th:nth-child(2) { width: 30%; }
 table.faults th:nth-child(3) { width: 45%; }
@@ -249,10 +261,25 @@ button.cause {
 }
 button.cause:hover { opacity: 1; }
 button.cause[aria-expanded="true"] { opacity: 1; border-bottom-color: currentColor; }
-/* The message reads as part of its fault, not as a fault of its own. */
+/* An open cause belongs to the fault above it, not to the table: the fault row gives up
+   the rule that separated them, the pair shares one tinted surface and one bar at its
+   left, and the message sits indented inside that bar, so the two read as one object and
+   never as a fault and a row of its own. The pair closes with the one rule under the
+   message. The bar sits on the rows rather than on the cells, and the left padding of the
+   first column keeps it off the text of both. */
+tr.fault.expanded { border-left: 3px solid var(--rule); }
+/* The bar takes 3 px of the row's inset: the first cell gives them back, so the text of a
+   fault sits 7 px from the left edge whether the cause is open or not, and the column
+   stays aligned with the rows around it. */
+tr.fault.expanded td:first-child { padding-left: 4px; }
+tr.fault.expanded, tr.fault.expanded:hover { background: rgba(127, 127, 127, 0.06); }
+tr.fault.expanded td { border-bottom: 0; }
+tr.cause-row { border-left: 3px solid var(--rule); }
 tr.cause-row td {
-  padding: 1px 0 13px;
+  padding: 14px;
+  background: rgba(127, 127, 127, 0.06);
   font-size: 13px;
+  line-height: 1.5;
   opacity: var(--muted);
   border-bottom: 1px solid var(--rule);
 }
@@ -275,4 +302,33 @@ td.current { background: rgba(127, 127, 127, 0.1); }
 .num { text-align: right; }
 .sub { font-size: 11px; opacity: 0.65; font-variant-numeric: tabular-nums; }
 td.down { color: #c62828; }
+/* An open cause holds the reload, and the page says so across its whole width, above the
+   content: the same tinted surface and left bar an open cause wears, the statement at the
+   left and the refresh the hold withholds at the right. It is in the flow, so it never
+   covers the table, and `[hidden]` keeps it out of the page until a cause is open. */
+.paused {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin: 0 0 18px;
+  padding: 9px 7px 9px 14px;
+  border-left: 3px solid var(--rule);
+  background: rgba(127, 127, 127, 0.06);
+  font-size: 13px;
+}
+.paused[hidden] { display: none; }
+.paused-now {
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  border-bottom: 1px dotted var(--rule);
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.paused-now:hover { border-bottom-color: currentColor; }
 @media (max-width: 620px) { body { padding: 20px 16px 40px; } }

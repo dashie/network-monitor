@@ -21,7 +21,7 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0007 | Reload the configuration file while monitoring runs | accepted | 2026-11-08 | Poll the file every second and apply a valid change without a restart |
 | ADR-0008 | Serve a read-only web page from the binary | accepted | 2026-11-09 | Minimal HTTP and server-side SVG; no framework and no client library |
 | ADR-0009 | Serve the page from the monitoring process | accepted; the down-time column is withdrawn by ADR-0022 | 2026-11-09 | `monitor --listen` runs the same `web` component; one process records and shows |
-| ADR-0010 | Render the timeline without client-side interaction | accepted | 2026-11-09 | Fixed window, 30 s meta refresh, no zoom; last 10 disconnections listed |
+| ADR-0010 | Render the timeline without client-side interaction | accepted; the reload is held while a cause is open (ADR-0030) | 2026-11-09 | Fixed window, 30 s meta refresh, no zoom; last 10 disconnections listed |
 | ADR-0011 | Stream the history export as a hand-written ZIP | superseded by ADR-0012 | 2026-11-09 | Chunked response, deflate on the fly, paged reads, `flate2` only |
 | ADR-0012 | Stream the export as a gzipped CSV instead of a ZIP | accepted | 2026-11-09 | gzip is a single stream: no container, no size known in advance |
 | ADR-0013 | Import the exported CSV back into the database | accepted | 2026-11-09 | One positional source, format sniffed, batched writes, idempotent |
@@ -41,6 +41,7 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0027 | Notify state changes over Telegram, with a stabilisation window and a dedicated delivery thread | accepted | 2026-11-14 | Global `[telegram]` section read from the file only, token redacted everywhere; one message per incident; bounded queue and five attempts off the probe path |
 | ADR-0028 | Publish a read-only JSON API under `/api/v1` with an envelope and `limit`/`offset` | accepted | 2026-11-14 | Object root with `data` and `meta`, never a bare array; `limit` 1–1000, errors with a stable code; hand-written JSON, no new crate; an OpenAPI document served by the binary; `Access-Control-Allow-Origin: *` on an unauthenticated read-only surface |
 | ADR-0029 | Render the API reference in the browser from the document the binary serves | accepted | 2026-11-15 | `/api/v1/docs` loads a vendored Swagger UI at `/api/v1/openapi.json`, embedded with `include_str!` so no network and no CDN are needed; `validatorUrl` off, `GET`/`HEAD` only; the footer of both pages links to it; a body larger than the socket buffer exposed and fixed a non-blocking accepted socket |
+| ADR-0030 | Hold the reload while a cause is open | accepted | 2026-11-15 | The `meta` moves into `noscript`; the script drives the 30 s countdown and holds it while a cause is open, and the open message states the hold and offers `Refresh now` |
 
 ## Records
 
@@ -255,6 +256,7 @@ Every request opens the database read-only, so the page sees new transitions wit
 ## ADR-0009 — Serve the page from the monitoring process
 
 **Status:** accepted · **Date:** 2026-11-09
+**Amended by:** ADR-0030 — the 30 s refresh is driven by the script and held while a cause is open; a browser without the script keeps the `meta`.
 **Amends:** ADR-0008. The page, the hand-written HTTP loop, and the server-side SVG stay as decided there; only the process that serves them changes.
 
 ### Context
@@ -1267,3 +1269,71 @@ project does not have, and it would re-implement a standard interface to no bene
   bundle and the gzipped CSV of a long history do not. `web::handle` now clears the flag and
   serves every connection blocking, and the test asserts the full length of a body larger than
   that buffer.
+
+## ADR-0030 — Hold the reload while a cause is open
+
+**Status:** accepted · **Date:** 2026-11-15
+**Amends:** ADR-0010. The 30 s refresh leaves the `meta` of the head for the script; the page, the
+server-side rendering, and the refusal of client-side chart state stay.
+
+### Context
+
+The page reloads itself every 30 s from `<meta http-equiv="refresh">`, and a fault opens the
+standard message of its cause in a row under itself. A reader who is half way through that
+message loses it, and the row it belongs to, at the next tick: the page is a status board read in
+seconds, but a cause is a sentence a person reads.
+
+Measured in Chromium against a running server, before choosing a mechanism:
+
+- once the parser has armed the refresh, neither `remove()` on the element nor rewriting its
+  `content` calls it off — the armed refresh still fires;
+- a `#fragment` in the URL turns the refresh into a same-document navigation, so it silently
+  never reloads at all;
+- a `meta` inside `<noscript>` is not armed at all when scripting is enabled, and is honoured
+  exactly as before when it is not.
+
+The reload therefore cannot be paused after the fact. The page must not arm it in the first place
+when it is able to drive the countdown itself.
+
+### Decision
+
+1. The `meta` moves into `<noscript>`: a browser without the script keeps precisely the reload it
+   had, and a browser with the script arms no refresh of its own.
+2. The script drives the countdown, taking the interval from `data-refresh` on the body, and holds
+   it while a cause is open. Closing the message starts a full interval again.
+3. The page states the hold in a banner across its width, between the masthead and the content,
+   and offers `Refresh now` there. The hold belongs to the page, not to the message: one banner
+   states it wherever the reader is, and because the banner sits in the flow it covers neither the
+   chart nor the table. It is `hidden` while no cause is open, so a page with nothing open carries
+   no empty band.
+4. Nothing else moves: no `fetch`, no polling, no client-side data state.
+
+### Consequences
+
+- The reload becomes client-side behaviour, in the same script that opens causes. A browser
+  without the script behaves exactly as ADR-0010 states.
+- A reader can hold the page still indefinitely by leaving a message open; that is the intent, the
+  page says so, and the refresh is one selection away.
+- The interval is stated twice, in the `noscript` and in `data-refresh`, because they are the two
+  alternatives for two kinds of browser; a test asserts both, and the script reads the one the
+  page carries rather than repeating a literal.
+- While a cause is open the content sits one banner lower, and returns when it closes. The shift
+  follows a selection the reader made, and a compact bar keeps it small.
+- The hold is about the reload only. The data still arrives once per interval, and the footer
+  manual still states the 30 s reload.
+
+### Alternatives considered
+
+- Reopen the same cause after the reload — `#fragment` or `sessionStorage`: rejected. The message
+  rows are identified by their position in the last ten, so a fault arriving at the top would make
+  the page reopen the wrong message; and the page would still blink under the reader every 30 s.
+- Pause by removing the `meta` or rewriting its `content` once the page has loaded: rejected,
+  measured not to work.
+- A note inside the open message, stating the hold where the reader is: implemented first and
+  rejected by the operator, because the state is the page's and not the message's, and it is read
+  as part of the message rather than as a statement about the page.
+- A notice pinned to a corner of the viewport, or a bar pinned to its top edge: rejected, the
+  first covers the table at every width measured, the second hides the masthead and the identity
+  of the page.
+- Fetch the timeline and patch the page instead of reloading: rejected, it is the client-side
+  state ADR-0010 removed, for a page a human glances at.

@@ -3,22 +3,30 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="30">
+<!-- Without the script the page reloads itself every 30 s. With the script the
+     interval is the one `data-refresh` states on the body, because the script has to
+     hold the reload while a cause is open, and a scheduled `meta` cannot be called
+     off once the parser has armed it. -->
+<noscript><meta http-equiv="refresh" content="30"></noscript>
 <title>{title}</title>
 <link rel="icon" type="image/svg+xml" href="/icon.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="/icon.png">
 <link rel="stylesheet" href="/style.css">
 </head>
-<body>
+<body data-refresh="30">
 <main>
 <header class="masthead">
 {brand}
 </header>
+<div class="paused" id="paused" role="status" hidden>
+<span>Automatic refresh is paused while a cause is open.</span>
+<button type="button" class="paused-now" id="paused-now">Refresh now</button>
+</div>
 <div class="toolbar">
 {span}
 {windows}
 </div>
-<div id="chart">{body}</div>
+<div id="chart" class="chart">{body}</div>
 <div class="legend">
   <span><i class="swatch" style="background:#2e7d32"></i>up</span>
   <span><i class="swatch" style="background:#c62828"></i>down</span>

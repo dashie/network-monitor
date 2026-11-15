@@ -1022,7 +1022,14 @@ mod tests {
         };
         let rendered = page(&[timeline()], &[], &no_streaks(), window);
         assert!(rendered.starts_with("<!doctype html>"));
-        assert!(rendered.contains("<meta http-equiv=\"refresh\" content=\"30\">"));
+        assert!(
+            rendered.contains("<noscript><meta http-equiv=\"refresh\" content=\"30\"></noscript>"),
+            "the 30 s reload is the fallback of a browser without the script"
+        );
+        assert!(
+            rendered.contains("<body data-refresh=\"30\">"),
+            "with the script the interval is the one the script drives"
+        );
         assert!(
             rendered.contains("<script src=\"/app.js\"></script>"),
             "the script is a file the browser can debug, not text in the page"
