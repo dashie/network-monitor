@@ -87,15 +87,57 @@ const FORMATS = {
   date: { dateStyle: 'medium', timeZone: 'UTC' },
   day: { month: 'short', day: 'numeric', timeZone: 'UTC' },
 };
-const label = (instant, kind) =>
-  new Intl.DateTimeFormat(undefined, FORMATS[kind] ?? FORMATS.datetime).format(instant);
+// The parts of a formatted instant that belong to the date. Everything else is the time, and
+// a literal belongs to the side it follows, so the two halves stay in reading order.
+const DATE_PARTS = new Set(['weekday', 'era', 'year', 'month', 'day']);
+// An instant as one or two unbreakable halves: the date and the time may part company when a
+// cell is narrow, neither of them may ever be split. The kinds that state a day and no clock
+// time, and the one that states a clock time and no day, come back as a single half.
+const halves = (instant, kind) => {
+  const parts = new Intl.DateTimeFormat(
+    undefined,
+    FORMATS[kind] ?? FORMATS.datetime
+  ).formatToParts(instant);
+  const halves = { date: [], time: [] };
+  let side = kind === 'time' ? 'time' : 'date';
+  for (const part of parts) {
+    if (part.type !== 'literal') side = DATE_PARTS.has(part.type) ? 'date' : 'time';
+    halves[side].push(part.value);
+  }
+  return [halves.date.join(''), halves.time.join('')]
+    .map(half => half.trim().replace(/,$/, ''))
+    .filter(half => half !== '');
+};
+// An instant goes into the two spans a cell can break between. An element that cannot hold
+// elements — the `<text>` labels of the chart, a `<title>` tooltip — takes one plain string.
+const writeInstant = (element, blocks) => {
+  element.replaceChildren();
+  blocks.forEach((block, blockIndex) => {
+    if (blockIndex > 0) element.append(' → ');
+    block.forEach((half, index) => {
+      if (index > 0) element.append(' ');
+      const span = document.createElement('span');
+      span.className = 'nowrap';
+      span.textContent = half;
+      element.append(span);
+    });
+  });
+};
 for (const element of document.querySelectorAll('time[datetime], [data-datetime]')) {
   const from = new Date(element.getAttribute('data-datetime') ?? element.getAttribute('datetime'));
   if (Number.isNaN(from.getTime())) continue;
   const until = element.getAttribute('data-until');
+  const kind = element.getAttribute('data-format');
   const prefix = element.getAttribute('data-prefix') ?? '';
   const suffix = element.getAttribute('data-suffix') ?? '';
-  element.textContent = prefix + (until === null
-    ? label(from, element.getAttribute('data-format'))
-    : `${label(from, 'datetime')} → ${label(new Date(until), 'datetime')}`) + suffix;
+  const blocks = until === null
+    ? [halves(from, kind)]
+    : [halves(from, 'datetime'), halves(new Date(until), 'datetime')];
+  if (element instanceof HTMLTimeElement) {
+    writeInstant(element, blocks);
+    if (prefix !== '') element.prepend(prefix);
+    if (suffix !== '') element.append(suffix);
+  } else {
+    element.textContent = prefix + blocks.map(block => block.join(' ')).join(' → ') + suffix;
+  }
 }

@@ -136,14 +136,18 @@ pub(super) fn faults_table(faults: &[Fault], now_ms: i64, download: &str) -> Str
     let mut output = format!(
         "<h2>Last 10 faults\
          <a class=\"download\" href=\"/export/faults.csv.gz{download}\">Download History</a>\
-         </h2>\n<div class=\"table-scroll\">\n<table class=\"faults\">\n\
-         <thead><tr><th>target</th><th>started</th><th class=\"cause-head\">cause</th>\
-         <th class=\"num lasted-head\">lasted</th></tr></thead>\n\
-         <tbody>\n"
+         </h2>\n<div class=\"table-scroll\">\n<table class=\"faults\" role=\"table\">\n\
+         <thead role=\"rowgroup\"><tr role=\"row\"><th role=\"columnheader\">target</th>\
+         <th role=\"columnheader\">started</th>\
+         <th role=\"columnheader\" class=\"cause-head\">cause</th>\
+         <th role=\"columnheader\" class=\"num lasted-head\">lasted</th></tr></thead>\n\
+         <tbody role=\"rowgroup\">\n"
     );
 
     if faults.is_empty() {
-        output.push_str("<tr><td colspan=\"4\">No fault recorded yet.</td></tr>\n");
+        output.push_str(
+            "<tr role=\"row\"><td role=\"cell\" colspan=\"4\">No fault recorded yet.</td></tr>\n",
+        );
     }
 
     for (index, fault) in faults.iter().enumerate() {
@@ -170,9 +174,11 @@ pub(super) fn faults_table(faults: &[Fault], now_ms: i64, download: &str) -> Str
 
         let _ = writeln!(
             output,
-            "<tr{expand}><td><span class=\"fault-name\">{name}</span>{key}</td>\
-             <td><time datetime=\"{at}\">{shown}</time></td>\
-             <td class=\"cause-cell\">{cause}</td><td{class}>{lasted}{tail}</td></tr>",
+            "<tr role=\"row\"{expand}><td role=\"cell\">\
+             <span class=\"fault-name\">{name}</span>{key}</td>\
+             <td role=\"cell\">{shown}</td>\
+             <td role=\"cell\" class=\"cause-cell\">{cause}</td>\
+             <td role=\"cell\"{class}>{lasted}{tail}</td></tr>",
             expand = if fault.cause.is_some() {
                 " class=\"fault\""
             } else {
@@ -181,8 +187,7 @@ pub(super) fn faults_table(faults: &[Fault], now_ms: i64, download: &str) -> Str
             name = escape(&name),
             key = key,
             cause = cause,
-            at = format_rfc3339(fault.started_at_ms),
-            shown = utc_text(fault.started_at_ms),
+            shown = instant_text(fault.started_at_ms),
             class = if ongoing {
                 " class=\"num down\""
             } else {
@@ -199,8 +204,8 @@ pub(super) fn faults_table(faults: &[Fault], now_ms: i64, download: &str) -> Str
         if fault.cause.is_some() {
             let _ = writeln!(
                 output,
-                "<tr class=\"cause-row\" id=\"cause-{index}\" hidden>\
-                 <td colspan=\"4\">{}</td></tr>",
+                "<tr role=\"row\" class=\"cause-row\" id=\"cause-{index}\" hidden>\
+                 <td role=\"cell\" colspan=\"4\">{}</td></tr>",
                 escape(message)
             );
         }
@@ -213,11 +218,9 @@ pub(super) fn faults_table(faults: &[Fault], now_ms: i64, download: &str) -> Str
 /// The two instants the chart covers, in UTC for the browser to localise.
 fn window_span(window: Window) -> String {
     format!(
-        "<p class=\"window\"><time datetime=\"{}\">{}</time> → <time datetime=\"{}\">{}</time></p>\n",
-        format_rfc3339(window.from_ms),
-        utc_text(window.from_ms),
-        format_rfc3339(window.to_ms),
-        utc_text(window.to_ms)
+        "<p class=\"window\">{} → {}</p>\n",
+        instant_text(window.from_ms),
+        instant_text(window.to_ms)
     )
 }
 
@@ -531,8 +534,27 @@ fn tick_label(at_ms: i64, span_ms: i64) -> String {
 /// The fallback text of an instant: readable, explicitly UTC, and replaced in the
 /// browser by the time zone and the locale of the visitor.
 fn utc_text(at_ms: i64) -> String {
+    let (date, time) = utc_halves(at_ms);
+    format!("{date} {time}")
+}
+
+/// The two halves of an instant — the date and the time with its zone — which are the only
+/// two pieces a page may keep apart: each one is unbreakable, and the line may fall between
+/// them and nowhere else.
+fn utc_halves(at_ms: i64) -> (String, String) {
     let stamp = format_rfc3339(at_ms);
-    format!("{} {} UTC", &stamp[0..10], &stamp[11..19])
+    (stamp[0..10].to_string(), format!("{} UTC", &stamp[11..19]))
+}
+
+/// An instant as markup: the two halves in their own spans, so a narrow column stacks the
+/// time under the date instead of splitting either of them.
+fn instant_text(at_ms: i64) -> String {
+    let (date, time) = utc_halves(at_ms);
+    format!(
+        "<time datetime=\"{}\"><span class=\"nowrap\">{date}</span> \
+         <span class=\"nowrap\">{time}</span></time>",
+        format_rfc3339(at_ms)
+    )
 }
 
 fn short(text: &str, limit: usize) -> String {
@@ -837,13 +859,15 @@ mod tests {
 
         assert!(
             rendered.contains(
-                "<td><span class=\"fault-name\">cloudflare-https</span>\
+                "<td role=\"cell\"><span class=\"fault-name\">cloudflare-https</span>\
                  <span class=\"fault-key\">tcp://1.1.1.1:443</span></td>"
             ),
             "a labelled target states the key under its label"
         );
         assert!(
-            rendered.contains("<td><span class=\"fault-name\">icmp://8.8.8.8</span></td>"),
+            rendered.contains(
+                "<td role=\"cell\"><span class=\"fault-name\">icmp://8.8.8.8</span></td>"
+            ),
             "an unlabelled target states the key alone, with nothing under it"
         );
     }
@@ -867,12 +891,12 @@ mod tests {
         let rendered = page(&[timeline()], &downs, &no_streaks(), window);
 
         assert!(
-            rendered.contains("<th class=\"cause-head\">cause</th>"),
+            rendered.contains("<th role=\"columnheader\" class=\"cause-head\">cause</th>"),
             "the cause closes the table"
         );
         let header = rendered
             .lines()
-            .find(|line| line.contains("<thead>"))
+            .find(|line| line.contains("<thead role="))
             .unwrap_or_default();
         assert!(
             header.find("cause").unwrap_or(0) < header.find("lasted").unwrap_or(0),
@@ -888,13 +912,13 @@ mod tests {
         );
         assert!(
             rendered.contains(
-                "<tr class=\"cause-row\" id=\"cause-0\" hidden>\
-                 <td colspan=\"4\">the connection to 1.1.1.1:443 was refused</td></tr>"
+                "<tr role=\"row\" class=\"cause-row\" id=\"cause-0\" hidden>\
+                 <td role=\"cell\" colspan=\"4\">the connection to 1.1.1.1:443 was refused</td></tr>"
             ),
             "the message has a row of its own, closed until it is asked for"
         );
         assert!(
-            rendered.contains("<tr class=\"fault\">"),
+            rendered.contains("<tr role=\"row\" class=\"fault\">"),
             "the fault row is the one that toggles it"
         );
         assert!(
@@ -928,6 +952,40 @@ mod tests {
         );
     }
 
+    /// A name, a key, a code, an instant half or a figure is one token: a narrow window or a
+    /// long label must not split it, and the table widens and scrolls instead.
+    #[test]
+    fn the_tokens_of_a_cell_are_never_broken() {
+        let style = stylesheet();
+        assert!(
+            style.contains(".nowrap { white-space: nowrap; }"),
+            "the class the markup uses to pin a token"
+        );
+        for (selector, block) in [
+            (".fault-name", ".fault-name {\n  display: block;"),
+            (".fault-key", ".fault-key {\n  display: block;"),
+            ("button.cause", "button.cause {\n  padding: 0;"),
+        ] {
+            let start = style
+                .find(block)
+                .unwrap_or_else(|| panic!("{selector} keeps its rule: {block}"));
+            let rule = &style[start..];
+            let rule = &rule[..rule.find('}').expect("the rule closes")];
+            assert!(
+                rule.contains("white-space: nowrap;"),
+                "{selector} never breaks its token: {rule}"
+            );
+        }
+        assert!(
+            !style.contains("table-layout: fixed"),
+            "a fixed layout clips the token it cannot fit"
+        );
+        assert!(
+            style.contains(".table-scroll { overflow-x: auto; }"),
+            "a table too wide for the window scrolls itself"
+        );
+    }
+
     #[test]
     fn a_fault_without_a_cause_opens_nothing() {
         let downs = [Fault {
@@ -947,11 +1005,11 @@ mod tests {
         let rendered = page(&[timeline()], &downs, &no_streaks(), window);
 
         assert!(
-            rendered.contains("<td class=\"cause-cell\"></td>"),
+            rendered.contains("<td role=\"cell\" class=\"cause-cell\"></td>"),
             "an empty cell"
         );
         assert!(
-            !rendered.contains("<tr class=\"cause-row\""),
+            !rendered.contains("<tr role=\"row\" class=\"cause-row\""),
             "a row written before causes has no message to open"
         );
         assert!(!rendered.contains("<tr class=\"fault\">"));
@@ -974,8 +1032,10 @@ mod tests {
             to_ms: 7_200_000,
         };
         let rendered = page(&[timeline()], &downs, &no_streaks(), window);
-        assert!(rendered.contains("<th class=\"num lasted-head\">lasted</th>"));
-        assert!(rendered.contains("<td class=\"num\">12m</td>"));
+        assert!(
+            rendered.contains("<th role=\"columnheader\" class=\"num lasted-head\">lasted</th>")
+        );
+        assert!(rendered.contains("<td role=\"cell\" class=\"num\">12m</td>"));
         let style = stylesheet();
         assert!(
             !style.contains(".numeric"),
@@ -1001,7 +1061,7 @@ mod tests {
             to_ms: 7_200_000,
         };
         let rendered = page(&[timeline()], &downs, &no_streaks(), window);
-        assert!(rendered.contains("<td class=\"num down\">"));
+        assert!(rendered.contains("<td role=\"cell\" class=\"num down\">"));
     }
 
     #[test]
@@ -1290,7 +1350,8 @@ mod tests {
         };
         let rendered = page(&[timeline()], &[], &no_streaks(), window);
         assert!(rendered.contains(
-            "<time datetime=\"1970-01-01T00:00:00.000Z\">1970-01-01 00:00:00 UTC</time>"
+            "<time datetime=\"1970-01-01T00:00:00.000Z\"><span class=\"nowrap\">1970-01-01</span> \
+             <span class=\"nowrap\">00:00:00 UTC</span></time>"
         ));
         assert!(
             rendered.contains("data-format=\"time\""),
@@ -1343,12 +1404,49 @@ mod tests {
         };
         let rendered = page(&[timeline()], &downs, &no_streaks(), window);
         assert!(rendered.contains(
-            "<td><time datetime=\"1970-01-01T01:00:00.000Z\">1970-01-01 01:00:00 UTC</time></td>"
+            "<td role=\"cell\"><time datetime=\"1970-01-01T01:00:00.000Z\"><span class=\"nowrap\">1970-01-01</span> \
+             <span class=\"nowrap\">01:00:00 UTC</span></time></td>"
         ));
         assert!(rendered.contains("<script src=\"/app.js\"></script>"));
         assert!(
             script().contains("Intl.DateTimeFormat"),
             "the shared script localises the instants"
+        );
+    }
+
+    /// The date and the time are the only two pieces a narrow column may keep apart: each
+    /// half is its own span, so the time stacks under the date and neither half splits.
+    #[test]
+    fn an_instant_may_break_between_its_date_and_its_time() {
+        let downs = [Fault {
+            event_id: 1,
+            target: "8.8.8.8".to_string(),
+            label: None,
+            interface: None,
+            started_at_ms: 3_600_000,
+            ended_at_ms: Some(4_320_000),
+            cause: None,
+            cause_message: None,
+        }];
+        let window = Window {
+            from_ms: 0,
+            to_ms: hours_span(DEFAULT_WINDOW_HOURS),
+        };
+        let rendered = page(&[timeline()], &downs, &no_streaks(), window);
+        let cell = rendered
+            .split("<td role=\"cell\"><time datetime=\"1970-01-01T01:00:00.000Z\">")
+            .nth(1)
+            .expect("the started column states the instant as markup");
+        assert!(
+            cell.starts_with(
+                "<span class=\"nowrap\">1970-01-01</span> \
+                 <span class=\"nowrap\">01:00:00 UTC</span></time>"
+            ),
+            "two unbreakable halves, side by side: {cell}"
+        );
+        assert!(
+            !rendered.contains("1970-01-01T01:00:00.000Z\">1970-01-01 01:00:00 UTC"),
+            "one loose string would let the browser break the date from the time anywhere"
         );
     }
 

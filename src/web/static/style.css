@@ -155,9 +155,22 @@ footer p:last-child { margin-bottom: 0; }
   font-weight: 600;
 }
 .title { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-.stats { display: flex; flex-wrap: wrap; gap: 12px; margin: 20px 0 0; }
+/* The four widgets of a target stand in a row that has three stated shapes instead of one
+   shape the browser improvises: four across while they fit, then two and two, then the
+   state alone on its row above the other three. A grid places them row by row in source
+   order, so the state is always the first cell and no widget is ever moved above one that
+   precedes it. */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin: 20px 0 0;
+  /* A tile is never narrower than its own figure, so three tiles of the narrowest shape can
+     need more room than the page gives them: the row then scrolls inside itself, the way a
+     wide table does, and the page around it stays where it is. */
+  overflow-x: auto;
+}
 .stat {
-  flex: 1 1 150px;
   padding: 10px 14px;
   border: 1px solid var(--rule);
   border-radius: 8px;
@@ -167,6 +180,7 @@ footer p:last-child { margin-bottom: 0; }
   font-size: 19px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .stat span { font-size: 12px; opacity: var(--muted); }
 /* The first widget states the state itself, and it is the only one drawn as a filled tile:
@@ -180,6 +194,20 @@ footer p:last-child { margin-bottom: 0; }
 .stat.state.down { background: #c62828; }
 .stat.state.unknown { background: #9e9e9e; }
 .stat.state span { opacity: 0.85; }
+/* Four widgets fit one row until the content is narrower than four readable tiles: they then
+   halve, and under the last width the state owns a row of its own while the three figures
+   share the next one. The order never scrambles, and no tile is left alone beside nothing. */
+@media (max-width: 700px) {
+  .stats { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 460px) {
+  /* The three figures share the narrowest row, so the row gives up the room its own spacing
+     took: a tighter gap and a tighter pad are what let three tiles of a readable size stand
+     side by side on a telephone rather than a part of the third one being cut off. */
+  .stats { grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .stat { padding: 8px 10px; }
+  .stat.state { grid-column: 1 / -1; }
+}
 .window {
   margin: 0 0 10px;
   font-size: 13px;
@@ -231,22 +259,32 @@ th {
    reads as a grid instead of a ragged list. */
 tr.fault { height: 52px; }
 tbody td { border-bottom: 1px solid var(--rule); }
-.fault-name { display: block; line-height: 1.35; }
+/* A name, a key, a code, an instant half or a figure is one token: the browser never breaks
+   it, and the table widens and scrolls instead of splitting the value across two lines. */
+.nowrap { white-space: nowrap; }
+.fault-name {
+  display: block;
+  line-height: 1.35;
+  white-space: nowrap;
+}
 .fault-key {
   display: block;
   font-size: 11px;
   line-height: 1.3;
   opacity: 0.6;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 tbody tr:last-child td { border-bottom: 0; }
 tbody tr:hover { background: rgba(127, 127, 127, 0.07); }
 /* The cause of a fault is a control: the code opens the message under the row. */
 tr.fault { cursor: pointer; }
-/* The four columns keep their share of the width whatever they carry, so a long name never
-   squeezes the date and a short code never leaves a gap: 15, 30, 45 and 10 per cent. */
-table.faults { 
-  table-layout: fixed; 
+/* The four columns start from a stated share of the width — 15, 30, 45 and 10 per cent — so
+   a long name does not squeeze the date and a short code does not leave a gap. A share is
+   where a column starts, not a limit: a column whose unbreakable content needs more widens
+   the table, which `.table-scroll` then scrolls sideways instead of breaking the text. */
+table.faults {
+  table-layout: auto;
 }
 table.faults th:nth-child(1) { width: 15%; }
 table.faults th:nth-child(2) { width: 30%; }
@@ -270,6 +308,7 @@ button.cause {
   opacity: 0.75;
   border-bottom: 1px dotted var(--rule);
   cursor: pointer;
+  white-space: nowrap;
 }
 button.cause:hover { opacity: 1; }
 button.cause[aria-expanded="true"] { opacity: 1; border-bottom-color: currentColor; }
@@ -351,3 +390,61 @@ td.down { color: #c62828; }
   cursor: pointer;
 }
 @media (max-width: 620px) { body { padding: 20px 16px 40px; } }
+/* Under the width where four columns stop fitting, a row states its four values as two
+   columns of two rows, and the header row takes the same mapping so every label stays above
+   the value it names. The table keeps its roles in the markup, so the cells are still cells
+   for a screen reader; only the display moves. */
+@media (max-width: 700px) {
+  table.faults, table.faults thead, table.faults tbody, table.faults tr,
+  table.days, table.days thead, table.days tbody, table.days tr { display: block; }
+  /* Each row is a grid of its own, so its two columns are stated as shares of the row and not
+     as a fit to the content: a column measured per row would leave the header at a different
+     place than the values it names. */
+  table.faults tr, table.days tr {
+    display: grid;
+    row-gap: 2px;
+    align-items: baseline;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  table.faults tr { grid-template-columns: minmax(0, 55%) minmax(0, 45%); }
+  table.days tr { grid-template-columns: minmax(0, 60%) minmax(0, 40%); }
+  table.faults tr:last-child, table.days tr:last-child { border-bottom: 0; }
+  table.faults th, table.faults td,
+  table.days th, table.days td {
+    padding: 0;
+    border-bottom: 0;
+  }
+  /* The right column keeps a gutter from the left one, which the gap of the row cannot give
+     without pushing the two shares past the width of the row. */
+  table.faults th:nth-child(3), table.faults td:nth-child(3),
+  table.faults th:nth-child(4), table.faults td:nth-child(4),
+  table.days th:nth-child(2), table.days td:nth-child(2),
+  table.days th:nth-child(4), table.days td:nth-child(4) { padding-left: 12px; }
+  /* The header stops travelling: it is two lines tall now, and a sticky block that tall would
+     cover the row it belongs to. */
+  table.faults th, table.days th {
+    position: static;
+    border-top: 0;
+  }
+  /* The fault table reads down each column: the target with its instant under it, then the
+     cause with its duration under it. */
+  table.faults tr > *:nth-child(1) { grid-area: 1 / 1; }
+  table.faults tr > *:nth-child(2) { grid-area: 2 / 1; }
+  table.faults tr > *:nth-child(3) { grid-area: 1 / 2; }
+  table.faults tr > *:nth-child(4) { grid-area: 2 / 2; }
+  /* The per-day table reads across: the day with its fault count, then the down time with the
+     average up run under them. */
+  table.days tr > *:nth-child(1) { grid-area: 1 / 1; text-align: left; }
+  table.days tr > *:nth-child(2) { grid-area: 1 / 2; }
+  table.days tr > *:nth-child(3) { grid-area: 2 / 1; text-align: left; }
+  table.days tr > *:nth-child(4) { grid-area: 2 / 2; }
+  /* A note or an empty state speaks for the whole row, whatever the row is made of. */
+  table.faults td[colspan], table.days td[colspan] { grid-column: 1 / -1; }
+  /* A grid display beats the rule that hides an element, so the closed note of a fault says
+     again that it is closed: only the row above it may open it. */
+  table.faults tr[hidden] { display: none; }
+  /* The row is as tall as its two lines now, so the height that kept the wide grid even goes. */
+  tr.fault { height: auto; }
+  table.faults .ongoing { display: inline; }
+}

@@ -531,10 +531,13 @@ fn every_row_shows_its_statistics_and_links_to_its_detail_page() {
         "the chart and the table are titled"
     );
     assert!(
-        detail.matches("<tr><td>").count() >= 30,
+        detail
+            .matches("<tr role=\"row\"><td role=\"cell\">")
+            .count()
+            >= 30,
         "one row per day of the window, like the chart"
     );
-    assert!(detail.contains("<th class=\"num\">down time</th>"));
+    assert!(detail.contains("<th role=\"columnheader\" class=\"num\">down time</th>"));
     assert!(
         detail.contains(">avg up</th>"),
         "every day states the average of its up runs, named as on the timeline"
@@ -552,7 +555,7 @@ fn every_row_shows_its_statistics_and_links_to_its_detail_page() {
         "the third KPI names what it averages and states the longest run too"
     );
     assert!(
-        detail.contains("<td class=\"num\">30m</td>"),
+        detail.contains("<td role=\"cell\" class=\"num\">30m</td>"),
         "the target has been down for half an hour"
     );
     assert!(
@@ -597,7 +600,7 @@ fn the_detail_page_offers_the_periods_and_keeps_thirty_days_as_the_default() {
         "thirty days is the period marked as current"
     );
     assert!(
-        page.matches("<tr><td>").count() >= 30,
+        page.matches("<tr role=\"row\"><td role=\"cell\">").count() >= 30,
         "thirty days is the period shown"
     );
 
@@ -606,7 +609,10 @@ fn the_detail_page_offers_the_periods_and_keeps_thirty_days_as_the_default() {
     assert!(longer.contains("last 90 days"));
     assert!(longer.contains("days=90d\" aria-current=\"page\""));
     assert!(
-        longer.matches("<tr><td>").count() >= 90,
+        longer
+            .matches("<tr role=\"row\"><td role=\"cell\">")
+            .count()
+            >= 90,
         "the chosen period is the one drawn and listed"
     );
 
@@ -813,6 +819,81 @@ fn the_pages_link_the_stylesheet_and_the_script_the_server_serves() {
     assert_eq!(status, 200);
     assert!(head.contains("Content-Type: text/javascript; charset=utf-8"));
     assert!(String::from_utf8_lossy(&body).contains("Intl.DateTimeFormat"));
+}
+
+/// A narrow window must not split a value. The name, the key, the cause code, each half of an
+/// instant, the average `up` run and the four widgets are already shaped by the renderers, and
+/// the stylesheet and the script are what carry that shape to the browser: the served page
+/// states the two halves of an instant, and the served assets state the rules.
+#[test]
+fn no_cell_of_a_table_breaks_a_token() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, page) = server.get("/");
+    assert_eq!(status, 200);
+    assert!(
+        page.contains("<td role=\"cell\"><time datetime=")
+            && page.contains("<span class=\"nowrap\">"),
+        "the start of a fault is two unbreakable halves"
+    );
+
+    let (status, detail) = server.get("/target?target=1.1.1.1&days=30d");
+    assert_eq!(status, 200);
+    assert!(
+        detail.contains("data-format=\"date\" class=\"nowrap\""),
+        "the day of a per-day row is one unbreakable date"
+    );
+    assert!(
+        detail.contains("<span class=\"nowrap\">"),
+        "the average up run is one unbreakable figure"
+    );
+
+    let (status, head, body) = server.get_bytes("/style.css");
+    assert_eq!(status, 200);
+    assert!(head.contains("Content-Type: text/css; charset=utf-8"));
+    let style = String::from_utf8_lossy(&body);
+    for rule in [
+        ".nowrap { white-space: nowrap; }",
+        "grid-template-columns: repeat(2, 1fr);",
+        ".stat.state { grid-column: 1 / -1; }",
+    ] {
+        assert!(style.contains(rule), "the served stylesheet states {rule}");
+    }
+    assert!(
+        !style.contains("table-layout: fixed"),
+        "a fixed layout clips a token it cannot fit"
+    );
+
+    let (status, _, body) = server.get_bytes("/app.js");
+    assert_eq!(status, 200);
+    let script = String::from_utf8_lossy(&body);
+    for rule in ["formatToParts", "nowrap"] {
+        assert!(script.contains(rule), "the served script states {rule}");
+    }
+
+    // Under 700 px each row states its four values as two columns of two lines, and the roles
+    // in the markup are what keep the cells cells while the display moves.
+    for rule in [
+        "@media (max-width: 700px)",
+        "table.faults tr { grid-template-columns: minmax(0, 55%) minmax(0, 45%); }",
+        "table.days tr { grid-template-columns: minmax(0, 60%) minmax(0, 40%); }",
+        "table.faults tr > *:nth-child(2) { grid-area: 2 / 1; }",
+        "table.days tr > *:nth-child(3) { grid-area: 2 / 1; text-align: left; }",
+        "table.faults tr[hidden] { display: none; }",
+    ] {
+        assert!(style.contains(rule), "the served stylesheet states {rule}");
+    }
+    for rule in [
+        "<table class=\"days\" role=\"table\">",
+        "<tr role=\"row\"><td role=\"cell\">",
+    ] {
+        assert!(detail.contains(rule), "the served page states {rule}");
+    }
+    assert!(
+        page.contains("<table class=\"faults\" role=\"table\">"),
+        "the fault table states its role on both pages"
+    );
 }
 
 /// The page reloads itself every 30 s, but a cause being read must not be taken away by

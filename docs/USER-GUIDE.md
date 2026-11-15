@@ -408,8 +408,19 @@ is showing, on the left of the line, and carries the control that changes it, on
   under a rule that marks where it begins: a row names the target as its lane does — the label,
   with the key in smaller type under it, or the key alone when the target has no label — and
   states the start, the cause of the fault, and — in the last column — the duration, with
-  "and counting" on a line of its own while the target is still down. The four columns keep a
-  stated share of the width (15, 30, 45 and 10 per cent) and every row is the same height.
+  "and counting" on a line of its own while the target is still down. The four columns start
+  from a stated share of the width (15, 30, 45 and 10 per cent) and every row is the same
+  height. A share is a starting point, never a rule that lets a value be cut in two: a target
+  name, a target address, a cause code, each half of an instant, and the average `up` run with
+  its spread (`7h54±6h12`) always stay on one line. Only an instant may take two lines, the
+  date above the time, and never inside either half. When a column needs more room than its
+  share, the table grows wider and scrolls sideways on its own, so the page around it stays
+  where it is. On a narrow window — under 700 px — the same values take two columns of two
+  lines each: the target, its address and its start on the left, the cause and the duration
+  on the right. Nothing is hidden and the column titles move with their values: `target`
+  over `started`, `cause` over `lasted`. Two things change with them: the titles no longer
+  stay put while the table scrolls, and while a target is still down "and counting"
+  follows the duration on the same line instead of taking one of its own.
 - `/target?target=<key>&days=30d` — one target for 30, 60, 90, 180, or 360 days: a bar per day,
   the last 10 faults of that target in the same table as the timeline page, and a per-day table.
   The toolbar states the page on one line, the parts separated by a dot:
@@ -417,7 +428,12 @@ is showing, on the left of the line, and carries the control that changes it, on
   whatever page you came from —, and the label with the address in parentheses is the target,
   in bold. Under the toolbar, four widgets: the first states the state of the target — its word
   and how long it has held, white on a tile of the colour the chart gives that state —, and the
-  other three state the faults, the down time, and the average `up` run of the period.
+  other three state the faults, the down time, and the average `up` run of the period. They
+  keep that order at every window width and take one of three shapes: four across while they
+  fit, then two and two, and on a narrow window the state alone on its line above the other
+  three. A figure inside a widget never breaks.
+  The table lower down follows them: on the same narrow window each day states its date with
+  its fault count beside it, and the down time with the average `up` run under them.
 - `Download History` — the whole history as a gzipped CSV, from `/export/faults.csv.gz`, named
   `faults-YYYYMMDD.csv.gz`. On a target page the same link downloads **only that target's**
   history (`/export/faults.csv.gz?target=<key>`) and the file is named after it —

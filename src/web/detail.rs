@@ -239,16 +239,21 @@ fn bars(days: &[DailyDrops]) -> String {
 /// covers the last 24 hours instead, tagged so nobody reads it as a full day.
 fn days_table(days: &[DailyDrops], segments: &[TimelineSegment], now_ms: i64) -> String {
     let mut output = String::from(
-        "<h2>Day by day</h2>\n<table>\n\
-         <thead><tr><th>day (UTC)</th><th class=\"num\">faults</th>\
-         <th class=\"num\">down time</th><th class=\"num\" \
+        "<h2>Day by day</h2>\n<table class=\"days\" role=\"table\">\n\
+         <thead role=\"rowgroup\"><tr role=\"row\">\
+         <th role=\"columnheader\">day (UTC)</th>\
+         <th role=\"columnheader\" class=\"num\">faults</th>\
+         <th role=\"columnheader\" class=\"num\">down time</th>\
+         <th role=\"columnheader\" class=\"num\" \
          title=\"average up run of each day; the current day states the last 24 hours\">\
          avg up</th></tr></thead>\n\
-         <tbody>\n",
+         <tbody role=\"rowgroup\">\n",
     );
 
     if days.is_empty() {
-        output.push_str("<tr><td colspan=\"4\">No day in the window.</td></tr>\n");
+        output.push_str(
+            "<tr role=\"row\"><td role=\"cell\" colspan=\"4\">No day in the window.</td></tr>\n",
+        );
     }
 
     // A run that crosses midnight is split, so each day states the average of the `up`
@@ -262,7 +267,8 @@ fn days_table(days: &[DailyDrops], segments: &[TimelineSegment], now_ms: i64) ->
             let rolling = stats::up_runs_between(segments, now_ms - DAY_MS, now_ms);
             let summary = stats::summarize(&rolling);
             format!(
-                "<td class=\"num current\" title=\"average up run over the last 24 hours: {}\">\
+                "<td role=\"cell\" class=\"num current\" \
+                 title=\"average up run over the last 24 hours: {}\">\
                  <span class=\"tag\">last 24 h</span>{}</td>",
                 run_hint_24h(summary.count),
                 value_with_max(summary, rolling.iter().copied().max())
@@ -274,15 +280,17 @@ fn days_table(days: &[DailyDrops], segments: &[TimelineSegment], now_ms: i64) ->
                 .unwrap_or(&[]);
             let summary = stats::summarize(pieces);
             format!(
-                "<td class=\"num\" title=\"{}\">{}</td>",
+                "<td role=\"cell\" class=\"num\" title=\"{}\">{}</td>",
                 run_hint(summary.count),
                 value_with_max(summary, pieces.iter().copied().max())
             )
         };
         let _ = writeln!(
             output,
-            "<tr><td><time datetime=\"{date}\" data-format=\"date\">{}</time></td>\
-             <td class=\"num\">{}</td><td class=\"num\">{}</td>{}</tr>",
+            "<tr role=\"row\"><td role=\"cell\">\
+             <time datetime=\"{date}\" data-format=\"date\" class=\"nowrap\">{}</time></td>\
+             <td role=\"cell\" class=\"num\">{}</td>\
+             <td role=\"cell\" class=\"num\">{}</td>{}</tr>",
             &date[..10],
             day.drops,
             format_span(day.down_ms),
@@ -295,15 +303,16 @@ fn days_table(days: &[DailyDrops], segments: &[TimelineSegment], now_ms: i64) ->
 }
 
 /// The mean of the runs and, under it, the longest one: a day that holds one long run
-/// and a storm of short ones has a mean that describes neither.
+/// and a storm of short ones has a mean that describes neither. The mean and its spread stay
+/// on one line — `7h54±6h12` is one figure — and only the longest run starts a line of its own.
 fn value_with_max(runs: stats::RunStats, longest: Option<i64>) -> String {
     match longest {
         Some(longest_ms) => format!(
-            "{}<br><span class=\"sub\">max {}</span>",
+            "<span class=\"nowrap\">{}</span><br><span class=\"sub\">max {}</span>",
             format_runs(runs),
             format_span(longest_ms)
         ),
-        None => format_runs(runs),
+        None => format!("<span class=\"nowrap\">{}</span>", format_runs(runs)),
     }
 }
 
@@ -329,6 +338,7 @@ fn run_hint_24h(count: u32) -> String {
 mod tests {
     use super::*;
     use crate::history::TargetState;
+    use crate::web::templates::stylesheet;
 
     /// A fixed instant, so the age of the current `up` state is deterministic.
     const NOW: i64 = 10_000_000;
@@ -369,7 +379,12 @@ mod tests {
     fn the_table_lists_every_day_newest_first_with_its_down_time() {
         let days = [day(0, 2, 90_000), day(1, 0, 0), day(2, 5, 600_000)];
         let rendered = target_page(&target(), &days, &[], &[], NOW, DEFAULT_PERIOD_DAYS);
-        assert_eq!(rendered.matches("<tr><td>").count(), 3);
+        assert_eq!(
+            rendered
+                .matches("<tr role=\"row\"><td role=\"cell\">")
+                .count(),
+            3
+        );
         let first = rendered
             .find("<time datetime=\"1970-01-03")
             .expect("the newest day comes first");
@@ -381,16 +396,16 @@ mod tests {
             .expect("then the oldest");
         assert!(first < second && second < last);
         assert!(rendered.contains(
-            "<td><time datetime=\"1970-01-03T00:00:00.000Z\" data-format=\"date\">1970-01-03</time></td>\
-             <td class=\"num\">5</td><td class=\"num\">10m</td>"
+            "<td role=\"cell\"><time datetime=\"1970-01-03T00:00:00.000Z\" data-format=\"date\" class=\"nowrap\">1970-01-03</time></td>\
+             <td role=\"cell\" class=\"num\">5</td><td role=\"cell\" class=\"num\">10m</td>"
         ));
         assert!(rendered.contains(
-            "<td><time datetime=\"1970-01-02T00:00:00.000Z\" data-format=\"date\">1970-01-02</time></td>\
-             <td class=\"num\">0</td><td class=\"num\">0s</td>"
+            "<td role=\"cell\"><time datetime=\"1970-01-02T00:00:00.000Z\" data-format=\"date\" class=\"nowrap\">1970-01-02</time></td>\
+             <td role=\"cell\" class=\"num\">0</td><td role=\"cell\" class=\"num\">0s</td>"
         ));
         assert!(rendered.contains(
-            "<td><time datetime=\"1970-01-01T00:00:00.000Z\" data-format=\"date\">1970-01-01</time></td>\
-             <td class=\"num\">2</td><td class=\"num\">1m</td>"
+            "<td role=\"cell\"><time datetime=\"1970-01-01T00:00:00.000Z\" data-format=\"date\" class=\"nowrap\">1970-01-01</time></td>\
+             <td role=\"cell\" class=\"num\">2</td><td role=\"cell\" class=\"num\">1m</td>"
         ));
     }
 
@@ -425,10 +440,12 @@ mod tests {
         );
         assert!(
             rendered.contains(
-                "<td><span class=\"fault-name\">cloudflare</span>\
+                "<td role=\"cell\"><span class=\"fault-name\">cloudflare</span>\
                  <span class=\"fault-key\">1.1.1.1</span></td>\
-                 <td><time datetime=\"1970-01-01T01:00:00.000Z\">1970-01-01 01:00:00 UTC\
-                 </time></td><td class=\"cause-cell\"></td><td class=\"num\">12m</td>"
+                 <td role=\"cell\"><time datetime=\"1970-01-01T01:00:00.000Z\">\
+                 <span class=\"nowrap\">1970-01-01</span> \
+                 <span class=\"nowrap\">01:00:00 UTC</span></time></td>\
+                 <td role=\"cell\" class=\"cause-cell\"></td><td role=\"cell\" class=\"num\">12m</td>"
             ),
             "the row names the target and states how long it was down"
         );
@@ -451,11 +468,11 @@ mod tests {
             DEFAULT_PERIOD_DAYS,
         );
         assert!(
-            rendered.contains("<table>"),
+            rendered.contains("<table class=\"days\" role=\"table\">"),
             "no class: the table takes the width of main, like the chart above it"
         );
         assert!(
-            rendered.contains("<th class=\"num\">faults</th>"),
+            rendered.contains("<th role=\"columnheader\" class=\"num\">faults</th>"),
             "the numbers are right-aligned by the shared rule"
         );
         assert!(
@@ -545,7 +562,9 @@ mod tests {
         assert!(rendered
             .contains("<a href=\"/target?target=1.1.1.1&days=90d\" aria-current=\"page\">90d</a>"));
         assert_eq!(
-            rendered.matches("<tr><td>").count(),
+            rendered
+                .matches("<tr role=\"row\"><td role=\"cell\">")
+                .count(),
             90,
             "one row per day of the chosen period"
         );
@@ -707,14 +726,16 @@ mod tests {
         let rendered = target_page(&target(), &days, &crossing, &[], NOW, DEFAULT_PERIOD_DAYS);
         assert!(
             rendered.contains(
-                "<td class=\"num\" title=\"1 up run that day\">3h00\
+                "<td role=\"cell\" class=\"num\" title=\"1 up run that day\">\
+                 <span class=\"nowrap\">3h00</span>\
                  <br><span class=\"sub\">max 3h00</span></td>"
             ),
             "three hours before midnight"
         );
         assert!(
             rendered.contains(
-                "<td class=\"num\" title=\"1 up run that day\">3h00\
+                "<td role=\"cell\" class=\"num\" title=\"1 up run that day\">\
+                 <span class=\"nowrap\">3h00</span>\
                  <br><span class=\"sub\">max 3h00</span></td>"
             ),
             "and three after it"
@@ -734,8 +755,87 @@ mod tests {
             DEFAULT_PERIOD_DAYS,
         );
         assert!(
-            rendered.contains("1h15±15m<br><span class=\"sub\">max 1h30</span>"),
+            rendered.contains(
+                "<span class=\"nowrap\">1h15±15m</span><br><span class=\"sub\">max 1h30</span>"
+            ),
             "the 24-hour cell states the longest run of the same window"
+        );
+    }
+
+    /// Under the width where four columns stop fitting, each table states its values as two
+    /// columns of two lines, and its header takes the same mapping. The roles in the markup are
+    /// what keep the cells cells for a screen reader while the display moves.
+    #[test]
+    fn both_tables_state_their_roles_and_their_two_columns() {
+        let style = stylesheet();
+        let block = style
+            .find("@media (max-width: 700px) {")
+            .expect("one width, used by both tables");
+        let block = &style[block..];
+        for rule in [
+            "table.faults tr > *:nth-child(1) { grid-area: 1 / 1; }",
+            "table.faults tr > *:nth-child(2) { grid-area: 2 / 1; }",
+            "table.faults tr > *:nth-child(3) { grid-area: 1 / 2; }",
+            "table.faults tr > *:nth-child(4) { grid-area: 2 / 2; }",
+            "table.days tr > *:nth-child(1) { grid-area: 1 / 1; text-align: left; }",
+            "table.days tr > *:nth-child(2) { grid-area: 1 / 2; }",
+            "table.days tr > *:nth-child(3) { grid-area: 2 / 1; text-align: left; }",
+            "table.days tr > *:nth-child(4) { grid-area: 2 / 2; }",
+            "table.faults td[colspan], table.days td[colspan] { grid-column: 1 / -1; }",
+            "tr.fault { height: auto; }",
+        ] {
+            assert!(block.contains(rule), "the collapsed layout states {rule}");
+        }
+
+        let rendered = target_page(
+            &target(),
+            &[day(0, 1, 60_000)],
+            &[],
+            &[],
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+        );
+        assert!(
+            rendered.contains("<table class=\"days\" role=\"table\">"),
+            "the per-day table names itself and keeps its role"
+        );
+        assert!(
+            rendered.contains("<tr role=\"row\"><td role=\"cell\">"),
+            "a day row keeps its row and its cell"
+        );
+        assert!(
+            rendered.contains("<td role=\"cell\" class=\"num\">"),
+            "a figure cell keeps its cell"
+        );
+        assert!(
+            rendered.contains("<table class=\"faults\" role=\"table\">"),
+            "the fault table the page shares keeps its role too"
+        );
+    }
+
+    /// A mean and its spread are one figure — `7h54±6h12` never breaks after the `±` — and a
+    /// day is a date that never breaks; only the longest run starts a line of its own.
+    #[test]
+    fn the_mean_and_the_day_are_never_broken() {
+        let rendered = target_page(
+            &target(),
+            &[day(0, 1, 300_000)],
+            &runs(),
+            &[],
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+        );
+        assert!(
+            rendered.contains("<span class=\"nowrap\">1h15±15m</span>"),
+            "the mean and its spread stay on one line"
+        );
+        assert!(
+            rendered.contains("data-format=\"date\" class=\"nowrap\""),
+            "the day of a row is one unbreakable date"
+        );
+        assert!(
+            !rendered.contains(">1h15±15m<br>"),
+            "a bare mean would let the browser break it after the ±"
         );
     }
 
@@ -757,9 +857,9 @@ mod tests {
             DEFAULT_PERIOD_DAYS,
         );
         assert!(rendered.contains(
-            "<td class=\"num current\" title=\"average up run over the last 24 hours: \
+            "<td role=\"cell\" class=\"num current\" title=\"average up run over the last 24 hours: \
              1 up run in the last 24 hours\"><span class=\"tag\">last 24 h</span>\
-             4h10<br><span class=\"sub\">max 4h10</span></td>"
+             <span class=\"nowrap\">4h10</span><br><span class=\"sub\">max 4h10</span></td>"
         ));
         assert_eq!(
             rendered.matches("class=\"tag\"").count(),
@@ -812,6 +912,66 @@ mod tests {
             4,
             "the state, the faults, the down time, and the average up run"
         );
+    }
+
+    /// A narrow window must not decide the shape of the widget row: the four stand four
+    /// across, then two and two, then the state alone above the other three, in that order at
+    /// every width, and no figure inside a widget is ever split.
+    #[test]
+    fn the_four_widgets_keep_their_order_and_take_the_three_stated_shapes() {
+        let style = stylesheet();
+        assert!(
+            style.contains("grid-template-columns: repeat(4, 1fr);"),
+            "four widgets share the row of a wide page"
+        );
+        assert!(
+            style.contains(
+                "@media (max-width: 700px) {\n  .stats { grid-template-columns: repeat(2, 1fr); }"
+            ),
+            "they halve when four stop fitting"
+        );
+        assert!(
+            style.contains("@media (max-width: 460px) {")
+                && style.contains("grid-template-columns: repeat(3, 1fr); gap: 8px;"),
+            "the three figures share the narrowest row"
+        );
+        assert!(
+            style.contains(".stat.state { grid-column: 1 / -1; }"),
+            "the state owns a row of its own rather than one tile of three"
+        );
+        assert!(
+            !style.contains("flex: 1 1 150px"),
+            "a flex basis let the browser choose how many widgets share a line"
+        );
+        assert_eq!(
+            style.matches("grid-template-columns: repeat(").count(),
+            3,
+            "three shapes of widget row, and no fourth"
+        );
+
+        let rendered = target_page(
+            &target(),
+            &[day(0, 1, 60_000)],
+            &[],
+            &[],
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+        );
+        let order: Vec<&str> = [
+            "class=\"stat state up\"",
+            "faults</b>",
+            "down time in the",
+            "avg up run in ",
+        ]
+        .into_iter()
+        .collect();
+        let mut at = 0;
+        for marker in order {
+            let found = rendered[at..]
+                .find(marker)
+                .unwrap_or_else(|| panic!("{marker} follows the widget before it"));
+            at += found + marker.len();
+        }
     }
 
     /// A target that is down states that, and how long it has been down: the widget
@@ -930,7 +1090,7 @@ mod tests {
             DEFAULT_PERIOD_DAYS,
         );
         assert!(rendered.contains(
-            "<time datetime=\"1970-01-01T00:00:00.000Z\" data-format=\"date\">1970-01-01</time>"
+            "<time datetime=\"1970-01-01T00:00:00.000Z\" data-format=\"date\" class=\"nowrap\">1970-01-01</time>"
         ));
         assert!(
             rendered.contains("data-datetime=\"1970-01-01T00:00:00.000Z\" data-format=\"day\""),
