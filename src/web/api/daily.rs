@@ -2,10 +2,9 @@
 
 use std::collections::BTreeMap;
 use std::net::TcpStream;
-use std::path::Path;
 
+use crate::history::{DailyDrops, HistorySource};
 use crate::json;
-use crate::store::DailyDrops;
 use crate::time::{format_rfc3339, now_ms};
 use crate::web::{stats, DAY_MS};
 
@@ -15,7 +14,7 @@ use super::{
 };
 
 /// Faults and down time per UTC day, oldest first, with the `up` runs of each day.
-pub(super) fn route(stream: &mut TcpStream, query: &str, database: &Path, reply: Reply) {
+pub(super) fn route(stream: &mut TcpStream, query: &str, source: &dyn HistorySource, reply: Reply) {
     let params = match Params::parse(query, &["target", "from", "to", "limit", "offset"]) {
         Ok(params) => params,
         Err(rejection) => return reject(stream, rejection, reply),
@@ -31,10 +30,10 @@ pub(super) fn route(stream: &mut TcpStream, query: &str, database: &Path, reply:
         return reject(stream, Rejection::range(), reply);
     }
 
-    let Some(store) = open(stream, database, reply) else {
+    let Some(store) = open(stream, source, reply) else {
         return;
     };
-    let target = match resolve(&store, params.target.as_deref()) {
+    let target = match resolve(store.as_ref(), params.target.as_deref()) {
         Ok(target) => target,
         Err(rejection) => return reject(stream, rejection, reply),
     };

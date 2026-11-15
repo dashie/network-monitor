@@ -6,12 +6,14 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use network_monitor::cli::Compression;
+use network_monitor::history::HistorySource;
 use network_monitor::shutdown::Shutdown;
-use network_monitor::store::{Event, EventFilter, Store, TargetState};
+use network_monitor::store::{DatabaseSource, Event, EventFilter, Store, TargetState};
 use network_monitor::time::now_ms;
 use network_monitor::web;
 
@@ -184,10 +186,10 @@ fn start_with(database: &Path, compression: Compression) -> Server {
         .to_string();
     let stop = Shutdown::new();
     let running = stop.clone();
-    let database = database.to_path_buf();
+    let source: Arc<dyn HistorySource> = Arc::new(DatabaseSource::new(database));
 
     let handle = thread::spawn(move || {
-        web::serve(listener, &database, &running, compression).expect("the server runs");
+        web::serve(listener, source, &running, compression).expect("the server runs");
     });
 
     let server = Server {
@@ -654,7 +656,7 @@ fn the_page_context_and_its_selector_share_one_line() {
     let (status, detail) = server.get("/target?target=1.1.1.1");
     assert_eq!(status, 200);
     assert!(detail.contains("<div class=\"toolbar\">"));
-    assert!(detail.contains("<a class=\"back-button\" href=\"/\">targets</a>"));
+    assert!(detail.contains("<a class=\"back-button\" href=\"/\">HOME</a>"));
     assert!(
         !detail.contains("class=\"hint\""),
         "nothing explains the page above the chart"

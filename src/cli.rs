@@ -88,6 +88,26 @@ pub enum Command {
         listen: String,
     },
 
+    /// Serve the page over a simulated history, without probing and without a database
+    Simulate {
+        /// Address and port to listen on
+        #[arg(long, value_name = "ADDRESS:PORT")]
+        listen: String,
+
+        /// How much past to simulate, as `30d` or `30`, from 1 to 3660 days
+        #[arg(long, value_name = "DAYS", default_value = "30d")]
+        history: HistorySpan,
+
+        /// Seed of the simulation: the same seed replays the same history
+        #[arg(long, value_name = "SEED", default_value_t = 0)]
+        seed: u64,
+
+        /// Faults per day of a target that fails now and then: 0 for a quiet board, 20 for a
+        /// board that flaps
+        #[arg(long, value_name = "FAULTS", default_value = "3")]
+        fault_rate: FaultRate,
+    },
+
     /// Import a history exported from the web page
     Import {
         /// File path, http:// URL, or - for standard input
@@ -136,6 +156,81 @@ pub enum QueryCommand {
     },
 }
 
+/// How far back a simulated history goes.
+///
+/// Written either with the unit it is measured in (`30d`) or as a bare number of days
+/// (`30`), because that is how the rest of the tool states a duration and a reader should
+/// not have to remember which command wants which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistorySpan(i64);
+
+impl HistorySpan {
+    /// The shortest and the longest past the simulation will generate.
+    pub const MIN_DAYS: i64 = 1;
+    pub const MAX_DAYS: i64 = 3_660;
+
+    pub fn days(self) -> i64 {
+        self.0
+    }
+}
+
+impl std::str::FromStr for HistorySpan {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<HistorySpan, String> {
+        let trimmed = value.trim();
+        let number = trimmed.strip_suffix(['d', 'D']).unwrap_or(trimmed).trim();
+        let days: i64 = number
+            .parse()
+            .map_err(|_| format!("'{value}' is not a number of days; write 30d or 30"))?;
+        if !(HistorySpan::MIN_DAYS..=HistorySpan::MAX_DAYS).contains(&days) {
+            return Err(format!(
+                "'{value}' is out of range: the simulated history covers {} to {} days",
+                HistorySpan::MIN_DAYS,
+                HistorySpan::MAX_DAYS
+            ));
+        }
+        Ok(HistorySpan(days))
+    }
+}
+
+/// How many faults a simulated day holds.
+///
+/// The number is the faults a day of a target that *fails now and then* holds; a target drawn
+/// as one that flaps gets about eight times as many, and one in five never fails at all. `0`
+/// therefore means a board where nothing goes down.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FaultRate(f64);
+
+impl FaultRate {
+    pub const MIN: f64 = 0.0;
+    /// A ceiling that keeps a request finite: a day of 1 000 faults still fits in it.
+    pub const MAX: f64 = 1_000.0;
+
+    pub fn per_day(self) -> f64 {
+        self.0
+    }
+}
+
+impl std::str::FromStr for FaultRate {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<FaultRate, String> {
+        let trimmed = value.trim();
+        let rate: f64 = trimmed
+            .parse()
+            .map_err(|_| format!("'{value}' is not a number of faults; write 3 or 2.5"))?;
+        if !rate.is_finite() || !(FaultRate::MIN..=FaultRate::MAX).contains(&rate) {
+            return Err(format!(
+                "'{value}' is out of range: the fault rate is {} to {} faults per day",
+                FaultRate::MIN,
+                FaultRate::MAX
+            ));
+        }
+        Ok(FaultRate(rate))
+    }
+}
+
 /// How the page travels over HTTP.
 ///
 /// `auto` follows the client: the page is gzipped when the request advertises gzip, which
@@ -181,6 +276,8 @@ impl Cli {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use super::*;
 
     fn parse(args: &[&str]) -> Cli {
@@ -258,6 +355,89 @@ mod tests {
     fn reports_a_bad_target_spec() {
         let cli = parse(&["--target", "not-an-address"]);
         assert!(cli.overrides().is_err());
+    }
+
+    #[test]
+    fn parses_the_simulate_subcommand_and_its_defaults() {
+        let cli = parse(&["simulate", "--listen", "127.0.0.1:8660"]);
+        match cli.command {
+            Some(Command::Simulate {
+                listen,
+                history,
+                seed,
+                fault_rate,
+            }) => {
+                assert_eq!(listen, "127.0.0.1:8660");
+                assert_eq!(fault_rate.per_day(), 3.0);
+                assert_eq!(history.days(), 30);
+                assert_eq!(seed, 0);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_simulate_history_takes_days_with_or_without_its_unit() {
+        for (value, days) in [("7d", 7), ("7", 7), ("1", 1), ("3660d", 3_660)] {
+            let cli = parse(&["simulate", "--listen", ":0", "--history", value]);
+            match cli.command {
+                Some(Command::Simulate { history, .. }) => assert_eq!(history.days(), days),
+                other => panic!("unexpected command: {other:?}"),
+            }
+        }
+        assert!(HistorySpan::from_str("0").is_err(), "a day at least");
+        assert!(HistorySpan::from_str("4000d").is_err(), "and 3660 at most");
+        assert!(
+            HistorySpan::from_str("30x").is_err(),
+            "a unit is d or nothing"
+        );
+        assert!(HistorySpan::from_str("-3").is_err(), "not a count");
+    }
+
+    #[test]
+    fn the_simulate_fault_rate_defaults_to_three_and_takes_a_positive_number() {
+        let cli = parse(&["simulate", "--listen", ":0"]);
+        match cli.command {
+            Some(Command::Simulate { fault_rate, .. }) => {
+                assert_eq!(fault_rate.per_day(), 3.0);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        for (value, rate) in [("0", 0.0), ("2.5", 2.5), ("20", 20.0)] {
+            let cli = parse(&["simulate", "--listen", ":0", "--fault-rate", value]);
+            match cli.command {
+                Some(Command::Simulate { fault_rate, .. }) => {
+                    assert_eq!(fault_rate.per_day(), rate);
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
+        }
+        assert!(FaultRate::from_str("-1").is_err(), "no negative rate");
+        assert!(FaultRate::from_str("1001").is_err(), "no runaway rate");
+        assert!(FaultRate::from_str("NaN").is_err(), "a rate is a number");
+        assert!(FaultRate::from_str("lots").is_err(), "a rate is a number");
+    }
+
+    #[test]
+    fn simulate_requires_a_listen_address_and_a_numeric_seed() {
+        assert!(
+            Cli::try_parse_from(["network-monitor", "simulate"]).is_err(),
+            "--listen is required"
+        );
+        let cli = parse(&["simulate", "--listen", ":0", "--seed", "42"]);
+        match cli.command {
+            Some(Command::Simulate { seed, .. }) => assert_eq!(seed, 42),
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert!(Cli::try_parse_from([
+            "network-monitor",
+            "simulate",
+            "--listen",
+            ":0",
+            "--seed",
+            "x"
+        ])
+        .is_err());
     }
 
     #[test]

@@ -301,3 +301,97 @@ fn a_target_key_belonging_to_another_method_is_refused() {
         .failure()
         .stderr(predicate::str::contains("record"));
 }
+
+#[test]
+fn simulate_requires_a_listen_address() {
+    let directory = tempfile::tempdir().unwrap();
+
+    monitor(directory.path())
+        .args(["simulate", "--target", "1.1.1.1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--listen"));
+}
+
+#[test]
+fn simulate_refuses_a_history_outside_the_simulated_range() {
+    let directory = tempfile::tempdir().unwrap();
+
+    for value in ["0", "4000d"] {
+        monitor(directory.path())
+            .args(["simulate", "--listen", ":0", "--history", value])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("1 to 3660 days"));
+    }
+
+    monitor(directory.path())
+        .args(["simulate", "--listen", ":0", "--history", "30x"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("is not a number of days"));
+}
+
+#[test]
+fn simulate_refuses_a_fault_rate_outside_the_accepted_range() {
+    let directory = tempfile::tempdir().unwrap();
+
+    // A negative value is refused by clap as an unknown flag, before the parser sees it; the
+    // range of the number itself is asserted by the unit test of `FaultRate`.
+    for value in ["1001", "NaN", "lots"] {
+        monitor(directory.path())
+            .args(["simulate", "--listen", ":0", "--fault-rate", value])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("--fault-rate"));
+    }
+}
+
+#[test]
+fn simulate_without_targets_fails() {
+    let directory = tempfile::tempdir().unwrap();
+
+    monitor(directory.path())
+        .args(["simulate", "--listen", ":0"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no targets configured"));
+}
+
+#[test]
+fn simulate_refuses_an_invalid_listen_address() {
+    let directory = tempfile::tempdir().unwrap();
+
+    monitor(directory.path())
+        .args(["simulate", "--listen", "nope", "--target", "1.1.1.1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid listen address"));
+}
+
+#[test]
+fn the_startup_log_states_the_simulation_and_that_no_database_is_used() {
+    let directory = tempfile::tempdir().unwrap();
+
+    monitor(directory.path())
+        .args([
+            "simulate",
+            "--listen",
+            "nope",
+            "--target",
+            "1.1.1.1",
+            "--history",
+            "7d",
+            "--seed",
+            "42",
+            "--fault-rate",
+            "0",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "simulating 1 target(s) over the last 7 day(s), seed 42, 0 fault(s) per day: no \
+             probe runs and no database is read or written",
+        ))
+        .stderr(predicate::str::contains("simulated target icmp://1.1.1.1"));
+}

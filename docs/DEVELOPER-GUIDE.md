@@ -76,8 +76,14 @@ network-monitor/
 │   │   ├── http.rs       one HTTP request, plain or over TLS
 │   │   ├── interface.rs  platform interface validation and binding
 │   │   └── fake.rs       deterministic prober for tests
+│   ├── history.rs        the read contract: History, HistorySource, HistoryError
+│   ├── sim/
+│   │   ├── mod.rs        the generator: a target's life, its faults, its day
+│   │   ├── rng.rs        splitmix64 and the seeding of one draw
+│   │   └── history.rs    the read contract over the generator, per request
 │   ├── store/
-│   │   ├── mod.rs        connection, write transaction, retention, read queries
+│   │   ├── mod.rs        connection, write transaction, retention, read queries, the
+│   │   │                 aggregation rules both sources share, DatabaseSource
 │   │   └── schema.rs     DDL, schema version, migrations
 │   ├── query/
 │   │   ├── mod.rs        filters and read path
@@ -106,6 +112,7 @@ network-monitor/
 │   ├── store.rs              schema, concurrent read, retention, labels
 │   ├── cli.rs                exit codes and query output
 │   ├── web.rs                page, faults table, detail page, no writes
+│   ├── simulate.rs           end-to-end: routes, same seed same bytes, nothing written
 │   ├── import.rs             export round trip, plain CSV, stdin, URL, duplicates
 │   ├── notify.rs             notifier with a fake sender: down, window, flap, retry
 │   └── icmp_privileged.rs    real raw-socket probe, ignored unless root
@@ -120,6 +127,22 @@ regenerated with `rsvg-convert -w 1024 -h 1024 assets/icon/icon.svg -o
 assets/icon/icon-1024.png`, and the same command at 32 px into `assets/icon/favicon-32.png`.
 The SVG and the 32 px PNG are embedded in the executable, so the server ships the masthead
 mark and the favicon without reading the disk.
+
+### Diagrams
+
+`docs/ARCHITECTURE.md` carries three [PlantUML](https://plantuml.com) diagrams — the C4 context,
+the C4 containers, and the runtime sequence — as `@startuml` blocks inside `plantuml` fences.
+They are the source, not an export: edit the text in the document and render it to check the
+result.
+
+```bash
+plantuml -tsvg docs/ARCHITECTURE.md     # every @startuml block, into the working directory
+```
+
+The two C4 diagrams use the C4-PlantUML standard library, which ships inside the PlantUML jar, so
+rendering needs no network. Without Graphviz on the machine, add `-Playout=smetana` to lay the
+diagram out with the engine inside the jar. GitHub shows the blocks as source: the tables under
+each diagram state the same content for a reader who does not render them.
 
 ## Build
 
@@ -139,7 +162,25 @@ cargo run -- import ./history.csv.gz --database ./network-monitor.db
 cargo run -- query state --config ./network-monitor.toml
 cargo run -- query events 1.1.1.1 --since 24h --config ./network-monitor.toml
 cargo run -- --show-config --config ./network-monitor.toml
+cargo run -- simulate --listen 127.0.0.1:8660
 ```
+
+### Without a network: the simulated board
+
+The page can be developed against a history that no probe produced:
+
+```bash
+cargo run -- simulate --listen 127.0.0.1:8660 --history 90d --seed 7 --fault-rate 3
+```
+
+It serves `/`, `/target`, the REST API and the export over a generated past of whole UTC days.
+Nothing is probed, no database is opened, and the same seed shows the same history on every
+run, so a screenshot, a timing and a defect all reproduce. Change `--seed` for another board,
+`--history` for a longer past and `--fault-rate` for a busier or a quieter one (`0` is a board
+where nothing goes down); the weights of the generated lives and the durations of the faults are
+constants at the top of `src/sim/mod.rs`, and the failures and latencies of a method live with
+that method in `src/probe/`. `cargo test --test simulate` covers the mode end to end,
+including that two processes of the same seed answer the same bytes.
 
 ## Web templates and assets
 
@@ -584,6 +625,7 @@ cargo test --test reload
 cargo test --test notify
 cargo test --test store
 cargo test --test web
+cargo test --test simulate
 ```
 
 <!-- skill:block:devguide-test-rules section="## Test" -->

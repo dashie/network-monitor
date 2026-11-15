@@ -33,6 +33,9 @@ sudo ./target/release/network-monitor monitor --config ./network-monitor.toml \
 # Serve the page alone, without probing or NET_RAW
 ./target/release/network-monitor serve --database ./network-monitor.db --listen 127.0.0.1:8642
 
+# Look at that page with no network and no database: a generated history, the same for the same seed
+./target/release/network-monitor simulate --listen 127.0.0.1:8660 --history 30d --seed 0
+
 # Read the same history as JSON from that server: read-only, no credential, no second port
 curl -s http://127.0.0.1:8642/api/v1/faults?limit=10
 

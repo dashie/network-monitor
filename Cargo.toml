@@ -1,6 +1,6 @@
 [package]
 name = "network-monitor"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Event-based reachability monitor with ICMP, TCP, DNS, and HTTP checks and an embedded SQLite history"

@@ -243,6 +243,83 @@ impl fmt::Display for Endpoint {
     }
 }
 
+/// The simulated day of one target: the answer of the simulator's probe.
+///
+/// One stretch of the day, exactly as [`crate::sim::day`] cuts it: whether the target
+/// answered, when, and — when it did not — the failure a real probe would have reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimulatedEpisode {
+    pub state: SimulatedState,
+    pub from_ms: i64,
+    pub to_ms: i64,
+    /// How long the answer took, in microseconds; `None` when the target did not answer.
+    pub rtt_us: Option<i64>,
+    /// Why the target did not answer; `None` when it did.
+    pub cause: Option<Failure>,
+}
+
+/// Whether a simulated stretch is the target answering or failing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimulatedState {
+    Up,
+    Down,
+}
+
+/// The timeout a simulated failure states: the one a target runs with unless it configures
+/// its own, spelled here because a simulator has no configuration to read.
+pub const SIMULATED_TIMEOUT: Duration = Duration::from_millis(2_000);
+
+/// The simulated day of one target, in the vocabulary of its method.
+///
+/// This is the simulated half of the [`Probe`] contract: the real half asks the network,
+/// this one asks nothing, and both answer in the same terms. The schedule of the day lives
+/// in [`crate::sim`]; the method contributes the latencies and the failures it can state.
+pub fn simulated_day(
+    endpoint: &Endpoint,
+    seed: u64,
+    day_start_ms: i64,
+    fault_rate: f64,
+) -> Vec<SimulatedEpisode> {
+    match endpoint {
+        Endpoint::Icmp { .. } => icmp::simulated_day(endpoint, seed, day_start_ms, fault_rate),
+        Endpoint::Tcp { .. } => tcp::simulated_day(endpoint, seed, day_start_ms, fault_rate),
+        Endpoint::Dns { .. } => dns::simulated_day(endpoint, seed, day_start_ms, fault_rate),
+        Endpoint::Http { .. } => http::simulated_day(endpoint, seed, day_start_ms, fault_rate),
+    }
+}
+
+/// The schedule of one day, dressed with the latency and the failure of one method.
+///
+/// `answer` is called once for every stretch the target is up, `fail` once for every stretch
+/// it is down, and the two draw from a stream of their own — seeded by the method's name, so
+/// an ICMP target and a TCP target of the same schedule do not share their draws.
+pub(crate) fn simulated_episodes(
+    endpoint: &Endpoint,
+    seed: u64,
+    day_start_ms: i64,
+    fault_rate: f64,
+    purpose: &str,
+    mut answer: impl FnMut(&mut crate::sim::rng::Rng) -> i64,
+    mut fail: impl FnMut(&mut crate::sim::rng::Rng) -> Failure,
+) -> Vec<SimulatedEpisode> {
+    let key = endpoint.to_string();
+    let mut rng = crate::sim::rng::Rng::for_draw(seed, &key, day_start_ms, purpose);
+    crate::sim::day(seed, &key, day_start_ms, fault_rate)
+        .into_iter()
+        .map(|stretch| SimulatedEpisode {
+            state: if stretch.up {
+                SimulatedState::Up
+            } else {
+                SimulatedState::Down
+            },
+            from_ms: stretch.from_ms,
+            to_ms: stretch.to_ms,
+            rtt_us: stretch.up.then(|| answer(&mut rng)),
+            cause: (!stretch.up).then(|| fail(&mut rng)),
+        })
+        .collect()
+}
+
 /// The outcome of one probe cycle.
 ///
 /// A local failure is *not* a verdict: it is a [`ProbeError`], so the monitor can

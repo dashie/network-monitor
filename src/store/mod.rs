@@ -6,7 +6,7 @@
 
 pub mod schema;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -266,6 +266,175 @@ pub fn timeline_segments(
     segments
 }
 
+/// One disconnection reduced to the instants that describe it.
+///
+/// The SQL reader finds these with a correlated subquery; anything that holds a list of
+/// events finds them with [`fault_episodes`]. Both must agree, which the drift guard in
+/// the tests checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FaultEpisode {
+    pub target: String,
+    pub label: Option<String>,
+    pub interface: Option<String>,
+    pub started_at_ms: i64,
+    /// The first instant after the start at which the target was heard from again;
+    /// `None` while the target is still down.
+    pub ended_at_ms: Option<i64>,
+    pub cause: Option<String>,
+    pub cause_message: Option<String>,
+}
+
+/// The disconnections a list of events contains, oldest first.
+///
+/// A fault opens at every `down` event and closes at the first instant after it at which
+/// the target was heard from again — any later event of that target, whatever its state,
+/// which is what the reader's subquery asks for. Events at the same instant do not close
+/// one another. The input may be in any order; ties are broken by the order they arrive in.
+pub fn fault_episodes(events: &[Event]) -> Vec<FaultEpisode> {
+    let mut by_target: BTreeMap<&str, Vec<&Event>> = BTreeMap::new();
+    for event in events {
+        by_target
+            .entry(event.target.as_str())
+            .or_default()
+            .push(event);
+    }
+
+    let mut episodes = Vec::new();
+    for lane in by_target.into_values() {
+        let mut lane = lane;
+        lane.sort_by_key(|event| event.occurred_at_ms);
+        for (position, event) in lane.iter().enumerate() {
+            if event.state != TargetState::Down {
+                continue;
+            }
+            let ended_at_ms = lane[position + 1..]
+                .iter()
+                .find(|next| next.occurred_at_ms > event.occurred_at_ms)
+                .map(|next| next.occurred_at_ms);
+            episodes.push(FaultEpisode {
+                target: event.target.clone(),
+                label: event.label.clone(),
+                interface: event.interface.clone(),
+                started_at_ms: event.occurred_at_ms,
+                ended_at_ms,
+                cause: event.cause.clone(),
+                cause_message: event.cause_message.clone(),
+            });
+        }
+    }
+
+    episodes.sort_by(|left, right| {
+        left.started_at_ms
+            .cmp(&right.started_at_ms)
+            .then_with(|| left.target.cmp(&right.target))
+    });
+    episodes
+}
+
+/// The per-UTC-day histogram of a list of faults.
+///
+/// Every day of `[from_ms, to_ms)` gets a bucket, so a day without faults is a zero
+/// rather than a gap. A fault still open at `now_ms` is counted as open until `now_ms`,
+/// and its down time is clipped to the window.
+pub fn daily_drops_from(
+    episodes: &[FaultEpisode],
+    from_ms: i64,
+    to_ms: i64,
+    now_ms: i64,
+) -> Vec<DailyDrops> {
+    let spans: Vec<(i64, Option<i64>)> = episodes
+        .iter()
+        .map(|episode| (episode.started_at_ms, episode.ended_at_ms))
+        .collect();
+    daily_drops_from_spans(&spans, from_ms, to_ms, now_ms)
+}
+
+/// The same rule over the instants of a disconnection alone: when it started, and when it
+/// ended while it is still open.
+///
+/// A source that generates its history knows those two numbers for a fault before it knows
+/// anything else about it, and a histogram must not need the labels and the causes of the
+/// faults it counts.
+pub fn daily_drops_from_spans(
+    spans: &[(i64, Option<i64>)],
+    from_ms: i64,
+    to_ms: i64,
+    now_ms: i64,
+) -> Vec<DailyDrops> {
+    let mut days: Vec<DailyDrops> = Vec::new();
+    let mut day = from_ms.div_euclid(DAY_MS).saturating_mul(DAY_MS);
+    while day < to_ms {
+        days.push(DailyDrops {
+            day_start_ms: day,
+            drops: 0,
+            down_ms: 0,
+        });
+        day = day.saturating_add(DAY_MS);
+    }
+    let first = from_ms.div_euclid(DAY_MS).saturating_mul(DAY_MS);
+
+    for (started_at_ms, ended_at_ms) in spans {
+        let started_at_ms = *started_at_ms;
+        let ended_at_ms = ended_at_ms.unwrap_or_else(|| to_ms.min(now_ms));
+        if started_at_ms >= from_ms && started_at_ms < to_ms {
+            let drop_day = started_at_ms.div_euclid(DAY_MS).saturating_mul(DAY_MS);
+            if let Some(bucket) = days.get_mut(((drop_day - first) / DAY_MS) as usize) {
+                bucket.drops += 1;
+            }
+        }
+        for (slice_day, down_ms) in day_slices(started_at_ms, ended_at_ms, from_ms, to_ms) {
+            if let Some(bucket) = days.get_mut(((slice_day - first) / DAY_MS) as usize) {
+                bucket.down_ms += down_ms;
+            }
+        }
+    }
+
+    days
+}
+
+/// The current state of every target a list of events mentions, by target key.
+///
+/// The state, the interface, the label and the round-trip time come from the newest
+/// event; `first_seen_at_ms` is the oldest instant and `last_change_at_ms` the newest, so
+/// the row never moves backwards. Ties go to the event that arrived last.
+pub fn current_states(events: &[Event]) -> Vec<TargetStateRow> {
+    let mut by_target: BTreeMap<&str, (TargetStateRow, i64)> = BTreeMap::new();
+    for event in events {
+        match by_target.get_mut(event.target.as_str()) {
+            Some((row, newest)) => {
+                row.first_seen_at_ms = row.first_seen_at_ms.min(event.occurred_at_ms);
+                if event.occurred_at_ms >= *newest {
+                    *newest = event.occurred_at_ms;
+                    row.interface = event.interface.clone();
+                    row.label = event.label.clone();
+                    row.state = event.state;
+                    row.last_change_at_ms = event.occurred_at_ms;
+                    row.last_rtt_us = event.rtt_us;
+                }
+            }
+            None => {
+                by_target.insert(
+                    event.target.as_str(),
+                    (
+                        TargetStateRow {
+                            target: event.target.clone(),
+                            interface: event.interface.clone(),
+                            label: event.label.clone(),
+                            state: event.state,
+                            first_seen_at_ms: event.occurred_at_ms,
+                            last_change_at_ms: event.occurred_at_ms,
+                            last_rtt_us: event.rtt_us,
+                        },
+                        event.occurred_at_ms,
+                    ),
+                );
+            }
+        }
+    }
+
+    by_target.into_values().map(|(row, _)| row).collect()
+}
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("cannot open the event database {path}: {source}")]
@@ -289,6 +458,113 @@ pub enum StoreError {
          {supported}; upgrade the binary or restore a backup"
     )]
     NewerSchema { found: i64, supported: i64 },
+}
+
+/// The real history source: the event database at `path`, opened read-only per request.
+///
+/// The page has always opened one connection per request, which keeps every read
+/// transaction short (INV-10). The source carries the path across requests so the
+/// connection itself does not have to be shared.
+#[derive(Debug, Clone)]
+pub struct DatabaseSource {
+    path: PathBuf,
+}
+
+impl DatabaseSource {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        DatabaseSource { path: path.into() }
+    }
+}
+
+impl crate::history::HistorySource for DatabaseSource {
+    fn open(&self) -> Result<Box<dyn crate::history::History>, crate::history::HistoryError> {
+        let store = Store::open_ro(&self.path).map_err(|error| {
+            crate::history::HistoryError(format!("cannot read the event database: {error}"))
+        })?;
+        Ok(Box::new(store))
+    }
+
+    fn describe(&self) -> String {
+        format!("reading {}", self.path.display())
+    }
+}
+
+/// The read contract over the database (see [`crate::history`]).
+///
+/// Every method delegates to the inherent one of the same name; the calls are written as
+/// `Store::name(self)` because an inherent method wins method resolution and a bare
+/// `self.name()` would be ambiguous to a reader.
+impl crate::history::History for Store {
+    fn states(&self) -> Result<Vec<TargetStateRow>, crate::history::HistoryError> {
+        Store::states(self).map_err(into_history_error)
+    }
+
+    fn find_target(
+        &self,
+        needle: &str,
+    ) -> Result<Option<TargetStateRow>, crate::history::HistoryError> {
+        Store::find_target(self, needle).map_err(into_history_error)
+    }
+
+    fn resolve_target(&self, needle: &str) -> Result<Option<String>, crate::history::HistoryError> {
+        Store::resolve_target(self, needle).map_err(into_history_error)
+    }
+
+    fn timeline(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<TargetTimeline>, crate::history::HistoryError> {
+        Store::timeline(self, from_ms, to_ms).map_err(into_history_error)
+    }
+
+    fn daily_drops(
+        &self,
+        target: Option<&str>,
+        from_ms: i64,
+        to_ms: i64,
+        now_ms: i64,
+    ) -> Result<Vec<DailyDrops>, crate::history::HistoryError> {
+        Store::daily_drops(self, target, from_ms, to_ms, now_ms).map_err(into_history_error)
+    }
+
+    fn faults(&self, filter: &FaultFilter) -> Result<Vec<Fault>, crate::history::HistoryError> {
+        Store::faults(self, filter).map_err(into_history_error)
+    }
+
+    fn count_faults(&self, filter: &FaultFilter) -> Result<i64, crate::history::HistoryError> {
+        Store::count_faults(self, filter).map_err(into_history_error)
+    }
+
+    fn recent_faults(&self, limit: u32) -> Result<Vec<Fault>, crate::history::HistoryError> {
+        Store::recent_faults(self, limit).map_err(into_history_error)
+    }
+
+    fn recent_faults_for(
+        &self,
+        target: &str,
+        limit: u32,
+    ) -> Result<Vec<Fault>, crate::history::HistoryError> {
+        Store::recent_faults_for(self, target, limit).map_err(into_history_error)
+    }
+
+    fn events(&self, filter: &EventFilter) -> Result<Vec<EventRow>, crate::history::HistoryError> {
+        Store::events(self, filter).map_err(into_history_error)
+    }
+
+    fn events_after(
+        &self,
+        target: Option<&str>,
+        after_id: i64,
+        limit: u32,
+    ) -> Result<Vec<ExportedEvent>, crate::history::HistoryError> {
+        Store::events_after(self, target, after_id, limit).map_err(into_history_error)
+    }
+}
+
+/// A store failure as the read contract states it: the reason, unchanged.
+fn into_history_error(error: StoreError) -> crate::history::HistoryError {
+    crate::history::HistoryError(error.to_string())
 }
 
 /// The event database of one process.
@@ -1193,6 +1469,117 @@ mod tests {
             cause: None,
             cause_message: None,
         }
+    }
+
+    /// The pure rule and the SQL reader must not drift: both are handed the same history
+    /// and must report the same faults, the same daily histogram and the same states.
+    #[test]
+    fn the_pure_helpers_agree_with_the_sql_reader() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+
+        // (target, previous, state, instant, cause). The walk is chronological, as the
+        // monitor writes it; `b` is already down before the window opens, the two events
+        // of `b` at the same instant must not close each other, and `a` ends still down.
+        let script: [(&str, TargetState, TargetState, i64, Option<&str>); 8] = [
+            (
+                "b",
+                TargetState::Unknown,
+                TargetState::Down,
+                DAY_MS - 1_000,
+                Some("unreachable"),
+            ),
+            (
+                "a",
+                TargetState::Unknown,
+                TargetState::Up,
+                DAY_MS + 1_000,
+                None,
+            ),
+            (
+                "a",
+                TargetState::Up,
+                TargetState::Down,
+                DAY_MS + 2_000,
+                Some("timeout"),
+            ),
+            (
+                "a",
+                TargetState::Down,
+                TargetState::Up,
+                DAY_MS + 3_000,
+                None,
+            ),
+            (
+                "b",
+                TargetState::Down,
+                TargetState::Up,
+                DAY_MS + 4_000,
+                None,
+            ),
+            (
+                "b",
+                TargetState::Up,
+                TargetState::Down,
+                DAY_MS + 5_000,
+                Some("refused"),
+            ),
+            (
+                "b",
+                TargetState::Up,
+                TargetState::Down,
+                DAY_MS + 5_000,
+                Some("refused"),
+            ),
+            (
+                "a",
+                TargetState::Up,
+                TargetState::Down,
+                2 * DAY_MS + 1_000,
+                Some("timeout"),
+            ),
+        ];
+
+        let mut history = Vec::new();
+        for (target, previous, state, at, cause) in script {
+            let mut record = event(target, previous, state, at);
+            record.cause = cause.map(str::to_string);
+            record.cause_message = cause.map(|code| format!("the {code} cause"));
+            record.rtt_us = (state == TargetState::Up).then_some(1_200);
+            record.interface = Some("en0".to_string());
+            record.label = Some(target.to_uppercase());
+            store.record_transition(&record).unwrap();
+            history.push(record);
+        }
+
+        let episodes = fault_episodes(&history);
+        let described =
+            |target: &str, start: i64, end: Option<i64>| (target.to_string(), start, end);
+        let mut from_pure: Vec<_> = episodes
+            .iter()
+            .map(|episode| described(&episode.target, episode.started_at_ms, episode.ended_at_ms))
+            .collect();
+        from_pure.reverse();
+        let from_sql: Vec<_> = store
+            .faults(&FaultFilter::default())
+            .unwrap()
+            .into_iter()
+            .map(|fault| described(&fault.target, fault.started_at_ms, fault.ended_at_ms))
+            .collect();
+        assert_eq!(from_pure, from_sql);
+        assert_eq!(from_sql.len(), 5, "the guard compares real faults");
+
+        let from_ms = DAY_MS;
+        let to_ms = DAY_MS + 2 * DAY_MS;
+        let now_ms = 2 * DAY_MS + 60_000;
+        let days = daily_drops_from(&episodes, from_ms, to_ms, now_ms);
+        assert_eq!(
+            days,
+            store.daily_drops(None, from_ms, to_ms, now_ms).unwrap()
+        );
+        assert!(days.iter().all(|day| day.drops > 0 && day.down_ms > 0));
+
+        assert_eq!(current_states(&history), store.states().unwrap());
     }
 
     #[test]

@@ -6,6 +6,7 @@
 
 pub mod cli;
 pub mod config;
+pub mod history;
 pub mod import;
 pub mod json;
 pub mod logging;
@@ -15,6 +16,7 @@ pub mod probe;
 pub mod query;
 pub mod reload;
 pub mod shutdown;
+pub mod sim;
 pub mod store;
 pub mod time;
 pub mod tls;

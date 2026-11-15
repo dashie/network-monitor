@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::store::{TargetState, TimelineSegment};
+use crate::history::{TargetState, TimelineSegment};
 
 /// Every continuous `up` stretch of the segments, as `(from_ms, to_ms)`.
 ///

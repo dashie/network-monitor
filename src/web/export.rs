@@ -17,7 +17,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use thiserror::Error;
 
-use crate::store::{ExportedEvent, Store, StoreError};
+use crate::history::{ExportedEvent, History, HistoryError};
 use crate::time::{format_rfc3339, now_ms};
 
 /// Events read from the database per page of the export.
@@ -26,7 +26,7 @@ const PAGE_SIZE: u32 = 1_000;
 #[derive(Debug, Error)]
 pub enum ExportError {
     #[error("{0}")]
-    Store(#[from] StoreError),
+    History(#[from] HistoryError),
     #[error("cannot write the export: {0}")]
     Io(#[from] io::Error),
 }
@@ -40,7 +40,7 @@ pub fn exported_at() -> i64 {
 /// target, which is what the detail page downloads.
 pub fn write_csv_gz<W: Write>(
     out: W,
-    store: &Store,
+    history: &dyn History,
     target: Option<&str>,
 ) -> Result<(), ExportError> {
     let mut gzip = GzEncoder::new(out, Compression::fast());
@@ -48,7 +48,7 @@ pub fn write_csv_gz<W: Write>(
 
     let mut after_id = i64::MIN;
     loop {
-        let page = store.events_after(target, after_id, PAGE_SIZE)?;
+        let page = history.events_after(target, after_id, PAGE_SIZE)?;
         if page.is_empty() {
             break;
         }
@@ -106,7 +106,8 @@ fn field(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{Event, Store, TargetState};
+    use crate::history::TargetState;
+    use crate::store::{Event, Store};
     use flate2::read::GzDecoder;
     use std::io::Read;
 

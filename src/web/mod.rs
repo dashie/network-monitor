@@ -13,7 +13,6 @@ pub mod templates;
 
 use std::io::{self, Read, Write};
 use std::net::{AddrParseError, SocketAddr, TcpListener, TcpStream};
-use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -23,9 +22,9 @@ use flate2::write::GzEncoder;
 use thiserror::Error;
 
 use crate::cli::Compression;
+use crate::history::{History, HistoryError, HistorySource};
 use crate::logging;
 use crate::shutdown::{self, Shutdown};
-use crate::store::{Store, StoreError};
 use crate::time::now_ms;
 
 use page::Window;
@@ -52,8 +51,8 @@ pub enum ServeError {
         address: String,
         source: std::io::Error,
     },
-    #[error("cannot read the event database: {0}")]
-    Store(#[from] StoreError),
+    #[error("{0}")]
+    History(#[from] HistoryError),
 }
 
 /// Bind the address, so a caller can fail before doing other work.
@@ -73,24 +72,24 @@ pub fn bind(listen: &str) -> Result<TcpListener, ServeError> {
 
 /// Bind the address and serve until shutdown.
 pub fn run(
-    database: &Path,
+    source: Arc<dyn HistorySource>,
     listen: &str,
     shutdown: &Shutdown,
     compression: Compression,
 ) -> Result<(), ServeError> {
     let listener = bind(listen)?;
-    serve(listener, database, shutdown, compression)
+    serve(listener, source, shutdown, compression)
 }
 
 /// Serve on an already bound listener, so a test can ask for port 0.
 pub fn serve(
     listener: TcpListener,
-    database: &Path,
+    source: Arc<dyn HistorySource>,
     shutdown: &Shutdown,
     compression: Compression,
 ) -> Result<(), ServeError> {
-    // Fail before the first request when the database is not usable.
-    Store::open_ro(database)?;
+    // Fail before the first request when the history is not readable.
+    source.open()?;
 
     let address = listener
         .local_addr()
@@ -106,12 +105,13 @@ pub fn serve(
     logging::info(
         None,
         &format!(
-            "web interface ready on http://{address}/ reading {}",
-            database.display()
+            "web interface ready on http://{address}/ {}",
+            source.describe()
         ),
     );
 
-    let database = Arc::new(database.to_path_buf());
+    // Every accepted connection runs on its own thread and outlives the call, so the
+    // source is shared rather than borrowed.
     let active = Arc::new(AtomicUsize::new(0));
     let mut workers = Vec::new();
 
@@ -122,11 +122,11 @@ pub fn serve(
                     drop(stream);
                     continue;
                 }
-                let database = Arc::clone(&database);
+                let source = Arc::clone(&source);
                 let active = Arc::clone(&active);
                 workers.push(thread::spawn(move || {
                     let _slot = Slot::enter(&active);
-                    handle(stream, &database, compression);
+                    handle(stream, source.as_ref(), compression);
                 }));
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -171,7 +171,7 @@ impl Drop for Slot {
     }
 }
 
-fn handle(mut stream: TcpStream, database: &Path, compression: Compression) {
+fn handle(mut stream: TcpStream, source: &dyn HistorySource, compression: Compression) {
     // macOS gives an accepted socket the non-blocking flag of the listener, so a write
     // larger than the socket buffer would fail with `EAGAIN` instead of waiting for the
     // reader. Every answer is written by a blocking socket with a timeout on both sides.
@@ -205,15 +205,7 @@ fn handle(mut stream: TcpStream, database: &Path, compression: Compression) {
     // The JSON API answers for itself: it owns its methods, its errors, and its CORS
     // headers, and it never falls back to the plain-text form of the pages.
     if path == "/api/v1" || path.starts_with("/api/v1/") {
-        api::handle(
-            &mut stream,
-            method,
-            path,
-            query,
-            database,
-            include_body,
-            gzip,
-        );
+        api::handle(&mut stream, method, path, query, source, include_body, gzip);
         return;
     }
 
@@ -233,7 +225,7 @@ fn handle(mut stream: TcpStream, database: &Path, compression: Compression) {
             let params = parse_query(query);
             let window = resolve_window(params.from, params.to, params.window, now_ms());
 
-            let store = match open_store(&mut stream, database, include_body) {
+            let store = match open_history(&mut stream, source, include_body) {
                 Some(store) => store,
                 None => return,
             };
@@ -278,7 +270,7 @@ fn handle(mut stream: TcpStream, database: &Path, compression: Compression) {
         }
         "/target" => {
             let params = parse_query(query);
-            let store = match open_store(&mut stream, database, include_body) {
+            let store = match open_history(&mut stream, source, include_body) {
                 Some(store) => store,
                 None => return,
             };
@@ -349,7 +341,7 @@ fn handle(mut stream: TcpStream, database: &Path, compression: Compression) {
         }
         "/export/faults.csv.gz" => {
             let params = parse_query(query);
-            let store = match open_store(&mut stream, database, include_body) {
+            let store = match open_history(&mut stream, source, include_body) {
                 Some(store) => store,
                 None => return,
             };
@@ -399,7 +391,7 @@ fn handle(mut stream: TcpStream, database: &Path, compression: Compression) {
                     stream: &mut stream,
                 };
                 let only = target.as_ref().map(|target| target.target.as_str());
-                export::write_csv_gz(&mut chunked, &store, only)
+                export::write_csv_gz(&mut chunked, store.as_ref(), only)
             };
             if let Err(error) = outcome {
                 logging::error(None, &format!("web: export failed: {error}"));
@@ -442,12 +434,16 @@ fn handle(mut stream: TcpStream, database: &Path, compression: Compression) {
     }
 }
 
-/// Open the database read-only, answering 503 when it is not usable.
-fn open_store(stream: &mut TcpStream, database: &Path, include_body: bool) -> Option<Store> {
-    match Store::open_ro(database) {
-        Ok(store) => Some(store),
+/// Open a history for this request, answering 503 when it cannot be read.
+fn open_history(
+    stream: &mut TcpStream,
+    source: &dyn HistorySource,
+    include_body: bool,
+) -> Option<Box<dyn History>> {
+    match source.open() {
+        Ok(history) => Some(history),
         Err(error) => {
-            logging::warn(None, &format!("web: cannot read the database: {error}"));
+            logging::warn(None, &format!("web: cannot read the history: {error}"));
             respond(
                 stream,
                 503,
@@ -460,7 +456,7 @@ fn open_store(stream: &mut TcpStream, database: &Path, include_body: bool) -> Op
     }
 }
 
-fn query_failed(stream: &mut TcpStream, error: &StoreError, include_body: bool) {
+fn query_failed(stream: &mut TcpStream, error: &HistoryError, include_body: bool) {
     logging::error(None, &format!("web: query failed: {error}"));
     respond(
         stream,

@@ -9,6 +9,7 @@ use thiserror::Error;
 
 use network_monitor::cli::{Cli, Command, Compression};
 use network_monitor::config::{self, Config, ConfigError};
+use network_monitor::history::HistorySource;
 use network_monitor::import::{self, ImportError};
 use network_monitor::logging::{self, Level};
 use network_monitor::monitor::{self, RunError};
@@ -16,7 +17,8 @@ use network_monitor::probe::interface;
 use network_monitor::probe::{Probe, Prober};
 use network_monitor::query::{self, QueryError};
 use network_monitor::shutdown;
-use network_monitor::store::{Store, StoreError};
+use network_monitor::sim::history::SimulatedSource;
+use network_monitor::store::{DatabaseSource, Store, StoreError};
 use network_monitor::time::format_rfc3339;
 use network_monitor::web::{self, ServeError};
 
@@ -85,7 +87,28 @@ fn run() -> Result<ExitCode, AppError> {
             log_initializing(source.as_deref());
             let stop = shutdown::Shutdown::new();
             shutdown::install();
-            web::run(&settings.database, &listen, &stop, compression)?;
+            let source: Arc<dyn HistorySource> =
+                Arc::new(DatabaseSource::new(settings.database.clone()));
+            web::run(source, &listen, &stop, compression)?;
+        }
+        Some(Command::Simulate {
+            listen,
+            history,
+            seed,
+            fault_rate,
+        }) => {
+            log_initializing(source.as_deref());
+            settings.require_targets()?;
+            log_simulation(&settings, seed, history.days(), fault_rate.per_day());
+            let stop = shutdown::Shutdown::new();
+            shutdown::install();
+            let simulated: Arc<dyn HistorySource> = Arc::new(SimulatedSource::new(
+                settings.targets.clone(),
+                seed,
+                history.days(),
+                fault_rate.per_day(),
+            ));
+            web::run(simulated, &listen, &stop, compression)?;
         }
         Some(Command::Import {
             source,
@@ -167,6 +190,24 @@ fn log_telegram(settings: &Config) {
     }
 }
 
+/// The one line a simulated run states about itself: what it shows, from when, and that
+/// nothing is probed and nothing is stored.
+fn log_simulation(settings: &Config, seed: u64, days: i64, fault_rate: f64) {
+    logging::info(
+        None,
+        &format!(
+            "simulating {} target(s) over the last {} day(s), seed {}, {} fault(s) per day: no probe runs and no database is read or written",
+            settings.targets.len(),
+            days,
+            seed,
+            fault_rate
+        ),
+    );
+    for target in &settings.targets {
+        logging::info(None, &format!("simulated target {}", target.key()));
+    }
+}
+
 fn log_targets(settings: &Config) {
     for target in &settings.targets {
         logging::info(None, &format!("initialized target {}", target.key()));
@@ -209,10 +250,11 @@ fn run_monitor(
                     .map(|bound| bound.to_string())
                     .unwrap_or(address),
             );
-            let database = settings.database.clone();
+            let source: Arc<dyn HistorySource> =
+                Arc::new(DatabaseSource::new(settings.database.clone()));
             let web_stop = stop.clone();
             Some(std::thread::spawn(move || {
-                if let Err(error) = web::serve(listener, &database, &web_stop, compression) {
+                if let Err(error) = web::serve(listener, source, &web_stop, compression) {
                     logging::error(None, &format!("web interface failed: {error}"));
                 }
             }))

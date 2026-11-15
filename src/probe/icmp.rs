@@ -10,7 +10,7 @@ use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
-use super::{Code, Details, Endpoint, Failure, Probe, ProbeError, Verdict};
+use super::{Code, Details, Endpoint, Failure, Probe, ProbeError, SimulatedEpisode, Verdict};
 
 /// Identifier carried in every echo request of this process.
 fn identifier() -> u16 {
@@ -545,6 +545,42 @@ fn exchange(
     sequence: u16,
 ) -> Result<Verdict, ProbeError> {
     platform::exchange(target, interface, timeout, identifier, sequence)
+}
+
+/// The simulated day of one ICMP target.
+///
+/// An echo request that gets no reply is the one thing an ICMP probe can report, so every
+/// fault of a simulated ICMP target states it. The latency of an answer spans a local link
+/// and a distant one.
+pub fn simulated_day(
+    endpoint: &Endpoint,
+    seed: u64,
+    day_start_ms: i64,
+    fault_rate: f64,
+) -> Vec<SimulatedEpisode> {
+    let Endpoint::Icmp { address } = endpoint else {
+        // The dispatcher chooses by method; this line cannot be reached from it.
+        return Vec::new();
+    };
+    let address = address.to_string();
+    super::simulated_episodes(
+        endpoint,
+        seed,
+        day_start_ms,
+        fault_rate,
+        "icmp",
+        |rng| rng.between(300, 40_000),
+        |_rng| {
+            Failure::new(
+                Code::IcmpNoReply,
+                &Details {
+                    address: Some(&address),
+                    timeout: Some(super::SIMULATED_TIMEOUT),
+                    ..Details::default()
+                },
+            )
+        },
+    )
 }
 
 #[cfg(test)]

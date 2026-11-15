@@ -6,7 +6,7 @@
 
 use std::fmt::Write as _;
 
-use crate::store::{DailyDrops, Fault, TargetState, TargetStateRow, TimelineSegment};
+use crate::history::{DailyDrops, Fault, TargetState, TargetStateRow, TimelineSegment};
 use crate::time::format_rfc3339;
 
 use super::encode;
@@ -328,7 +328,7 @@ fn run_hint_24h(count: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::TargetState;
+    use crate::history::TargetState;
 
     /// A fixed instant, so the age of the current `up` state is deterministic.
     const NOW: i64 = 10_000_000;
@@ -599,7 +599,7 @@ mod tests {
         );
         assert_eq!(rendered.matches("class=\"back-button\"").count(), 1);
         assert!(
-            rendered.contains("<a class=\"back-button\" href=\"/\">targets</a>"),
+            rendered.contains("<a class=\"back-button\" href=\"/\">HOME</a>"),
             "the way back is a link to the timeline, not a step into the history"
         );
     }
@@ -870,7 +870,7 @@ mod tests {
         let line = &rendered[crumbs..];
         let line = &line[..line.find("</p>").expect("the line closes")];
         assert!(
-            line.contains("<a class=\"back-button\" href=\"/\">targets</a>"),
+            line.contains("<a class=\"back-button\" href=\"/\">HOME</a>"),
             "the way back opens the line: {line}"
         );
         assert!(

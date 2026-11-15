@@ -15,13 +15,12 @@ mod targets;
 
 use std::io::{self, Write};
 use std::net::TcpStream;
-use std::path::Path;
 
 use flate2::write::GzEncoder;
 
+use crate::history::{History, HistoryError, HistorySource};
 use crate::json;
 use crate::logging;
-use crate::store::{Store, StoreError};
 use crate::time::{format_rfc3339, now_ms, parse_rfc3339};
 use crate::web::{begin_chunked, end_chunked, Chunked, VARY};
 
@@ -53,7 +52,7 @@ pub fn handle(
     method: &str,
     path: &str,
     query: &str,
-    database: &Path,
+    source: &dyn HistorySource,
     include_body: bool,
     gzip: bool,
 ) {
@@ -86,9 +85,9 @@ pub fn handle(
 
     match path {
         "/api/v1/openapi.json" => openapi::route(stream, reply),
-        "/api/v1/targets" => targets::route(stream, query, database, reply),
-        "/api/v1/faults" => faults::route(stream, query, database, reply),
-        "/api/v1/faults/daily" => daily::route(stream, query, database, reply),
+        "/api/v1/targets" => targets::route(stream, query, source, reply),
+        "/api/v1/faults" => faults::route(stream, query, source, reply),
+        "/api/v1/faults/daily" => daily::route(stream, query, source, reply),
         // The reference owns the prefix: the page and the two files it loads.
         _ if path.starts_with("/api/v1/docs") => docs::route(stream, path, reply),
         _ => fail(stream, 404, "NOT_FOUND", None, "no such route", reply),
@@ -213,7 +212,7 @@ impl<'a> Envelope<'a> {
 
 /// A failure that happened after the status line went out, so no status can state it.
 pub(super) enum StreamError {
-    Store(StoreError),
+    History(HistoryError),
     Write(io::Error),
 }
 
@@ -221,7 +220,7 @@ pub(super) enum StreamError {
 /// sees an incomplete body and the reason stays in the log.
 pub(super) fn truncated(error: StreamError) {
     match error {
-        StreamError::Store(error) => {
+        StreamError::History(error) => {
             logging::error(None, &format!("web: api: query failed mid-answer: {error}"))
         }
         StreamError::Write(error) => {
@@ -281,11 +280,15 @@ fn respond_options(stream: &mut TcpStream) {
 }
 
 /// Open the database read-only, answering 503 in the shape of the API when it is missing.
-pub(super) fn open(stream: &mut TcpStream, database: &Path, reply: Reply) -> Option<Store> {
-    match Store::open_ro(database) {
-        Ok(store) => Some(store),
+pub(super) fn open(
+    stream: &mut TcpStream,
+    source: &dyn HistorySource,
+    reply: Reply,
+) -> Option<Box<dyn History>> {
+    match source.open() {
+        Ok(history) => Some(history),
         Err(error) => {
-            logging::warn(None, &format!("web: cannot read the database: {error}"));
+            logging::warn(None, &format!("web: cannot read the history: {error}"));
             fail(
                 stream,
                 503,
@@ -300,9 +303,12 @@ pub(super) fn open(stream: &mut TcpStream, database: &Path, reply: Reply) -> Opt
 }
 
 /// The canonical key of the requested target, `None` when the request names none.
-pub(super) fn resolve(store: &Store, needle: Option<&str>) -> Result<Option<String>, Rejection> {
+pub(super) fn resolve(
+    history: &dyn History,
+    needle: Option<&str>,
+) -> Result<Option<String>, Rejection> {
     match needle {
-        Some(needle) if !needle.is_empty() => match store.resolve_target(needle) {
+        Some(needle) if !needle.is_empty() => match history.resolve_target(needle) {
             Ok(Some(key)) => Ok(Some(key)),
             Ok(None) => Err(Rejection::unknown_target(needle)),
             Err(error) => Err(Rejection::failed(&error)),
@@ -495,7 +501,7 @@ impl Rejection {
         }
     }
 
-    pub(super) fn failed(error: &StoreError) -> Self {
+    pub(super) fn failed(error: &HistoryError) -> Self {
         Rejection {
             status: 500,
             code: "QUERY_FAILED",

@@ -1,10 +1,9 @@
 //! `GET /api/v1/faults`: the faults, newest first, one page at a time.
 
 use std::net::TcpStream;
-use std::path::Path;
 
+use crate::history::{Fault, FaultFilter, History, HistorySource};
 use crate::json;
-use crate::store::{Fault, FaultFilter, Store};
 use crate::time::{format_rfc3339, now_ms};
 
 use super::{
@@ -13,15 +12,15 @@ use super::{
 };
 
 /// The faults, newest first, streamed one keyset page at a time.
-pub(super) fn route(stream: &mut TcpStream, query: &str, database: &Path, reply: Reply) {
+pub(super) fn route(stream: &mut TcpStream, query: &str, source: &dyn HistorySource, reply: Reply) {
     let params = match Params::parse(query, &["target", "from", "to", "limit", "offset"]) {
         Ok(params) => params,
         Err(rejection) => return reject(stream, rejection, reply),
     };
-    let Some(store) = open(stream, database, reply) else {
+    let Some(store) = open(stream, source, reply) else {
         return;
     };
-    let target = match resolve(&store, params.target.as_deref()) {
+    let target = match resolve(store.as_ref(), params.target.as_deref()) {
         Ok(target) => target,
         Err(rejection) => return reject(stream, rejection, reply),
     };
@@ -51,7 +50,7 @@ pub(super) fn route(stream: &mut TcpStream, query: &str, database: &Path, reply:
     };
 
     let mut envelope = Envelope::begin(stream, reply);
-    if let Err(error) = walk(&store, &params, target.as_deref(), &mut envelope) {
+    if let Err(error) = walk(store.as_ref(), &params, target.as_deref(), &mut envelope) {
         return truncated(error);
     }
     if let Err(error) = envelope.finish(&meta) {
@@ -66,7 +65,7 @@ const PAGE: u32 = 200;
 /// Write the requested faults, one keyset page at a time. The first read honours the
 /// `offset` of the request; every later one continues from the last row it saw.
 fn walk(
-    store: &Store,
+    history: &dyn History,
     params: &Params,
     target: Option<&str>,
     envelope: &mut Envelope,
@@ -75,7 +74,7 @@ fn walk(
     let mut written = 0;
     while written < params.limit {
         let want = (params.limit - written).min(PAGE);
-        let page = store
+        let page = history
             .faults(&FaultFilter {
                 target: target.map(str::to_string),
                 from_ms: params.from,
@@ -85,7 +84,7 @@ fn walk(
                 after_ms: after.0,
                 after_id: after.1,
             })
-            .map_err(StreamError::Store)?;
+            .map_err(StreamError::History)?;
         if page.is_empty() {
             break;
         }

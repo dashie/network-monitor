@@ -43,6 +43,7 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0029 | Render the API reference in the browser from the document the binary serves | accepted | 2026-11-15 | `/api/v1/docs` loads a vendored Swagger UI at `/api/v1/openapi.json`, embedded with `include_str!` so no network and no CDN are needed; `validatorUrl` off, `GET`/`HEAD` only; the footer of both pages links to it; a body larger than the socket buffer exposed and fixed a non-blocking accepted socket |
 | ADR-0030 | Hold the reload while a cause is open | accepted | 2026-11-15 | The `meta` moves into `noscript`; the script drives the 30 s countdown and holds it while a cause is open, and the open message states the hold and offers `Refresh now` |
 | ADR-0031 | Order the lanes by a priority the configuration states | accepted | 2026-11-15 | `priority` on a target, stored in `targets.priority` (schema 3) and written by the monitor on start, reload, and the event that creates the row; page and API order by `priority IS NULL, priority, target` |
+| ADR-0032 | Serve a deterministic simulated history from a dedicated `simulate` verb | accepted | 2026-11-15 | A `History`/`HistorySource` seam the page, the API and the export read through; `Store` and a generator that replays whole UTC days from `(seed, key, day)`; no probe, no database, no state kept between requests; `--listen` required, `--history` 1–3660 days, `--seed` |
 
 ## Records
 
@@ -1404,3 +1405,98 @@ Two constraints shape any answer:
   of a target — label and interface — and one more column needs no second table, no join, and no
   second notion of "a target".
 - Renumber on write so the numbers are dense: rejected, the number is the operator's, not ours.
+
+## ADR-0032 — Serve a deterministic simulated history from a dedicated `simulate` verb
+
+**Status:** accepted · **Date:** 2026-11-15
+
+**Amended:** 2026-11-15 — how busy the board is, is an option: `--fault-rate` states the faults a
+day of a target that fails now and then holds, and the life of a target scales it. The shape of
+the generator, the determinism and the seam are unchanged.
+
+### Context
+
+Every part of the page — the lanes, the fault table, the daily histogram, the detail page over
+360 days, the export — needs a history to show, and until now the only way to get one was to run
+a monitor against real targets for real days and wait. Developing the page, demonstrating a
+deployment, or reproducing a report about a fault therefore needed either a live network or a
+database recorded earlier, and neither shows the window a change affects.
+
+What the simulated mode must be:
+
+- **Opt-in and side-effect free.** No probe, no database read, no database write, nothing kept
+  between requests: the same command must be safe to run on a laptop and next to a deployment.
+- **Deterministic.** Two runs of the same command must show the same history, down to the
+  timestamp of a fault, so a page can be compared, a screenshot explained, and a defect
+  reproduced.
+- **Bounded.** A request may ask for 360 days; the work must stay proportional to the window
+  asked for, not to the whole simulated past.
+
+The obvious implementation — generate the history once, hold it in memory, serve it — fails the
+last two: it makes determinism depend on when the request arrives, and it makes memory
+proportional to the longest window anybody can ask for.
+
+### Decision
+
+1. **A read seam.** `history::History` states the eleven questions the page, the API and the
+   export ask — state, timeline, histogram, faults with their paging, events, export pages — and
+   `history::HistorySource` hands out one `History` per request. `store::Store` implements both
+   over SQLite (so `serve` and `monitor --listen` read the same seam they always effectively
+   read), and `sim::SimulatedSource` implements them over the generator. The web layer names
+   only the seam, which is what makes the two modes the same page.
+2. **A verb, not a flag.** `network-monitor simulate --listen … --history 30d --seed 0` is a
+   separate command, because it neither probes nor records and because a flag would have to
+   change the meaning of two existing commands at once.
+3. **Determinism by construction, not by memory.** A target's day is a pure function of
+   `(seed, target key, UTC day)`: which kind of life it has, when its faults start, how long they
+   last, what their cause is, how long an answer takes. Nothing is stored; a request regenerates
+   the days of the window it asks for. `sim::rng` is a hand-written `splitmix64` seeded by an
+   FNV-1a mix of that tuple, so a draw never depends on the order of previous draws and no crate
+   is added.
+4. **Each method contributes its own failures and latencies.** `probe::{icmp,tcp,dns,http}`
+   each expose `simulated_day`, the simulated half of the probe contract, so a simulated failure
+   states a code and a message of the vocabulary that method already owns. The generator itself
+   knows nothing about probes.
+5. **One day is self-contained, and a fault may cross midnight.** A day is generated with the day
+   before it, so the day that begins inside a fault opens with that fault; a fault is one outage
+   and not two.
+6. **The past is whole UTC days.** `--history 30d` covers the thirty days that end today;
+   nothing exists before them and nothing after now. A past that started at the instant the
+   request arrived would move with the clock and two requests a second apart would disagree.
+7. **Aggregation is shared with the SQL path.** Faults, the daily histogram and the current state
+   are computed by pure functions in `store` over a list of events, and a drift guard feeds the
+   same events to both implementations and asserts they agree.
+8. **The mode states itself in the log and nowhere else.** One `INFO` line names the mode, the
+   number of targets, the window and the seed, and says that no probe runs and no database is
+   used. The page is the page: no banner, no badge, no extra API field.
+
+### Consequences
+
+- The page, the API and the export are exercised against 360 days of plausible history in
+  milliseconds, with no network and no fixture database.
+- The seeded history is the same on every platform and in every process, so an integration test
+  can compare two runs byte for byte (the two answers that state a clock — `generatedAt` and the
+  age of a state — are excluded, and the test says so).
+- The realism of the simulation is a set of constants in `sim` (how often a target fails, how long
+  a fault lasts, the latency ranges), not a shape to be redesigned when it is tuned.
+- `web` no longer names the database module; `History` is the only way to read a history, and a
+  third source would be a new implementation of one trait.
+- The public interface grows by one command and two options; no file format, no schema and no
+  configuration key changes, so the mode can be removed by deleting a directory.
+- The simulated board has the same absence of authentication as the real one, and the log line is
+  the only thing that says which one is running.
+
+### Alternatives considered
+
+- **Two global flags (`--simulate`, `--seed`)** on `monitor` and `serve`: rejected by the
+  operator, and rightly — it makes two commands mean something else when a flag is present,
+  including "do not write the database you were told to write".
+- **Generate once and keep it in memory**: rejected, it forfeits determinism across processes and
+  makes memory grow with the requested window.
+- **A fixture SQLite database checked into the repository**: rejected, it ages, it cannot cover
+  360 days in a reasonable size, and it cannot be re-seeded.
+- **A `--seed`-driven `FakeProbe` with a real database**: rejected, it keeps a probe loop and a
+  file, so a simulation would need minutes to produce a week of history and would leave state
+  behind.
+- **Adding a crate for the randomness (`rand`)**: rejected, `splitmix64` is a dozen lines and the
+  determinism the mode needs is exactly the part a general crate would leave to its own versioning.

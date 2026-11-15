@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use crate::store::{Fault, TargetState, TargetTimeline, TimelineSegment};
+use crate::history::{Fault, TargetState, TargetTimeline, TimelineSegment};
 use crate::time::format_rfc3339;
 
 use super::encode;
@@ -585,7 +585,7 @@ mod tests {
     fn no_streaks() -> HashMap<String, i64> {
         HashMap::new()
     }
-    use crate::store::TimelineSegment;
+    use crate::history::TimelineSegment;
 
     fn timeline() -> TargetTimeline {
         TargetTimeline {

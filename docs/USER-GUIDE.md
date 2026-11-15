@@ -129,7 +129,7 @@ parse is rejected with a warning and the running configuration stays in effect. 
 |---|---|---|
 | `interval_ms` | `5000` | Pause after a probe, per target |
 | `timeout_ms` | `2000` | Maximum wait for an answer, per probe |
-| `database` | `./network-monitor.db` | SQLite file; keep it on a local filesystem |
+| `database` | `./network-monitor.db` | SQLite file; keep it on a local filesystem. Ignored by `simulate`, which reads and writes no database |
 | `retention_days` | `0` | Delete events older than this; `0` keeps everything |
 
 ### Common target keys
@@ -338,6 +338,7 @@ are listed in [Troubleshooting](#troubleshooting), later in this guide.
 |---|---|
 | `monitor [--listen <addr>]` | Probe the targets and record transitions; optionally serve the page |
 | `serve [--listen <addr>]` | Serve the page alone, read-only, without probing (default `127.0.0.1:8642`) |
+| `simulate --listen <addr> [--history 30d] [--seed 0] [--fault-rate 3]` | Serve the page over a generated history, with no probe and no database |
 | `query state [--format table\|json]` | Current state of every target |
 | `query events [target] [--since 24h] [--limit 100] [--format json]` | Recorded transitions, newest first |
 | `import <path\|http://url\|-> [--replace-window]` | Restore a history exported from the page |
@@ -345,6 +346,46 @@ are listed in [Troubleshooting](#troubleshooting), later in this guide.
 `query events <target>` accepts the label, the full key, or a bare ICMP address. Diagnostics go
 to stderr as `<timestamp> <LEVEL> [<target>] <message>`; data goes to stdout, so a query can be
 piped.
+
+### Simulated mode
+
+`simulate` serves the same page, the same REST API and the same export over a history that is
+generated instead of recorded. It is meant for looking at the page, demonstrating a deployment,
+or reviewing a change without waiting days for real data, and it is safe to run anywhere: it
+runs no probe, opens no database, and writes no file.
+
+```bash
+network-monitor simulate --listen 127.0.0.1:8660 --history 30d --seed 0
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--listen <address:port>` | required | Address and port to serve on; nothing is served without it |
+| `--history <days>` | `30d` | How many days of past to present, written `30d` or `30`, from `1` to `3660` |
+| `--seed <number>` | `0` | Which history to generate: the same seed always shows the same one, another seed shows another |
+| `--fault-rate <faults>` | `3` | How many faults a day a target that fails now and then holds, `0` to `1000`; `0` makes a board where nothing goes down |
+
+The targets are the ones in the configuration (or on `--target`), and a configuration without
+targets is refused with the usual message. Everything else the tool knows about them — the
+method, the label, the interface, the priority — shapes the generated board: each target gets a
+life from the seed, and most targets are up nearly always while some fail a few times a day and
+a few flap. The past is whole UTC days that end today; nothing exists before its first day, and
+nothing exists after now. A fault may cross midnight and stays one fault.
+
+`--fault-rate` is the knob for how busy the board is. Its number is the faults a day of a target
+that fails now and then, and it is measured against that target: one target in five never fails
+whatever the number, and one in ten flaps and gets about eight times as many faults, drawn short
+so they fit in the day. `--fault-rate 3` (the default) is a board where something happens every
+few hours; `0` is a board where nothing ever goes down, useful when you are working on the
+layout; `20` is a board in trouble.
+
+Two runs of the same command show the same faults, with the same causes, durations and
+latencies, on any machine. `--database` and the `database` key of the file are accepted and
+ignored, the Telegram channel is not started, and the startup log states which mode is running:
+
+```
+INFO  simulating 7 target(s) over the last 30 day(s), seed 0, 3 fault(s) per day: no probe runs and no database is read or written
+```
 
 ## The web page
 
@@ -372,7 +413,7 @@ is showing, on the left of the line, and carries the control that changes it, on
 - `/target?target=<key>&days=30d` — one target for 30, 60, 90, 180, or 360 days: a bar per day,
   the last 10 faults of that target in the same table as the timeline page, and a per-day table.
   The toolbar states the page on one line, the parts separated by a dot:
-  `targets • <label> (<address>)`. `targets` is the way back to the list page — a link to `/`,
+  `HOME • <label> (<address>)`. `HOME` is the way back to the list page — a link to `/`,
   whatever page you came from —, and the label with the address in parentheses is the target,
   in bold. Under the toolbar, four widgets: the first states the state of the target — its word
   and how long it has held, white on a tile of the colour the chart gives that state —, and the

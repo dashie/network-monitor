@@ -1,10 +1,9 @@
 //! `GET /api/v1/targets`: every target, ordered by key.
 
 use std::net::TcpStream;
-use std::path::Path;
 
+use crate::history::{HistorySource, TargetStateRow};
 use crate::json;
-use crate::store::TargetStateRow;
 use crate::time::{format_rfc3339, now_ms};
 use crate::web::page;
 
@@ -13,12 +12,12 @@ use super::{
 };
 
 /// Every target, ordered by key, streamed one record at a time.
-pub(super) fn route(stream: &mut TcpStream, query: &str, database: &Path, reply: Reply) {
+pub(super) fn route(stream: &mut TcpStream, query: &str, source: &dyn HistorySource, reply: Reply) {
     let params = match Params::parse(query, &["limit", "offset"]) {
         Ok(params) => params,
         Err(rejection) => return reject(stream, rejection, reply),
     };
-    let Some(store) = open(stream, database, reply) else {
+    let Some(store) = open(stream, source, reply) else {
         return;
     };
     let states = match store.states() {

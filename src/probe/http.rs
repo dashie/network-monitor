@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConnection, StreamOwned};
 
-use super::{Code, Details, Endpoint, Failure, Probe, ProbeError, Scheme, Verdict};
+use super::{
+    Code, Details, Endpoint, Failure, Probe, ProbeError, Scheme, SimulatedEpisode, Verdict,
+};
 
 /// The largest response head accepted, so a chatty endpoint cannot grow the buffer.
 const MAX_HEAD: usize = 8 * 1024;
@@ -90,6 +92,74 @@ pub fn parse_url(text: &str) -> Result<UrlParts, String> {
         port,
         target,
     })
+}
+
+/// The simulated day of one HTTP target.
+///
+/// The endpoint answers outside the expectation, stops answering in HTTP at all, or — on
+/// HTTPS — stops completing the handshake. The status an error states is one a real
+/// endpoint reports when it is in trouble.
+pub fn simulated_day(
+    endpoint: &Endpoint,
+    seed: u64,
+    day_start_ms: i64,
+    fault_rate: f64,
+) -> Vec<SimulatedEpisode> {
+    let Endpoint::Http {
+        scheme,
+        host,
+        port,
+        expect,
+        ..
+    } = endpoint
+    else {
+        // The dispatcher chooses by method; this line cannot be reached from it.
+        return Vec::new();
+    };
+    let url = endpoint.to_string();
+    let expected = expect.specs().join(", ");
+    let host = host.clone();
+    let port = *port;
+    let tls = *scheme == Scheme::Https;
+    super::simulated_episodes(
+        endpoint,
+        seed,
+        day_start_ms,
+        fault_rate,
+        "http",
+        |rng| rng.between(10_000, 500_000),
+        |rng| {
+            const STATUSES: [u16; 4] = [500, 502, 503, 504];
+            match rng.below(if tls { 10 } else { 8 }) {
+                0..=4 => Failure::new(
+                    Code::HttpUnexpectedStatus,
+                    &Details {
+                        url: Some(&url),
+                        status: Some(STATUSES[rng.below(STATUSES.len() as u64) as usize]),
+                        expect: Some(&expected),
+                        ..Details::default()
+                    },
+                ),
+                5..=6 if tls => Failure::new(
+                    Code::HttpTls,
+                    &Details {
+                        host: Some(&host),
+                        port: Some(port),
+                        reason: Some("the handshake was refused"),
+                        ..Details::default()
+                    },
+                ),
+                _ => Failure::new(
+                    Code::HttpMalformed,
+                    &Details {
+                        url: Some(&url),
+                        reason: Some("the answer was not an HTTP answer"),
+                        ..Details::default()
+                    },
+                ),
+            }
+        },
+    )
 }
 
 #[cfg(test)]

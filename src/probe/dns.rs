@@ -10,7 +10,9 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::{Duration, Instant};
 
-use super::{Code, Details, Endpoint, Failure, Probe, ProbeError, RecordType, Verdict};
+use super::{
+    Code, Details, Endpoint, Failure, Probe, ProbeError, RecordType, SimulatedEpisode, Verdict,
+};
 
 /// The largest response accepted, so a hostile server cannot grow the buffer.
 const MAX_RESPONSE: usize = 4_096;
@@ -413,6 +415,53 @@ impl fmt::Display for Response {
             Response::Refused(reason) | Response::Unusable(reason) => formatter.write_str(reason),
         }
     }
+}
+
+/// The simulated day of one DNS target.
+///
+/// The name stops existing, stops having the record that was asked for, or the server stops
+/// answering. A target without a resolver of its own is answered by the system resolver,
+/// which is what the message says.
+pub fn simulated_day(
+    endpoint: &Endpoint,
+    seed: u64,
+    day_start_ms: i64,
+    fault_rate: f64,
+) -> Vec<SimulatedEpisode> {
+    let Endpoint::Dns { name, resolver, .. } = endpoint else {
+        // The dispatcher chooses by method; this line cannot be reached from it.
+        return Vec::new();
+    };
+    let name = name.clone();
+    let server = resolver
+        .map(|resolver| resolver.to_string())
+        .unwrap_or_else(|| "the system resolver".to_string());
+    super::simulated_episodes(
+        endpoint,
+        seed,
+        day_start_ms,
+        fault_rate,
+        "dns",
+        |rng| rng.between(500, 50_000),
+        |rng| {
+            let stated = Details {
+                name: Some(&name),
+                server: Some(&server),
+                ..Details::default()
+            };
+            match rng.below(10) {
+                0..=5 => Failure::new(Code::DnsNxDomain, &stated),
+                6..=8 => Failure::new(Code::DnsNoRecord, &stated),
+                _ => Failure::new(
+                    Code::DnsTimeout,
+                    &Details {
+                        timeout: Some(super::SIMULATED_TIMEOUT),
+                        ..stated
+                    },
+                ),
+            }
+        },
+    )
 }
 
 #[cfg(test)]

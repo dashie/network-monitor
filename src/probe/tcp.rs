@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use socket2::{Domain, Protocol, Socket, Type};
 
 use super::interface as net_interface;
-use super::{Code, Details, Endpoint, Failure, Probe, ProbeError, Verdict};
+use super::{Code, Details, Endpoint, Failure, Probe, ProbeError, SimulatedEpisode, Verdict};
 
 /// Opens one TCP connection per probe cycle.
 #[derive(Default)]
@@ -183,6 +183,50 @@ fn outcome(
             ..Details::default()
         },
     )))
+}
+
+/// The simulated day of one TCP target.
+///
+/// The three answers a handshake gives when it does not complete: the port is closed, the
+/// peer is not there, or it drops the connection once it has been made.
+pub fn simulated_day(
+    endpoint: &Endpoint,
+    seed: u64,
+    day_start_ms: i64,
+    fault_rate: f64,
+) -> Vec<SimulatedEpisode> {
+    let Endpoint::Tcp { host, port } = endpoint else {
+        // The dispatcher chooses by method; this line cannot be reached from it.
+        return Vec::new();
+    };
+    let host = host.clone();
+    let port = *port;
+    super::simulated_episodes(
+        endpoint,
+        seed,
+        day_start_ms,
+        fault_rate,
+        "tcp",
+        |rng| rng.between(1_000, 80_000),
+        |rng| {
+            let stated = Details {
+                host: Some(&host),
+                port: Some(port),
+                ..Details::default()
+            };
+            match rng.below(10) {
+                0..=5 => Failure::new(Code::TcpRefused, &stated),
+                6..=8 => Failure::new(
+                    Code::TcpTimeout,
+                    &Details {
+                        timeout: Some(super::SIMULATED_TIMEOUT),
+                        ..stated
+                    },
+                ),
+                _ => Failure::new(Code::TcpReset, &stated),
+            }
+        },
+    )
 }
 
 #[cfg(test)]

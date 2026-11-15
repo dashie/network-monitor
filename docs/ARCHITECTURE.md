@@ -1,12 +1,13 @@
 # Architecture — network-monitor
 
-This document follows [arc42](https://arc42.org) and uses C4 diagrams. Product intent
-lives in [PRODUCT.md](./PRODUCT.md); decisions and their rationale live in
-[ADR.md](./ADR.md).
+This document follows [arc42](https://arc42.org) and uses C4 diagrams, written in
+[PlantUML](https://plantuml.com) (`@startuml` blocks in `plantuml` fences, rendered with
+`plantuml docs/ARCHITECTURE.md`). Product intent lives in [PRODUCT.md](./PRODUCT.md);
+decisions and their rationale live in [ADR.md](./ADR.md).
 
 ## 1. Introduction and goals
 
-`network-monitor` is a single-process Rust command-line program. One invocation is either a long-running `monitor` that owns the ICMP probing loop and the SQLite writer, or a short-lived `query` that reads the same database concurrently in WAL mode.
+`network-monitor` is a single-process Rust command-line program. One invocation is either a long-running `monitor` that owns the probing loop and the SQLite writer, or one of the short-lived commands — `serve` and `simulate` that read a history and publish it, `query` and `import` that read or restore the database.
 
 Top quality goals, in order:
 
@@ -24,32 +25,35 @@ Top quality goals, in order:
 - **Platform interface binding.** `SO_BINDTODEVICE` on Linux, `IP_BOUND_IF` on macOS, `IP_UNICAST_IF` on Windows (by numeric interface index).
 - **Filesystem.** The SQLite file must live on a local filesystem; WAL on SMB or NFS shares is not supported and is documented as such.
 - **Synchronous design.** No async runtime, no daemon framework, no plugin system. Threads are used per target, and that is the whole concurrency model.
-- **No listening socket.** The process opens no port; the only integration surface is the SQLite file and the query command.
+- **No listening socket unless asked.** The process opens a port only when `--listen` is given (INV-11); otherwise its only integration surface is the event database and the query command.
 - **One optional egress.** Outbound traffic is the probes plus, only when the `[telegram]` section of the configuration exists, one HTTPS connection to `api.telegram.org`. There is no proxy, no second host, and no way to disable certificate verification; without the section the process makes no connection other than its probes.
 - **Language of the repository.** English only, for every artefact.
 
 ## 3. Context and scope
 
-```mermaid
-C4Context
-    title System context — network-monitor
+```plantuml
+@startuml
+!include <C4/C4_Context>
 
-    Person(operator, "Operator", "Writes the TOML configuration, starts the monitor, reads the history")
-    System(monitor, "network-monitor", "Probes targets with ICMP echo requests and records state transitions")
+title System context — network-monitor
 
-    System_Ext(hosts, "Monitored hosts", "IP endpoints that answer, or do not answer, ICMP echo requests")
-    System_Ext(os, "Operating system", "Provides raw ICMP sockets, the routing table, and interface binding")
-    System_Ext(runtime, "Container runtime", "Runs the image on a NAS or server, granting NET_RAW")
-    System_Ext(consumer, "Query consumer", "Reads the event database through the query command or any SQLite client")
-    System_Ext(telegram, "Telegram Bot API", "Receives one message per incident when the channel is enabled")
+Person(operator, "Operator", "Writes the TOML configuration, starts the monitor, reads the history")
+System(monitor, "network-monitor", "Probes targets with ICMP echo requests and records state transitions")
 
-    Rel(operator, monitor, "Runs and configures", "CLI + TOML")
-    Rel(operator, consumer, "Runs queries", "CLI")
-    Rel(runtime, monitor, "Launches", "Docker")
-    Rel(monitor, os, "Opens raw sockets, binds an interface", "syscalls")
-    Rel(monitor, hosts, "Sends echo requests, receives replies", "ICMP")
-    Rel(monitor, telegram, "Posts a state change, only with a [telegram] section", "HTTPS")
-    Rel(monitor, consumer, "Exposes the event database", "SQLite WAL")
+System_Ext(hosts, "Monitored hosts", "IP endpoints that answer, or do not answer, ICMP echo requests")
+System_Ext(os, "Operating system", "Provides raw ICMP sockets, the routing table, and interface binding")
+System_Ext(runtime, "Container runtime", "Runs the image on a NAS or server, granting NET_RAW")
+System_Ext(consumer, "Query consumer", "Reads the event database through the query command or any SQLite client")
+System_Ext(telegram, "Telegram Bot API", "Receives one message per incident when the channel is enabled")
+
+Rel(operator, monitor, "Runs and configures", "CLI + TOML")
+Rel(operator, consumer, "Runs queries", "CLI")
+Rel(runtime, monitor, "Launches", "Docker")
+Rel(monitor, os, "Opens raw sockets, binds an interface", "syscalls")
+Rel(monitor, hosts, "Sends echo requests, receives replies", "ICMP")
+Rel(monitor, telegram, "Posts a state change, only with a [telegram] section", "HTTPS")
+Rel(monitor, consumer, "Exposes the event database", "SQLite WAL")
+@enduml
 ```
 
 | External element | Input to the system | Output from the system |
@@ -74,6 +78,8 @@ Trust boundaries: the database file is written only by the `monitor` process and
 - **WAL for concurrent reads.** `journal_mode = WAL` with `synchronous = NORMAL` and a 5 s `busy_timeout` lets the query process read while the monitor writes.
 - **Supervised reload.** The supervisor owns the set of workers and compares the configuration file content once per second. A valid change restarts the workers with the new target list, interval, and timeout, keeps the database it already opened, and logs one `INFO` line.
 - **Optional push channel off the probe path.** `notify` owns the decision and the delivery of a message. A worker hands it a recorded transition and moves on; a dedicated thread applies the per-target policy — `down` at once, `up` only after a stable `up` window — and delivers over Telegram with a bounded retry. The monitor knows only the `Notifier` contract, so recording never waits for a send and a failed send never changes a stored event.
+- **One read seam, two sources.** `history` states the questions the page, the API and the export ask — state, timeline, histogram, faults, events, export pages — and `HistorySource` hands out one `History` per request. `store` answers it over SQLite, `sim` answers it over generated days, and `web` names neither: which mode is running is a decision taken once, in `main`, when the source is built.
+- **Determinism instead of memory.** `simulate` keeps nothing. A target's UTC day is a pure function of `(seed, target key, day)`, so the same command replays the same history and a request costs only the days its window covers. Faults, the histogram and the current state are computed by the same pure helpers the SQL path is checked against, so the two sources cannot drift.
 - **Read-only page generated server-side.** `web` answers `/` with HTML and SVG built in Rust from the same timeline query the CLI uses, and `/target` with one bar per day and the same days in a table for a single target. One small HTTP/1.1 loop, no framework, no client-side chart library and no client-side chart state: the page reloads itself every 30 s — the `meta` serves a browser without the script, the script drives the countdown otherwise and holds it while a cause is open, stating the hold in a banner across the top of the page — and asks only for the page, its stylesheet, and its script. The same code serves while the monitor runs (`monitor --listen`) and without probing (`serve`), so a page and the recording share one process when both are wanted.
 
 <!-- skill:block:arch-principles section="## 4. Solution strategy" -->
@@ -96,22 +102,25 @@ Fixed principles that constrain every design decision and every change:
 
 ## 5. Building block view
 
-```mermaid
-C4Container
-    title Containers — network-monitor
+```plantuml
+@startuml
+!include <C4/C4_Container>
 
-    Person(operator, "Operator", "Configures and queries the monitor")
+title Containers — network-monitor
 
-    Container(cli, "network-monitor executable", "Rust, static binary", "Parses configuration, probes targets, writes transitions, renders queries")
-    ContainerDb(db, "Event database", "SQLite, WAL", "Append-only transition events and the current state of each target")
+Person(operator, "Operator", "Configures and queries the monitor")
 
-    System_Ext(os, "Operating system", "Raw ICMP sockets and interface binding")
-    System_Ext(hosts, "Monitored hosts", "ICMP echo responders")
+Container(cli, "network-monitor executable", "Rust, static binary", "Parses configuration, probes targets, writes transitions, renders queries")
+ContainerDb(db, "Event database", "SQLite, WAL", "Append-only transition events and the current state of each target")
 
-    Rel(operator, cli, "Runs monitor and query", "CLI")
-    Rel(cli, db, "Reads and writes", "SQLite file")
-    Rel(cli, os, "Opens a raw socket, binds the interface", "syscalls")
-    Rel(cli, hosts, "Sends echo requests", "ICMP")
+System_Ext(os, "Operating system", "Raw ICMP sockets and interface binding")
+System_Ext(hosts, "Monitored hosts", "ICMP echo responders")
+
+Rel(operator, cli, "Runs monitor and query", "CLI")
+Rel(cli, db, "Reads and writes", "SQLite file")
+Rel(cli, os, "Opens a raw socket, binds the interface", "syscalls")
+Rel(cli, hosts, "Sends echo requests", "ICMP")
+@enduml
 ```
 
 | Component | Responsibility | Published contract |
@@ -125,8 +134,10 @@ C4Container
 | `monitor` | Supervise one interval loop per target, decide whether a transition occurred, reload the configuration file, dispatch transitions to the store | `run(config, prober, store, shutdown, reload)`, `run_with_notifier(…)` |
 | `notify` | Decide which state changes are reported, hold the stable `up` window, and deliver the messages off the probe path | `Notifier`, `Notification`, `Engine`, `start`, `start_with`, `deliver` |
 | `reload` | Compare the configuration file with the last accepted content and report a change | `Watcher`, `Change`, `POLL_INTERVAL` |
+| `history` | State what the read surface asks of a recorded past, and where a request gets it from | `History` trait, `HistorySource` trait, `HistoryError` |
+| `sim` | Generate a deterministic past from the configuration, the seed and the calendar, and serve it through the read contract | `SimulatedSource`, `SimulatedHistory`, `life`, `day`, `rng` |
 | `web` | Serve the read-only timeline, the per-target detail page, and a health check | `bind`, `serve`, `page`, `target_page` |
-| `store` | Own the schema, migrations, the event write transaction, retention, and the read queries | `Store`, `Event`, `TargetState`, `Fault`, `ExportedEvent`, `StoreError` |
+| `store` | Own the schema, migrations, the event write transaction, retention, the read queries, and the pure aggregation rules both implementations share | `Store`, `DatabaseSource`, `Event`, `TargetState`, `Fault`, `ExportedEvent`, `StoreError`, `fault_episodes`, `daily_drops_from`, `current_states` |
 | `query` | Read current state and event history, apply filters, render a table or JSON | `QueryFilter`, `Renderer` |
 | `import` | Restore a history from the exported CSV, read from a path, an `http://` URL, or stdin | `run`, `parse_source`, `Report`, `ImportError` |
 
@@ -176,20 +187,33 @@ C4Container
 - **Output:** `Change::Content(bytes)` when the file differs from the last accepted content, `Change::ReadError` once when it cannot be read.
 - **Guarantees:** the initial content is never reported as a change; identical content is not a change; a missing or unreadable file is reported once, not on every poll.
 
+### `history`
+
+- **Input:** the window, the filter and the target a page, an API route or an export asks about.
+- **Output:** the domain rows of the read surface — `TargetStateRow`, `TargetTimeline`, `DailyDrops`, `Fault`, `EventRow`, `ExportedEvent` — or a `HistoryError` stating why the answer cannot be built.
+- **Guarantees:** the surface never names a database. `HistorySource` lives for the process and hands out one `History` per request, which keeps a read transaction short and lets test doubles substitute a source with no file; the methods mirror the questions the surface asks and not the shape of a table, so a source is free to hold rows, generate them, or fetch them elsewhere. The types of the contract are re-exported here, so a consumer of the page depends on this module and on nothing behind it.
+
+### `sim`
+
+- **Input:** the configured targets, the seed, the number of days of past, the fault rate, and the window of the request.
+- **Output:** a `History` that answers every read method over a history generated on demand; one `INFO` line at startup stating the mode, the target count, the window, the seed and that no probe and no database are involved.
+- **Guarantees:** no probe runs and no file is opened, read or written; nothing is kept between requests, so the process is exactly as large as a real `serve`; **an answer costs what it returns** — the pages, a page of faults, the histogram, one page of the export each read the days their answer covers and stop, so ten years at a thousand faults a day costs a page and a few milliseconds, and the one answer that is a count over the whole window it was given stays a scan of arithmetic with no event materialised; a day is generated together with the day before it, so a fault that crosses midnight is one outage and the day that begins inside it opens with it; a day covers itself with no gap, no overlap and no two consecutive stretches in the same state (INV-1); the past is whole UTC days ending today and nothing exists before its first day or after now; the same `(seed, target key, UTC day)` replays the same stretches, the same causes and the same latencies on every platform and in every process. The generator knows nothing about probes: each method module supplies the failures and the latencies of its own vocabulary. How busy the board is, is one number — `--fault-rate` — which the life of a target scales: a target drawn as one that never fails holds nothing, a typical one holds the rate, and one that flaps holds about eight times as many in shorter faults.
+
 ### `web`
 
-- **Input:** the database path and an optional `window`/`from`/`to`/`target` query string; a bound listener in tests.
-- **Output:** the timeline page with one lane per target, the lanes ordered by the `priority` the configuration gave them (lowest first, then those without one by key) — drops, the average `up` run with its spread, the longest `up` run of the window, and how long the target has been up without a drop, in that order, the statistics computed by `web::stats` from the same segments that draw the bands, the streak from the age of the current state in the `targets` table — plus the last 10 faults, each stating its target as a label over its key, the start, the code of its cause and, last, the duration — the four columns keeping a stated share of the width —, with the standard message underneath the row that opens it; the detail page of one target — opened with the identity block of the application, itself a link to `/` on every page, the reference included, its toolbar stating the page on one line: the way back to the timeline — the word `targets`, a link to `/`, not a step into the browser history —, the label with the address in parentheses in bold, the parts separated by a dot —, the row of four widgets under that line opening with the current state and how long it has held, white on a filled tile of that state's colour — the only widget filled —, then the faults, the down time, and the average `up` run of the period, a period selector for the last 30, 60, 90, 180, or 360 days (30 when the query names none, the choice in `?days=90d`), then its per-day chart for that period, labelled with the count of every day while the columns have room for it — the quiet ones stating a muted zero at the baseline — and unlabelled past about seven weeks, when the table takes over, the last 10 faults of that target in the table the timeline draws, before the day-by-day table, and a per-day table of faults, down time, and average `up` run with the longest run under the mean, whose current-day row states the last 24 hours instead, tagged and styled apart, the figure being labelled `AVG UP` on both pages — ; a streamed gzipped CSV of every event — `/export/faults.csv.gz`, of one target's events when the query names it (`?target=…`, the name of the target in the file name), with the older `/export/disconnections.csv.gz` answering `308` —, a footer that states the manual of the page in small type under a rule narrower than the content, the icon both pages open with and advertise (`/icon.svg` as the masthead mark and the favicon, `/icon.png` for the browsers without SVG support, both embedded in the executable), a plain-text health check, or a plain-text error. The CSV columns are `target,label,interface,state,occurred_at,rtt_us,cause,cause_message`: the same file the import reads back, and an archive that ends after `rtt_us` still imports.
-- **Guarantees:** every request opens the database read-only and writes nothing, a database one version behind being read without the columns it lacks; a statistic is derived from the rendered segments only, with an `up` run clipped by the window counted as it appears, so a figure can never disagree with the chart above it; only `GET` and `HEAD` are answered; dynamic text is HTML-escaped; the window is one of the offered spans — 1, 2, 4, 6, 12, or 24 hours, 1 by default, an unknown `window` falling back to the default — clamped to the last 30 days and never past now; every instant is emitted in UTC (`<time datetime>`, `data-datetime`) and formatted by the browser with `Intl`, so the server needs neither a locale nor a time zone and a page is identical for every reader; no row is written, and the socket exists only while the process that bound it runs. The export is streamed as HTTP chunks and deflated on the fly, in pages of 1 000 events: the response holds no copy of the file and no long read transaction. The count of the 32 connections in flight is held by a guard whose `Drop` releases it, so a handler that unwinds costs its answer and never a slot, and the surface stays available to the next request. Every accepted connection is cleared of the listener's non-blocking flag and served with a two-second timeout on both sides — `accept` on a non-blocking listener leaves the flag on the socket on macOS —, so a body larger than the socket buffer is written to the end instead of stopping with `EAGAIN`.
+- **Input:** the history source and an optional `window`/`from`/`to`/`target` query string; a bound listener in tests.
+- **Output:** the timeline page with one lane per target, the lanes ordered by the `priority` the configuration gave them (lowest first, then those without one by key) — drops, the average `up` run with its spread, the longest `up` run of the window, and how long the target has been up without a drop, in that order, the statistics computed by `web::stats` from the same segments that draw the bands, the streak from the age of the current state in the `targets` table — plus the last 10 faults, each stating its target as a label over its key, the start, the code of its cause and, last, the duration — the four columns keeping a stated share of the width —, with the standard message underneath the row that opens it; the detail page of one target — opened with the identity block of the application, itself a link to `/` on every page, the reference included, its toolbar stating the page on one line: the way back to the timeline — the word `HOME`, a link to `/`, not a step into the browser history —, the label with the address in parentheses in bold, the parts separated by a dot —, the row of four widgets under that line opening with the current state and how long it has held, white on a filled tile of that state's colour — the only widget filled —, then the faults, the down time, and the average `up` run of the period, a period selector for the last 30, 60, 90, 180, or 360 days (30 when the query names none, the choice in `?days=90d`), then its per-day chart for that period, labelled with the count of every day while the columns have room for it — the quiet ones stating a muted zero at the baseline — and unlabelled past about seven weeks, when the table takes over, the last 10 faults of that target in the table the timeline draws, before the day-by-day table, and a per-day table of faults, down time, and average `up` run with the longest run under the mean, whose current-day row states the last 24 hours instead, tagged and styled apart, the figure being labelled `AVG UP` on both pages — ; a streamed gzipped CSV of every event — `/export/faults.csv.gz`, of one target's events when the query names it (`?target=…`, the name of the target in the file name), with the older `/export/disconnections.csv.gz` answering `308` —, a footer that states the manual of the page in small type under a rule narrower than the content, the icon both pages open with and advertise (`/icon.svg` as the masthead mark and the favicon, `/icon.png` for the browsers without SVG support, both embedded in the executable), a plain-text health check, or a plain-text error. The CSV columns are `target,label,interface,state,occurred_at,rtt_us,cause,cause_message`: the same file the import reads back, and an archive that ends after `rtt_us` still imports.
+- **Guarantees:** every request reads its history through the seam and writes nothing: with the database source the file is opened read-only and a database one version behind is read without the columns it lacks (INV-10), and with the simulated source nothing is opened at all (INV-13); a statistic is derived from the rendered segments only, with an `up` run clipped by the window counted as it appears, so a figure can never disagree with the chart above it; only `GET` and `HEAD` are answered; dynamic text is HTML-escaped; the window is one of the offered spans — 1, 2, 4, 6, 12, or 24 hours, 1 by default, an unknown `window` falling back to the default — clamped to the last 30 days and never past now; every instant is emitted in UTC (`<time datetime>`, `data-datetime`) and formatted by the browser with `Intl`, so the server needs neither a locale nor a time zone and a page is identical for every reader; no row is written, and the socket exists only while the process that bound it runs. The export is streamed as HTTP chunks and deflated on the fly, in pages of 1 000 events: the response holds no copy of the file and no long read transaction. The count of the 32 connections in flight is held by a guard whose `Drop` releases it, so a handler that unwinds costs its answer and never a slot, and the surface stays available to the next request. Every accepted connection is cleared of the listener's non-blocking flag and served with a two-second timeout on both sides — `accept` on a non-blocking listener leaves the flag on the socket on macOS —, so a body larger than the socket buffer is written to the end instead of stopping with `EAGAIN`.
 
 ### `web::api`
 
-- **Input:** the HTTP method, the path under `/api/v1`, the query string, and the database path
+- **Input:** the HTTP method, the path under `/api/v1`, the query string, and the history source
   of the process that bound the socket.
 - **Output:** one JSON object per request — `data` and `meta` on success, `error` and `meta` on
   failure — the OpenAPI document, the reference page and the two files it loads, or the log
   lines of a refused request.
-- **Guarantees:** the database is opened read-only for every request and nothing is written; an
+- **Guarantees:** the history is read per request and nothing is written — the database source
+  opens the file read-only, the simulated one opens nothing —; an
   array is never the root of an answer; every parameter is validated against the closed set the
   route declares and bound as a SQL parameter, `limit` never exceeding 1 000, so one request
   cannot ask for the whole history; `meta` states the filters it resolved and the total matching
@@ -284,31 +308,33 @@ CREATE TABLE IF NOT EXISTS targets (
 
 The main flow: an operator starts the monitor, a target stops answering, and a second process reads the transition while monitoring continues.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Op as Operator shell
-    participant Mon as monitor
-    participant Pr as probe (ICMP)
-    participant St as store (SQLite)
-    participant Q as query
+```plantuml
+@startuml
+autonumber
 
-    Op->>Mon: monitor --config network-monitor.toml
-    Mon->>St: open database, migrate, load current state
-    loop every interval_ms, per target
-        Mon->>Pr: probe(target, interface)
-        Pr->>Pr: open raw socket, bind interface, send echo, wait timeout_ms
-        Pr-->>Mon: Up(rtt) | Down | LocalError
-        alt verdict differs from current state
-            Mon->>St: BEGIN, INSERT event, UPDATE targets, COMMIT
-        else verdict unchanged
-            Mon->>Mon: discard, no write
-        end
+participant "Operator shell" as Op
+participant "monitor" as Mon
+participant "probe (ICMP)" as Pr
+participant "store (SQLite)" as St
+participant "query" as Q
+
+Op -> Mon : monitor --config network-monitor.toml
+Mon -> St : open database, migrate, load current state
+loop every interval_ms, per target
+    Mon -> Pr : probe(target, interface)
+    Pr -> Pr : open raw socket, bind interface, send echo, wait timeout_ms
+    Pr --> Mon : Up(rtt) | Down | LocalError
+    alt verdict differs from current state
+        Mon -> St : BEGIN, INSERT event, UPDATE targets, COMMIT
+    else verdict unchanged
+        Mon -> Mon : discard, no write
     end
-    Q->>St: SELECT events WHERE target = ? (read-only, WAL)
-    St-->>Q: rows
-    Op->>Mon: SIGTERM
-    Mon->>St: finish cycle, close connection
+end
+Q -> St : SELECT events WHERE target = ? (read-only, WAL)
+St --> Q : rows
+Op -> Mon : SIGTERM
+Mon -> St : finish cycle, close connection
+@enduml
 ```
 
 Takeaway: the write path is one transaction per transition, and the read path never waits for the probing loop.
@@ -401,6 +427,7 @@ enforced or verified.
 - `INV-7`: The event and the current state of a target are committed in the same transaction. Enforced by the store write function, verified by a test that interrupts the writer after `BEGIN`.
 - `INV-8`: The release binary has no dependency beyond the platform C runtime, and SQLite is compiled in. Enforced by the static build, verified by the `ldd` check in CI.
 - `INV-9`: A configuration file that cannot be read, does not parse, or resolves to no targets never changes the running configuration and never stops monitoring. Enforced by the supervisor, verified by `tests/reload.rs`.
-- `INV-10`: The web page never writes: every request opens the database read-only and issues only `SELECT` statements, a database one version behind being read with `NULL` in place of the columns it lacks. Enforced by the `store` read-only open, which never migrates, rewrites, or repairs, verified by `tests/web.rs` and by the store tests that a read-only open leaves the schema and the history as they are.
+- `INV-10`: The web page never writes: every request opens the database read-only and issues only `SELECT` statements, a database one version behind being read with `NULL` in place of the columns it lacks. Enforced by the `store` read-only open, which never migrates, rewrites, or repairs, verified by `tests/web.rs` and by the store tests that a read-only open leaves the schema and the history as they are. The simulated source, which opens no file at all, is held to the same rule by `INV-13`.
 - `INV-11`: A process opens at most one listener, and only when `--listen` is given; `monitor --listen` binds it before the first probe and stops it with the monitor. Enforced by the single call to `web::bind`, verified by the CLI and web tests.
 - `INV-12`: A notification is never a condition of recording, and a delivery failure never changes a stored event. Enforced by the monitor notifying only after `record_transition` returned, and by the notifier having no access to the store, verified by `tests/monitor_e2e.rs` (one notification per recorded transition, none for a local probe error) and by `tests/notify.rs` (a failed send leaves the sequence intact).
+- `INV-13`: The simulated mode probes nothing, reads and writes no database, and keeps nothing between requests: the same command replays the same history. Enforced by `sim` holding no file handle and no cache and by `probe::simulated_day` never calling the network, verified by `tests/simulate.rs` (a working directory left empty, two processes of the same seed answering the same bytes) and by the `sim` unit tests (a day is reproducible from its tuple and independent of the days before it).
