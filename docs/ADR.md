@@ -40,6 +40,7 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0026 | Expose the host personal skills read-only instead of copying them | deprecated: the sandbox is removed | 2026-11-14 | One read-only bind of `~/.copilot/skills` onto the same path; nothing else from the host home |
 | ADR-0027 | Notify state changes over Telegram, with a stabilisation window and a dedicated delivery thread | accepted | 2026-11-14 | Global `[telegram]` section read from the file only, token redacted everywhere; one message per incident; bounded queue and five attempts off the probe path |
 | ADR-0028 | Publish a read-only JSON API under `/api/v1` with an envelope and `limit`/`offset` | accepted | 2026-11-14 | Object root with `data` and `meta`, never a bare array; `limit` 1–1000, errors with a stable code; hand-written JSON, no new crate; an OpenAPI document served by the binary; `Access-Control-Allow-Origin: *` on an unauthenticated read-only surface |
+| ADR-0029 | Render the API reference in the browser from the document the binary serves | accepted | 2026-11-15 | `/api/v1/docs` loads a vendored Swagger UI at `/api/v1/openapi.json`, embedded with `include_str!` so no network and no CDN are needed; `validatorUrl` off, `GET`/`HEAD` only; the footer of both pages links to it; a body larger than the socket buffer exposed and fixed a non-blocking accepted socket |
 
 ## Records
 
@@ -1202,3 +1203,67 @@ rather than later.
 - A library caller that hands `up_runs_per_day` or `day_slices` a span wider than the domain
   still pays for the span, day by day: both walks are proved to terminate, not to be constant
   time, and the domain is what keeps the API inside a bounded cost (47 482 days at most).
+
+## ADR-0029 — Render the API reference in the browser from the document the binary serves
+
+**Status:** accepted · **Date:** 2026-11-15
+
+### Context
+
+The API states its contract in an OpenAPI 3.1 document, but only a machine reads it: a person
+who wants to call a route reads the raw JSON or the tables of the user guide, and the two are
+two copies of the same facts. The standard way to publish that document to a person is a
+renderer in the browser, and the usual way to deliver one is a CDN script tag.
+
+A CDN would make an internet connection a condition of reading the documentation of a tool
+deployed on a NAS or a LAN, and it would put a third party in the trust boundary that
+`ARCHITECTURE.md` states as "no external service is trusted and none is required". Writing the
+renderer here was the other option: it would parse the document, which means a JSON reader this
+project does not have, and it would re-implement a standard interface to no benefit.
+
+### Decision
+
+1. `GET /api/v1/docs` serves `assets/api/docs.html`, which renders `/api/v1/openapi.json` with
+   Swagger UI. The page holds no copy of a route, a parameter, or a property: the document is
+   the single source of truth, so there is nothing that can drift from it.
+2. Swagger UI 5.35.0 is vendored as two assets — `swagger-ui.css` and `swagger-ui-bundle.js` —
+   together with its Apache-2.0 `LICENSE`, and served under `/api/v1/docs/`. They are embedded
+   with `include_str!` and compressed like the page, so the executable stays self-contained and
+   the reference works on a host with no route to the internet.
+3. The page sets `layout: "BaseLayout"`, `validatorUrl: null` and
+   `supportedSubmitMethods: ["get", "head"]`: no top bar, no call to `validator.swagger.io` on
+   every load, and a **Try it out** that offers exactly the methods the API answers.
+4. The prefix `/api/v1/docs` belongs to the reference — the page and the two files —, and an
+   address under it that is neither answers `404` in the error shape of the API.
+5. The footer of both pages links to the reference, so it is one step from the history the
+   reader is already looking at.
+6. The reference carries the palette of the application instead of the default one. It opens
+   with the masthead of the page and links its stylesheet, and `assets/api/theme.css` restates
+   the rest in the tokens of `static/style.css`, starting from the "newspaper" Swagger UI theme
+   — flat surfaces, hairlines instead of shadows, no tinted method panels — and using system
+   colours (`CanvasText`) plus translucent greys, so it follows the light and the dark scheme
+   the page already follows without a second stylesheet per scheme. The vendored files are not
+   edited: the upgrade stays a replacement of three files.
+
+### Consequences
+
+- The repository and the executable grow by about 1.9 MB of vendored JavaScript and CSS, which
+  the binary embeds for the same reason it embeds the icon. It is the one third-party artefact
+  of the web surface; upgrading it means replacing three files and the version this record
+  states.
+- The reference is a second consumer of the document, not a second contract: the drift guard of
+  `tests/web.rs` still checks every documented property against a real answer, and a second
+  test checks that the page names the document it renders, that it opens with the stylesheet of
+  the page with its own, and that the bundle arrives whole.
+- The palette of the reference is ours: a Swagger UI upgrade can rename a class and leave one
+  element in the default colours. The theme is read in the browser, against a running server,
+  rather than proved by a test; the surfaces it must not touch are named in its comments.
+- Rendering happens in the browser, so the reference needs JavaScript. The document and the
+  user guide remain readable without it, and the page states the address of the document in its
+  own masthead.
+- A defect the bundle exposed is fixed in the same change: on macOS an accepted socket inherits
+  the listener's non-blocking flag, so `write_all` stopped with `EAGAIN` once a body exceeded
+  the socket buffer — about 320 KB. Every earlier answer fitted, so nothing caught it; the
+  bundle and the gzipped CSV of a long history do not. `web::handle` now clears the flag and
+  serves every connection blocking, and the test asserts the full length of a body larger than
+  that buffer.

@@ -172,6 +172,10 @@ impl Drop for Slot {
 }
 
 fn handle(mut stream: TcpStream, database: &Path, compression: Compression) {
+    // macOS gives an accepted socket the non-blocking flag of the listener, so a write
+    // larger than the socket buffer would fail with `EAGAIN` instead of waiting for the
+    // reader. Every answer is written by a blocking socket with a timeout on both sides.
+    let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
 

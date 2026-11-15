@@ -423,12 +423,19 @@ read it — and it answers on the address given to `--listen`. The contract is s
 binary itself: `GET /api/v1/openapi.json` is an OpenAPI 3.1 document naming every route,
 parameter, and property.
 
+Open the reference in a browser at `http://<host>:8642/api/v1/docs`: it renders that same
+document, route by route and schema by schema, and its **Try it out** button sends a `GET` to
+the route from the page. The renderer ships inside the executable, so the reference works on a
+host with no internet access, and because it reads the document the binary serves, it cannot
+disagree with it.
+
 | Route | What it returns |
 |---|---|
 | `GET /api/v1/targets` | Every target, ordered by key |
 | `GET /api/v1/faults` | The faults, newest first |
 | `GET /api/v1/faults/daily` | Faults, down time, and `up` runs per UTC day, oldest first |
 | `GET /api/v1/openapi.json` | The OpenAPI document of the routes above |
+| `GET /api/v1/docs` | The routes above, rendered as a reference in the browser |
 
 | Parameter | Routes | Accepted | Default |
 |---|---|---|---|

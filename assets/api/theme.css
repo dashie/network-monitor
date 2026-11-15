@@ -1,0 +1,524 @@
+/* The palette of the reference: the page of the application, not the default green of
+   Swagger UI. The base is the "newspaper" theme — flat surfaces, hairlines instead of
+   shadows, and no tinted panel — restated in the tokens of `static/style.css`: the system
+   font, one hairline rule, uppercase small headings, tabular numbers, and the three state
+   colours the chart already uses. System colours carry it into dark mode with the page. */
+
+/* The reference is a page of the application, masthead included: its own link follows
+   the text, as the rest of the reference does. */
+.masthead a {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--rule);
+  text-underline-offset: 2px;
+}
+
+.masthead a:hover {
+  text-decoration-color: currentColor;
+}
+
+.swagger-ui {
+  --rule: rgba(127, 127, 127, 0.28);
+  --surface: rgba(127, 127, 127, 0.07);
+  --muted: 0.65;
+  --up: #2e7d32;
+  --down: #c62828;
+  --unknown: #616161;
+  font-family: inherit;
+  color: CanvasText;
+}
+
+/* Swagger UI leaves several of its controls at the browser defaults; the reference
+   clears them once, and `.btn` states its own shape below. */
+.swagger-ui button {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+/* A heading of the reference states a label, as the headings of the page do. */
+.swagger-ui h4,
+.swagger-ui h5 {
+  margin: 0 0 6px;
+  color: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: var(--muted);
+}
+
+.swagger-ui h5 {
+  font-size: 11px;
+}
+
+.swagger-ui svg {
+  fill: currentColor;
+  /* The page sizes its chart with `svg { width: 100% }`: the icons keep their own size. */
+  width: auto;
+  height: auto;
+  max-width: none;
+  display: inline;
+}
+
+/* The reference sits in `main`, so its own wrapper repeats no width and no padding. */
+.swagger-ui .wrapper {
+  max-width: none;
+  padding: 0;
+}
+
+/* The masthead states the title: the document states its summary and its description. */
+.swagger-ui .information-container {
+  padding: 0;
+  margin: 0;
+}
+
+.swagger-ui .info {
+  margin: 4px 0 26px;
+}
+
+.swagger-ui .info .info__summary {
+  margin: 0 0 12px;
+  color: inherit;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.swagger-ui .info hgroup.main {
+  display: none;
+}
+
+.swagger-ui .info .info__description {
+  font-size: 14px;
+  line-height: 1.6;
+  opacity: var(--muted);
+}
+
+.swagger-ui .info .info__description p {
+  margin: 0 0 10px;
+}
+
+.swagger-ui .info .info__description code,
+.swagger-ui .info .info__description pre {
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: var(--surface);
+  color: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.swagger-ui .scheme-container {
+  padding: 0;
+  margin: 0 0 28px;
+  background: none;
+  box-shadow: none;
+}
+
+.swagger-ui .servers-title,
+.swagger-ui .schemes > label > span:first-child {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: var(--muted);
+}
+
+.swagger-ui select {
+  padding: 6px 10px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The document holds one untagged group, which Swagger UI names `default`: a header
+   saying `default` above the only list of operations says nothing. */
+.swagger-ui .opblock-tag {
+  display: none;
+}
+
+/* An operation is a card of the page: a hairline and the radius the statistics carry. */
+.swagger-ui .opblock,
+.swagger-ui .opblock.opblock-get,
+.swagger-ui .opblock.opblock-head {
+  margin: 0 0 10px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: none;
+  box-shadow: none;
+}
+
+.swagger-ui .opblock .opblock-summary {
+  min-height: 0;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 8px;
+}
+
+.swagger-ui .opblock .opblock-summary:hover {
+  background: var(--surface);
+}
+
+.swagger-ui .opblock.is-open .opblock-summary {
+  border-bottom: 1px solid var(--rule);
+  border-radius: 8px 8px 0 0;
+}
+
+/* The method is a badge, like the state of a target: solid, uppercase, never tinted. */
+.swagger-ui .opblock .opblock-summary-method {
+  min-width: 72px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: var(--unknown);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  line-height: 1.4;
+  text-transform: uppercase;
+  text-shadow: none;
+}
+
+.swagger-ui .opblock.opblock-get .opblock-summary-method {
+  background: var(--up);
+}
+
+.swagger-ui .opblock-summary-path,
+.swagger-ui .opblock-summary-path a,
+.swagger-ui .opblock-summary-path__deprecated {
+  color: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.swagger-ui .opblock-summary-path a:hover {
+  text-decoration: underline;
+  text-decoration-color: var(--rule);
+}
+
+.swagger-ui .opblock-summary-description {
+  color: inherit;
+  font-size: 13px;
+  opacity: var(--muted);
+}
+
+.swagger-ui .opblock-summary-control:focus {
+  outline: 1px dotted currentColor;
+}
+
+.swagger-ui .opblock-body {
+  padding: 4px 18px 18px;
+}
+
+/* The sections of an open operation read as the headings of the page do. */
+.swagger-ui .opblock .opblock-section-header {
+  min-height: 0;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--rule);
+  background: none;
+  box-shadow: none;
+}
+
+/* Swagger UI draws a blue bar under the active tab of a section header. */
+.swagger-ui .opblock-section-header .tab-item.active h4 span::after {
+  display: none;
+}
+
+.swagger-ui .opblock .opblock-section-header h4,
+.swagger-ui .opblock .opblock-section-header label > span:first-child {
+  margin: 0;
+  color: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: var(--muted);
+}
+
+.swagger-ui .opblock-description-wrapper p,
+.swagger-ui .opblock-external-docs-wrapper p,
+.swagger-ui .opblock-title_normal p {
+  color: inherit;
+  font-size: 13px;
+  opacity: var(--muted);
+}
+
+/* Tables: the rule, the uppercase header, and the numbers of `static/style.css`. The
+   page keeps its header under the top of a long table; a table of a panel scrolls with it. */
+.swagger-ui table {
+  margin: 0;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.swagger-ui table thead tr td,
+.swagger-ui table thead tr th {
+  position: static;
+  padding: 10px 12px 10px 0;
+  border-top: 0;
+  border-bottom: 1px solid var(--rule);
+  background: none;
+  color: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  opacity: var(--muted);
+}
+
+.swagger-ui table tbody tr td {
+  padding: 9px 12px 9px 0;
+  border-bottom: 1px solid var(--rule);
+  color: inherit;
+  font-size: 13px;
+  vertical-align: top;
+}
+
+.swagger-ui .parameters-col_description p,
+.swagger-ui .response-col_description p {
+  color: inherit;
+  font-size: 13px;
+}
+
+.swagger-ui .parameter__name {
+  color: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.swagger-ui .parameter__name.required::after {
+  color: var(--down);
+}
+
+.swagger-ui .parameter__type,
+.swagger-ui .parameter__in {
+  color: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  opacity: var(--muted);
+}
+
+.swagger-ui .response-col_status {
+  color: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* This document states no link per answer: the column would read `No links` on every
+   row of every operation. */
+.swagger-ui th.response-col_links,
+.swagger-ui td.response-col_links {
+  display: none;
+}
+
+/* Inputs and buttons: hairlines and pills, as the window selector of the page. */
+.swagger-ui input[type="text"],
+.swagger-ui input[type="password"],
+.swagger-ui input[type="search"],
+.swagger-ui input[type="email"],
+.swagger-ui input[type="url"],
+.swagger-ui textarea {
+  padding: 6px 10px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  box-shadow: none;
+}
+
+.swagger-ui input[type="text"]:focus,
+.swagger-ui textarea:focus,
+.swagger-ui select:focus {
+  border-color: currentColor;
+  outline: none;
+}
+
+.swagger-ui .btn {
+  padding: 5px 14px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: none;
+  box-shadow: none;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.swagger-ui .btn:hover {
+  border-color: currentColor;
+  box-shadow: none;
+}
+
+/* The pair of controls is a row of two pills, not two halves of a banner. */
+.swagger-ui .btn-group {
+  display: flex;
+  gap: 8px;
+  padding: 0;
+}
+
+.swagger-ui .btn-group .btn,
+.swagger-ui .btn-group .btn:first-child,
+.swagger-ui .btn-group .btn:last-child {
+  flex: 0 0 auto;
+  border-radius: 999px;
+}
+
+.swagger-ui .execute-wrapper {
+  padding: 18px 0 0;
+}
+
+.swagger-ui .btn.execute {
+  border-color: var(--up);
+  background: var(--up);
+  color: #ffffff;
+}
+
+.swagger-ui .btn.cancel {
+  border-color: var(--down);
+  color: var(--down);
+}
+
+.swagger-ui .btn.try-out__btn {
+  text-transform: uppercase;
+}
+
+/* A code span inside a sentence carries the shape of the reference, not a colour. */
+.swagger-ui p code,
+.swagger-ui .markdown code,
+.swagger-ui .renderedMarkdown code {
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: var(--surface);
+  color: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  font-weight: 400;
+}
+
+/* Code and JSON: one dark surface in both schemes, the radius of a card. */
+.swagger-ui .highlight-code,
+.swagger-ui .highlight-code > .microlight,
+.swagger-ui .model-example {
+  border-radius: 8px;
+}
+
+.swagger-ui .copy-to-clipboard {
+  background: none;
+}
+
+/* Schema names and property rows: monospace, one rule between them. */
+.swagger-ui section.models {
+  margin: 20px 0 0;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+}
+
+.swagger-ui section.models h4 {
+  margin: 0;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--rule);
+  color: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: var(--muted);
+}
+
+/* The schema renderer: one card per schema, names in monospace, and no colour of its
+   own — the type of a property is stated, not tinted. */
+.swagger-ui section.models > div {
+  padding: 8px 16px;
+}
+
+/* Swagger UI insets the first and the last card of the list with rules of their own —
+   `:first-of-type` and `:last-of-type` —, so zeroing the margin of the card alone leaves
+   those two indented. Every schema starts on the same line. */
+.swagger-ui .json-schema-2020-12,
+.swagger-ui .json-schema-2020-12:first-of-type,
+.swagger-ui .json-schema-2020-12:last-of-type {
+  margin: 0;
+  padding: 6px 0;
+  border-radius: 8px;
+  background: none;
+}
+
+.swagger-ui .json-schema-2020-12__title,
+.swagger-ui .json-schema-2020-12__attribute,
+.swagger-ui .json-schema-2020-12-keyword__name,
+.swagger-ui .json-schema-2020-12-keyword__value,
+.swagger-ui .json-schema-2020-12-keyword__name--secondary {
+  color: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.swagger-ui .json-schema-2020-12__title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.swagger-ui .json-schema-2020-12__attribute,
+.swagger-ui .json-schema-2020-12-keyword__value {
+  font-size: 11px;
+  font-weight: 400;
+  opacity: var(--muted);
+}
+
+.swagger-ui .json-schema-2020-12-keyword__name {
+  font-size: 12px;
+}
+
+.swagger-ui .json-schema-2020-12-expand-deep-button {
+  color: inherit;
+  font-size: 11px;
+  opacity: var(--muted);
+}
+
+.swagger-ui .model-box {
+  border-radius: 8px;
+  background: none;
+}
+
+.swagger-ui .models-control {
+  color: inherit;
+}
+
+/* Links inside the reference stay quiet: the text is the page, the rule is the cue. */
+.swagger-ui a,
+.swagger-ui .btn-link {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--rule);
+  text-underline-offset: 2px;
+}
+
+.swagger-ui a:hover {
+  text-decoration-color: currentColor;
+}
+
+.swagger-ui .tab li button.tablinks {
+  color: inherit;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.swagger-ui .tab li.active button.tablinks {
+  border-bottom: 2px solid currentColor;
+}

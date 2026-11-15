@@ -685,12 +685,20 @@ fn both_pages_close_with_a_short_manual() {
     assert!(page.contains("<footer>\n<hr>\n"));
     assert!(page.contains("A lane is one target over the chosen window"));
     assert!(page.contains("Times follow the time zone of your browser"));
+    assert!(
+        page.contains("href=\"/api/v1/docs\""),
+        "the footer leads to the API reference"
+    );
 
     let (status, detail) = server.get("/target?target=1.1.1.1");
     assert_eq!(status, 200);
     assert!(detail.contains("<footer>\n<hr>\n"));
     assert!(detail.contains("Each bar is one day of the period"));
     assert!(detail.contains("Times follow the time zone of your browser"));
+    assert!(
+        detail.contains("href=\"/api/v1/docs\""),
+        "the footer leads to the API reference"
+    );
     assert!(
         !detail.contains("times in your time zone"),
         "the manual under the tables states the time zone, not the masthead"
@@ -1325,6 +1333,86 @@ fn the_openapi_document_names_the_routes_and_every_property_they_answer() {
             );
         }
     }
+}
+
+#[test]
+fn the_docs_page_renders_the_contract_the_api_serves() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, head, bytes) = server.get_bytes("/api/v1/docs");
+    assert_eq!(status, 200);
+    assert!(
+        head.contains("Content-Type: text/html; charset=utf-8"),
+        "{head}"
+    );
+    let page = String::from_utf8(bytes).expect("the page is UTF-8");
+    assert!(
+        page.contains("/api/v1/openapi.json"),
+        "the page renders the contract the API serves: {page}"
+    );
+    assert!(
+        page.contains("/style.css"),
+        "the reference opens with the masthead of the page: {page}"
+    );
+
+    let files: [(&str, &str); 4] = [
+        ("/style.css", "text/css; charset=utf-8"),
+        ("/api/v1/docs/swagger-ui.css", "text/css; charset=utf-8"),
+        ("/api/v1/docs/theme.css", "text/css; charset=utf-8"),
+        (
+            "/api/v1/docs/swagger-ui-bundle.js",
+            "text/javascript; charset=utf-8",
+        ),
+    ];
+    for (file, content_type) in files {
+        assert!(page.contains(file), "the page loads {file}");
+        let (status, head, body) = server.get_bytes(file);
+        assert_eq!(status, 200, "{file} is served");
+        assert!(head.contains(content_type), "{file}: {head}");
+        assert!(!body.is_empty(), "{file} is not empty");
+    }
+
+    // The bundle is larger than a socket buffer, which is what a non-blocking socket
+    // would cut short: the whole body must arrive.
+    let bundle = include_str!("../assets/api/swagger-ui/swagger-ui-bundle.js");
+    let (_, _, body) = server.get_bytes("/api/v1/docs/swagger-ui-bundle.js");
+    assert_eq!(
+        body.len(),
+        bundle.len(),
+        "a body larger than the socket buffer arrives whole"
+    );
+
+    assert_eq!(
+        server.get("/api/v1/docs/missing.js").0,
+        404,
+        "an unknown file of the reference is refused"
+    );
+}
+
+/// The reference is a megabyte of script: it must travel compressed, like every page.
+#[test]
+fn the_reference_script_is_gzipped_when_the_client_accepts_it() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, head, compressed) = server.get_bytes_with(
+        "/api/v1/docs/swagger-ui-bundle.js",
+        "Accept-Encoding: gzip\r\n",
+    );
+    assert_eq!(status, 200);
+    assert!(head.contains("Content-Encoding: gzip"), "{head}");
+    let text = gunzip(&compressed);
+    assert!(
+        text.contains("SwaggerUIBundle"),
+        "the bundle defines the renderer the page calls"
+    );
+    assert!(
+        compressed.len() < text.len() / 2,
+        "a bundle of {} bytes gzips to {}",
+        text.len(),
+        compressed.len()
+    );
 }
 
 /// A history of `faults` faults: an `up` and a `down` per fault, one second apart.

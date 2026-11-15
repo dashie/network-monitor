@@ -8,6 +8,7 @@
 //! This module holds the contract every route shares; one file per route holds the route.
 
 mod daily;
+mod docs;
 mod faults;
 mod openapi;
 mod targets;
@@ -88,6 +89,8 @@ pub fn handle(
         "/api/v1/targets" => targets::route(stream, query, database, reply),
         "/api/v1/faults" => faults::route(stream, query, database, reply),
         "/api/v1/faults/daily" => daily::route(stream, query, database, reply),
+        // The reference owns the prefix: the page and the two files it loads.
+        _ if path.starts_with("/api/v1/docs") => docs::route(stream, path, reply),
         _ => fail(stream, 404, "NOT_FOUND", None, "no such route", reply),
     }
 }
@@ -419,10 +422,21 @@ pub(super) fn instant(value: Option<i64>) -> String {
 
 impl Reply<'_> {
     pub(super) fn send(self, stream: &mut TcpStream, status: u16, body: &str) {
+        self.send_text(stream, status, JSON, body);
+    }
+
+    /// The same for an answer that is not JSON: the reference page and the files it loads.
+    pub(super) fn send_text(
+        self,
+        stream: &mut TcpStream,
+        status: u16,
+        content_type: &str,
+        body: &str,
+    ) {
         super::respond_compressed(
             stream,
             status,
-            JSON,
+            content_type,
             body,
             self.include_body,
             self.gzip,

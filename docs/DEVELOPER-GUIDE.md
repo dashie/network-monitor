@@ -43,7 +43,11 @@ network-monitor/
 ├── network-monitor.toml  example configuration, kept in sync with the defaults
 ├── assets/
 │   ├── icon/             the mark, the favicon, and the PNG of both
-│   └── api/openapi.json  the contract of the read-only API, served at /api/v1/openapi.json
+│   └── api/
+│       ├── openapi.json  the contract of the read-only API, served at /api/v1/openapi.json
+│       ├── docs.html     the reference page, served at /api/v1/docs
+│       ├── theme.css     the palette of the page on the reference, light and dark
+│       └── swagger-ui/   the renderer the page loads, vendored with its licence
 ├── src/
 │   ├── main.rs           entry point, subcommand dispatch, exit codes
 │   ├── lib.rs            library surface used by the integration tests
@@ -86,7 +90,8 @@ network-monitor/
 │       │   ├── targets.rs  GET /api/v1/targets
 │       │   ├── faults.rs   GET /api/v1/faults
 │       │   ├── daily.rs    GET /api/v1/faults/daily
-│       │   └── openapi.rs  GET /api/v1/openapi.json
+│       │   ├── openapi.rs  GET /api/v1/openapi.json
+│       │   └── docs.rs     GET /api/v1/docs and the two files it loads
 │       ├── page.rs       timeline page: the lanes, the chart, the tables
 │       ├── detail.rs     detail page of one target: per-day chart and table
 │       ├── templates.rs  the templates and assets of both pages: read in debug, embedded

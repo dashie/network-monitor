@@ -36,6 +36,9 @@ sudo ./target/release/network-monitor monitor --config ./network-monitor.toml \
 # Read the same history as JSON from that server: read-only, no credential, no second port
 curl -s http://127.0.0.1:8642/api/v1/faults?limit=10
 
+# The same routes turned into a reference a browser can read and call, offline:
+# http://127.0.0.1:8642/api/v1/docs
+
 # Restore the history from the file that page downloaded; back up the database first
 # (docs/DEVELOPER-GUIDE.md#back-up-before-you-import)
 ./target/release/network-monitor import ./faults-20261109.csv.gz \
@@ -88,7 +91,7 @@ label = "example-health"
 
 ## Status
 
-**Alpha.** The feature set in [docs/PRODUCT.md](docs/PRODUCT.md) is implemented and covered by the test suite: layered configuration with live reload, four probe methods — ICMP, TCP, DNS, and HTTP/HTTPS — with per-interface binding for the first two, event-only SQLite persistence, querying while monitoring runs, retention, a read-only web page with 24 h state bands, per-target statistics, the latest faults with the cause of each, and a 30-day per-target view, and a read-only JSON API under `/api/v1` that serves the targets, the faults, and the per-day totals to a dashboard. The container image builds and probes with only `NET_RAW` added; HTTPS verification uses roots compiled into the binary.
+**Alpha.** The feature set in [docs/PRODUCT.md](docs/PRODUCT.md) is implemented and covered by the test suite: layered configuration with live reload, four probe methods — ICMP, TCP, DNS, and HTTP/HTTPS — with per-interface binding for the first two, event-only SQLite persistence, querying while monitoring runs, retention, a read-only web page with 24 h state bands, per-target statistics, the latest faults with the cause of each, and a 30-day per-target view, and a read-only JSON API under `/api/v1` that serves the targets, the faults, and the per-day totals to a dashboard, rendered as a reference at `/api/v1/docs` that needs no internet access. The container image builds and probes with only `NET_RAW` added; HTTPS verification uses roots compiled into the binary.
 
 Not done yet: the Windows raw-socket path is written but not exercised on a Windows host, IPv6 targets are deferred, HTTP checks do not follow redirects, and no binary is published as a release.
 
