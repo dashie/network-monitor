@@ -672,12 +672,13 @@ rejected a per-target deletion because an archive describes the whole period it 
 mixing a rewritten period with events the archive never mentioned was said to be worse
 than losing them.
 
-A real migration showed the cost. A history imported from Uptime Kuma covered 3 July to
-11 November for the gateway, whose monitor kept writing until the end, and stopped on
-7 November for the DNS monitor, which had been paused. Replacing the window deleted four
-days of `1.1.1.1` events that the database had recorded itself and that the archive did
-not describe at all: not a stale version of the archive's rows, but rows the archive had
-never seen. They survived only in a backup taken before the import.
+A real migration showed the cost. A history imported from another monitoring tool
+covered 3 July to 11 November for the gateway, whose monitor kept writing until the
+end, and stopped on 7 November for the DNS monitor, which had been paused. Replacing
+the window deleted four days of `1.1.1.1` events that the database had recorded itself
+and that the archive did not describe at all: not a stale version of the archive's rows,
+but rows the archive had never seen. They survived only in a backup taken before the
+import.
 
 The assumption behind ADR-0014 — one archive, one period, every target measured across all
 of it — does not hold when the archive is assembled from several monitors, each with its

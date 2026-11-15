@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>network-monitor — a lightweight reachability monitor</title>
+<meta name="description" content="One executable that probes ICMP, TCP, DNS and HTTP, records only state changes in SQLite, and serves a read-only history page and a JSON API.">
+<link rel="canonical" href="https://dashie.github.io/network-monitor/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="network-monitor — a lightweight reachability monitor">
+<meta property="og:description" content="Probes ICMP, TCP, DNS and HTTP, records only state changes, and serves the history as a page and a JSON API. One executable, about 6 MB, no runtime.">
+<meta property="og:url" content="https://dashie.github.io/network-monitor/">
+<meta property="og:image" content="https://dashie.github.io/network-monitor/assets/og.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/svg+xml" href="assets/icon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png">
+<link rel="stylesheet" href="style.css">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "network-monitor",
+  "description": "Reachability monitor that records state transitions of ICMP, TCP, DNS and HTTP targets in an embedded SQLite history and serves them as a read-only page and a JSON API.",
+  "url": "https://dashie.github.io/network-monitor/",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "macOS, Linux, Windows",
+  "isAccessibleForFree": true,
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "USD"
+  },
+  "license": "https://github.com/dashie/network-monitor/blob/main/LICENSE"
+}
+</script>
+</head>
+<body>
+<a class="skip" href="#top">Skip to content</a>
+
+<header class="site-header">
+  <a class="wordmark" href="#top">
+    <img src="assets/icon.svg" alt="" width="32" height="32">
+    <span>network-monitor</span>
+  </a>
+  <nav aria-label="Sections">
+    <a href="#why">Why</a>
+    <a href="#checks">Checks</a>
+    <a href="#how-it-works">How it works</a>
+    <a href="#screenshots">Screenshots</a>
+    <a href="#quick-start">Quick start</a>
+    <a href="#faq">FAQ</a>
+    <a class="button" href="https://github.com/dashie/network-monitor">Source</a>
+  </nav>
+</header>
+
+<main>
+
+  <section id="top" class="hero">
+    <h1>Reachability monitoring that records incidents, not samples</h1>
+    <p class="lead">One executable, no runtime. It probes ICMP, TCP, DNS and HTTP — from the interface
+      you choose — writes a row to SQLite only when a target changes state, and serves that history as
+      a read-only page and a JSON API from the same process.</p>
+    <p class="actions">
+      <a class="button primary" href="https://github.com/dashie/network-monitor">Get the source</a>
+      <a class="button" href="#quick-start">Quick start</a>
+    </p>
+    <p class="platforms">macOS · Linux · Windows · Docker · MIT</p>
+  </section>
+
+  <section id="why">
+    <h2>Why it exists</h2>
+    <div class="cards">
+      <article class="card">
+        <h3>A history the size of your incidents</h3>
+        <p>A ping loop logs every reply and produces megabytes a day. This writes one row when a target
+          goes down and one when it comes back, so storage follows incidents, not probes.</p>
+      </article>
+      <article class="card">
+        <h3>About 6 MB, and nothing to install</h3>
+        <p>One stripped Rust executable, with SQLite embedded and the certificate roots compiled in.
+          Copy it to the box and run it: no runtime, no package manager, no sidecar service.</p>
+      </article>
+      <article class="card">
+        <h3>The interface is part of the answer</h3>
+        <p>An <code>icmp</code> or <code>tcp</code> probe can be bound to a named interface with the
+          semantics of <code>ping -I eth1</code>. On a multi-homed host the record says which link
+          failed, not only that something did.</p>
+      </article>
+      <article class="card">
+        <h3>Four checks, one contract</h3>
+        <p>ICMP, TCP, DNS and HTTP sit behind a single <code>Probe</code> trait. A fifth check is a
+          module, a variant and one match arm: the database, the page, the API and the exporter never
+          learn about it.</p>
+      </article>
+      <article class="card">
+        <h3>Read while it writes</h3>
+        <p>The history is SQLite in WAL mode, so <code>query</code>, the page and the API read while the
+          monitor records. No writer lock, no export window, no second database.</p>
+      </article>
+      <article class="card">
+        <h3>One message per incident</h3>
+        <p>An optional Telegram channel states the transition as it happens, and a recovery only once
+          <code>up</code> has held for the stabilisation window — so a flapping link does not become a
+          stream of alarms.</p>
+      </article>
+    </div>
+  </section>
+
+  <section id="checks">
+    <h2>The four checks</h2>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Check</th><th>It is up when</th></tr></thead>
+        <tbody>
+          <tr><td><code>icmp</code></td>
+            <td>an echo request to the address is answered before the timeout</td></tr>
+          <tr><td><code>tcp</code></td>
+            <td>a connection to the port is established before the timeout</td></tr>
+          <tr><td><code>dns</code></td>
+            <td>the server answers with a record of the type you asked for, <code>A</code> or
+              <code>AAAA</code></td></tr>
+          <tr><td><code>http</code></td>
+            <td>the status falls inside the expectation you state, with TLS verified against the roots
+              compiled into the binary</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="extension">Adding a check touches neither the store, the page, the API nor the exporter: a
+      new <code>Method</code> variant, one module implementing <code>Probe</code>, one arm in the
+      dispatcher. The recipe, and the tests that come with it, are in the
+      <a href="https://github.com/dashie/network-monitor/blob/main/docs/DEVELOPER-GUIDE.md#adding-a-probe-type">developer
+      guide</a>.</p>
+  </section>
+
+  <section id="how-it-works">
+    <h2>How it works</h2>
+    <ol class="steps">
+      <li>A TOML file declares the targets: method, endpoint, interval, timeout, and optionally an
+        interface, a label and an expectation.</li>
+      <li>Every cycle asks each target, with its own timeout. A local failure — no privilege, no such
+        interface, a socket error — is logged and changes nothing: the tool never reports "cannot see
+        the network" as "the network is down".</li>
+      <li>Only a transition is written: the instant, the state reached, and — for a fault — a code and
+        one standard sentence carrying the details of the occurrence.</li>
+      <li>The page, the JSON API, the gzipped CSV export and <code>query</code> read the same rows. The
+        page needs no account, no framework and no client-side chart library.</li>
+    </ol>
+  </section>
+
+  <section id="screenshots">
+    <h2>Screenshots</h2>
+    <div class="shots">
+      <figure class="shot">
+        <a href="#shot-timeline" aria-label="Open the timeline screenshot full screen">
+          <img src="assets/timeline.jpg" width="1040" height="1072" loading="lazy"
+            alt="The timeline page: one lane per target over the last hour, green for up and red for down, with the last ten faults stating the target, the start, the cause code and the duration.">
+        </a>
+        <figcaption>The timeline</figcaption>
+      </figure>
+      <figure class="shot">
+        <a href="#shot-target" aria-label="Open the screenshot of one target over 30 days full screen">
+          <img src="assets/target.jpg" width="1040" height="520" loading="lazy"
+            alt="One target over 30 days: four widgets stating the state, the number of faults, the down time and the average up run, then one bar per day.">
+        </a>
+        <figcaption>One target over 30 days</figcaption>
+      </figure>
+      <figure class="shot">
+        <a href="#shot-phone" aria-label="Open the screenshot of the page on a telephone full screen">
+          <img src="assets/narrow.jpg" width="500" height="1082" loading="lazy"
+            alt="The same timeline on a narrow window: each fault row states the target and the start on the left and the cause and the duration on the right.">
+        </a>
+        <figcaption>On a telephone</figcaption>
+      </figure>
+    </div>
+    <p class="shots-hint">Select a figure to open it full screen.</p>
+    <div class="viewer" id="shot-timeline" role="dialog" aria-label="The timeline page, full screen">
+      <a class="viewer-close" href="#screenshots" aria-label="Close"></a>
+      <img src="assets/timeline.jpg" width="1040" height="1072" alt="The timeline page: one lane per target over the last hour, with the last ten faults and their causes.">
+      <p>One lane per target; a break in a lane is a fault, and the last ten faults state the target,
+        the start, the cause code and how long it lasted.</p>
+    </div>
+    <div class="viewer" id="shot-target" role="dialog" aria-label="One target over 30 days, full screen">
+      <a class="viewer-close" href="#screenshots" aria-label="Close"></a>
+      <img src="assets/target.jpg" width="1040" height="520" alt="One target over 30 days: four widgets, then one bar per day.">
+      <p>The state, the faults, the down time and the average <code>up</code> run, then one bar per day.</p>
+    </div>
+    <div class="viewer" id="shot-phone" role="dialog" aria-label="The page on a telephone, full screen">
+      <a class="viewer-close" href="#screenshots" aria-label="Close"></a>
+      <img src="assets/narrow.jpg" width="500" height="1082" alt="The same timeline on a narrow window: each fault row states two values in two columns of two lines.">
+      <p>Each row folds into two columns of two lines; no value is broken across lines and no figure is
+        cut.</p>
+    </div>
+  </section>
+
+  <section id="quick-start">
+    <h2>Quick start</h2>
+    <div class="snippets">
+      <div class="snippet">
+        <h3>Docker</h3>
+        <p>One container, one volume, and host networking so that <code>interface = "eth1"</code> means
+          the physical interface of the host. <code>NET_RAW</code> is needed for <code>icmp</code> only.</p>
+        <pre><code>docker run -d --name network-monitor \
+  --cap-drop ALL --cap-add NET_RAW --network host \
+  -v network-monitor-data:/var/lib/network-monitor \
+  -v "$PWD/network-monitor.toml:/etc/network-monitor/config.toml:ro" \
+  network-monitor:dev \
+  monitor --config /etc/network-monitor/config.toml \
+  --listen 0.0.0.0:8642</code></pre>
+      </div>
+      <div class="snippet">
+        <h3>From source</h3>
+        <p>Rust 1.75 or newer. Raw ICMP sockets need elevated privileges on every platform;
+          <code>tcp</code>, <code>dns</code> and <code>http</code> need none.</p>
+        <pre><code>cargo build --release
+sudo ./target/release/network-monitor monitor --config ./network-monitor.toml \
+  --listen 0.0.0.0:8642</code></pre>
+      </div>
+      <div class="snippet">
+        <h3>Look first, install later</h3>
+        <p>A generated history: no network, no database, and the same seed replays the same board.</p>
+        <pre><code>./target/release/network-monitor simulate --listen 127.0.0.1:8660 \
+  --history 30d --seed 0</code></pre>
+      </div>
+    </div>
+    <p class="note">The same history is JSON at <code>/api/v1/faults</code>, and the reference at
+      <code>/api/v1/docs</code> opens without a network. The
+      <a href="https://github.com/dashie/network-monitor/blob/main/docs/USER-GUIDE.md">user guide</a>
+      covers every configuration key.</p>
+  </section>
+
+  <section id="limits">
+    <h2>Deliberate limits</h2>
+    <ul class="limits">
+      <li>IPv4 only; no IPv6 targets.</li>
+      <li>HTTP checks do not follow redirects, send no body, and present no credentials or client
+        certificate.</li>
+      <li>DNS asks <code>A</code> and <code>AAAA</code> over UDP on port 53: no DNSSEC, no DNS over TLS
+        or HTTPS.</li>
+      <li><code>interface</code> is supported on <code>icmp</code> and <code>tcp</code> only.</li>
+      <li>The page has no authentication and no write path.</li>
+      <li>The trust store is the one compiled into the binary.</li>
+    </ul>
+    <p class="note">Each of these is deliberate rather than missing: one cheap probe, one portable
+      binary, and a page that cannot be used to change anything.</p>
+  </section>
+
+  <section id="faq">
+    <h2>Questions</h2>
+    <div class="faq">
+      <details>
+        <summary>What exactly does it monitor?</summary>
+        <p>Targets you declare: an address over ICMP, a port over TCP, a DNS record, or an HTTP status
+          that must fall inside an expectation. Each is <code>unknown</code>, <code>up</code> or
+          <code>down</code>, and only a change is recorded.</p>
+      </details>
+      <details>
+        <summary>Do I have to run a database server?</summary>
+        <p>No. The history is one SQLite file next to the binary, in WAL mode, so it can be read while
+          the monitor writes.</p>
+      </details>
+      <details>
+        <summary>What does it cost to run?</summary>
+        <p>One process and one file, with no service beside them to keep alive. What it uses follows the
+          number of targets and the interval you choose; there is no cloud, no account and no
+          subscription.</p>
+      </details>
+      <details>
+        <summary>Is there a hosted version?</summary>
+        <p>No. It runs where the network is — a laptop, a container, an appliance — and is read from
+          there.</p>
+      </details>
+      <details>
+        <summary>Does it send my data anywhere?</summary>
+        <p>Only if you enable the Telegram channel, which sends one message per incident. The page and
+          the JSON API answer on the address you bind, and <code>serve</code> binds
+          <code>127.0.0.1</code> unless you say otherwise.</p>
+      </details>
+      <details>
+        <summary>Does it need root?</summary>
+        <p>Only <code>icmp</code>: raw sockets need <code>root</code>, <code>CAP_NET_RAW</code> or
+          Administrator. <code>tcp</code>, <code>dns</code> and <code>http</code> run unprivileged, so a
+          container started with <code>--cap-drop ALL</code> still monitors without a capability.</p>
+      </details>
+      <details>
+        <summary>Can I add my own check?</summary>
+        <p>Yes, and that is what the design is for: one <code>Probe</code> trait, one
+          <code>Method</code> variant, one module. The
+          <a href="https://github.com/dashie/network-monitor/blob/main/docs/DEVELOPER-GUIDE.md#adding-a-probe-type">developer
+          guide</a> gives the steps and the tests that come with them.</p>
+      </details>
+      <details>
+        <summary>Is it free?</summary>
+        <p>Yes. It is released under the
+          <a href="https://github.com/dashie/network-monitor/blob/main/LICENSE">MIT licence</a>: use it,
+          change it, ship it, with no account and no fee.</p>
+      </details>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <img src="assets/icon.svg" alt="" width="28" height="28">
+  <p class="provenance">network-monitor — one executable, built in Rust, released under the MIT
+    licence.</p>
+  <nav aria-label="Elsewhere">
+    <a href="https://github.com/dashie/network-monitor">Source</a>
+    <a href="https://github.com/dashie/network-monitor/blob/main/docs/USER-GUIDE.md">User guide</a>
+    <a href="https://github.com/dashie/network-monitor/blob/main/assets/api/openapi.json">API contract</a>
+    <a href="https://github.com/dashie/network-monitor/blob/main/LICENSE">MIT licence</a>
+  </nav>
+</footer>
+
+</body>
+</html>

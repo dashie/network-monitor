@@ -509,9 +509,10 @@ target and the download/import round trip keeps the exact keys.
   troubleshooting, and the deliberate limits. It links to GLOSSARY/PRODUCT/ADR/DEVELOPER-GUIDE
   instead of redefining anything.
 - **Wiring so it cannot drift silently:** a row in the README documentation map, a
-  project-documents table in `AGENTS.md` outside the managed block (USER-GUIDE, the Uptime Kuma
-  runbook, and `NOTES.md`, which was outside the map until now), and `docs.user_guide` in
-  `.spec-workflow.yml`, so every later plan and every `spec-review` audits it.
+  project-documents table in `AGENTS.md` outside the managed block (USER-GUIDE, the
+  external-history import runbook, and `NOTES.md`, which was outside the map until now),
+  and `docs.user_guide` in `.spec-workflow.yml`, so every later plan and every
+  `spec-review` audits it.
 - **Verified:** the documented commands were executed against a real database —
   `--show-config` for the four methods, `query events` by key, by label and by bare ICMP
   address, and an import of a legacy bare-address CSV that came back as `icmp://1.1.1.1`; the

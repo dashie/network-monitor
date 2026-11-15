@@ -36,11 +36,17 @@ clean checkout.
 network-monitor/
 ├── Cargo.toml            crate metadata, dependencies, MSRV
 ├── Cargo.lock            pinned dependency graph, committed
+├── LICENSE               the MIT licence of the project
 ├── Dockerfile            multi-stage static build for the container image
 ├── docker/config.toml    default configuration shipped in the image
 ├── docker-compose.yml    self-contained compose project (host networking)
 ├── .dockerignore         keeps the build context to the sources
 ├── network-monitor.toml  example configuration, kept in sync with the defaults
+├── .github/
+│   └── workflows/
+│       └── pages.yml     assembles site/ plus the two icons, deploys to GitHub Pages
+├── site/                 the landing page: index.html, style.css, the four images,
+│                         robots.txt and sitemap.xml
 ├── assets/
 │   ├── icon/             the mark, the favicon, and the PNG of both
 │   └── api/
@@ -205,6 +211,104 @@ would need a template engine, which this server deliberately does not have.
 A file that cannot be read falls back to the copy embedded at compile time, so a page never
 fails for a missing file. Nothing is cached: every response carries `Cache-Control:
 no-store`, so a refresh always fetches the current file.
+
+## Landing page
+
+`site/` holds the public description of the project, published at
+<https://dashie.github.io/network-monitor/>. It is static: one `index.html`, one
+`style.css`, four JPEGs under `site/assets/`, and the two crawl files. No build step, no
+framework, no JavaScript, no font download.
+
+| File | What it is |
+|---|---|
+| `site/index.html` | the whole page: hero, why, the four checks, how it works, screenshots, quick start, limits, questions |
+| `site/style.css` | the whole presentation, light and dark through `prefers-color-scheme` |
+| `site/assets/*.jpg` | the three screenshots and the social card |
+| `site/robots.txt`, `site/sitemap.xml` | the crawl files; the page's absolute addresses live in the canonical link, the `og:` tags, the JSON-LD block, `robots.txt` and the sitemap — everything a visitor clicks is relative |
+
+The page names no configuration key that is not in
+[docs/USER-GUIDE.md](./USER-GUIDE.md), and its quick-start commands are copied verbatim
+from [README.md](../README.md#quick-start) — when one of those changes, change the page in
+the same commit.
+
+### Preview it
+
+```bash
+python3 -m http.server 8010 --directory site
+```
+
+Then open <http://127.0.0.1:8010/>. Serve it rather than opening the file: the relative
+`assets/` links and the icons behave as they will on Pages.
+
+### Regenerate the screenshots
+
+The three screenshots come from the generated history, never from a real network, so the
+same command reproduces them on any machine:
+
+```bash
+cargo build --release
+./target/release/network-monitor simulate --listen 127.0.0.1:8660 --history 30d --seed 0
+```
+
+The two wide captures, at twice the CSS size so the JPEG stays sharp on a retina screen:
+
+```bash
+CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+
+"$CHROME" --headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=2 \
+  --window-size=1280,1320 --screenshot=/tmp/timeline.png "http://127.0.0.1:8660/"
+"$CHROME" --headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=2 \
+  --window-size=1280,640  --screenshot=/tmp/target.png \
+  "http://127.0.0.1:8660/target?target=icmp%3A%2F%2F1.1.1.1&window=30d"
+```
+
+The phone capture needs a viewport that is really 390 px wide: a window, or the
+browser's device toolbar set to 390 × 844 at 2×. **Do not use `--window-size=390` in
+headless Chrome**: its window has a minimum width of about 500 px, so the page lays out at
+500 px and the screenshot is cropped to 390 — the cause and the duration columns fall outside
+the frame while the HTML still says 390. Whatever tool you use, open the resulting JPEG and
+check that `CAUSE` and `LASTED` are inside the image and right-aligned over their values.
+
+| Image | Address | Viewport |
+|---|---|---|
+| `timeline.jpg` | `http://127.0.0.1:8660/` | 1280 × 1320 |
+| `target.jpg` | `http://127.0.0.1:8660/target?target=icmp%3A%2F%2F1.1.1.1&window=30d` | 1280 × 640 |
+| `narrow.jpg` | `http://127.0.0.1:8660/` | 390 × 844 |
+
+Then fit each to the width the page states:
+
+```bash
+sips --resampleWidth 1040 -s format jpeg -s formatOptions 80 /tmp/timeline.png --out site/assets/timeline.jpg
+sips --resampleWidth 1040 -s format jpeg -s formatOptions 85 /tmp/target.png   --out site/assets/target.jpg
+sips --resampleWidth 500  -s format jpeg -s formatOptions 70 /tmp/narrow.png   --out site/assets/narrow.jpg
+```
+
+The window height of the timeline is the height of the page at that width: read it with
+`document.documentElement.scrollHeight` and raise the window if a row is cut. Take the three
+captures from **one** `simulate` session and in one go: the timeline shows the last hour, so the
+board moves with the clock, and a capture taken later in the day shows other bands and other
+faults than the ones above it.
+
+Keep the `width`/`height` attributes of the `<img>` in step with the file: they reserve the
+space before the image loads, so a stale pair makes the page jump. `og.jpg` is the social
+card, 1200×630, built from the same identity block and the `target.jpg` screenshot.
+
+### Publish it
+
+`.github/workflows/pages.yml` runs on every push to `main` and on demand. It assembles
+`_site/` from `site/` plus the two icons in `assets/icon/`, and deploys the result with
+`actions/deploy-pages`. Those icons stay the single source of truth: the same files are
+embedded in the binary by `src/web/mod.rs`. `_site/` is ignored by Git, so a local assembly
+never reaches a commit; rehearse it with
+
+```bash
+rm -rf _site && mkdir -p _site/assets && cp -R site/. _site/ \
+  && cp assets/icon/icon.svg assets/icon/favicon-32.png _site/assets/
+```
+
+One manual step, once: in the repository settings, under **Pages → Build and deployment**,
+set **Source** to **GitHub Actions**. Until that is done the workflow runs and publishes
+nothing.
 
 ## Container and QNAP deployment
 
@@ -537,8 +641,8 @@ The archive is read twice in that mode, so stdin and an URL are copied once into
 exported URL is regenerated on every request); the copy is removed when the command
 ends. An empty archive has no window, so the command refuses and deletes nothing.
 
-A history coming from Uptime Kuma needs a conversion before it reaches `import`: the
-runbook is [UPTIME-KUMA-IMPORT.md](./UPTIME-KUMA-IMPORT.md).
+A history coming from another monitor needs a conversion before it reaches `import`: the
+runbook is [HISTORY-IMPORT.md](./HISTORY-IMPORT.md).
 
 #### Back up before you import
 

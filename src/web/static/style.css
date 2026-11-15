@@ -427,6 +427,12 @@ td.down { color: #c62828; }
     position: static;
     border-top: 0;
   }
+  /* Each column is a grid area now, so a header fills its area instead of its label: the
+     percentage shares the wide layout gives the fault columns would otherwise size the header
+     alone, and a right-aligned header would sit at the left of its column instead of over the
+     values it names. `:nth-child(n)` matches every header and carries the specificity of those
+     shares, which is what lets this win. */
+  table.faults th:nth-child(n) { width: 100%; }
   /* The fault table reads down each column: the target with its instant under it, then the
      cause with its duration under it. */
   table.faults tr > *:nth-child(1) { grid-area: 1 / 1; }

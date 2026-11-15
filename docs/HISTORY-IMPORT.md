@@ -1,49 +1,52 @@
-# Importing an Uptime Kuma history
+# Importing a history from another monitor
 
-Runbook for moving a history out of Uptime Kuma and into a `network-monitor` database,
-or for merging a Kuma history into one that already records transitions. The import
-command, its options, and the merge semantics are in
+Runbook for moving a history out of another monitoring tool and into a `network-monitor`
+database, or for merging such a history into one that already records transitions. The
+import command, its options, and the merge semantics are in
 [DEVELOPER-GUIDE.md](./DEVELOPER-GUIDE.md#restoring-the-history-after-a-redeploy); this
-document covers only the Kuma side.
+document covers only the source side.
 
-The conversion is done by [scripts/utils/kuma2nm.py](../scripts/utils/kuma2nm.py). Its
-module documentation is the reference for the field mapping and for the caveats; the
+The conversion is done by [scripts/utils/export2nm.py](../scripts/utils/export2nm.py).
+Its module documentation is the reference for the field mapping and for the caveats; the
 steps below are the operation itself.
 
-## 1. Check the Kuma clock
+## 1. Check the clock of the source
 
-Kuma writes the heartbeat time as a naive local-time string, produced by the clock of the
-Kuma process. The official image runs on UTC unless `TZ` is set, and this runbook assumes
-that:
+The source writes the heartbeat time as a naive local-time string, produced by the clock
+of its own process. Its official image runs on UTC unless `TZ` is set, and this runbook
+assumes that. The two variables below name the source once and are used by every command
+of the runbook, so set them in the shell that runs it:
 
 ```bash
-docker -c qubo exec uptime-kuma date   # must print UTC
+SRC=source-monitor          # the container of the tool that recorded the history
+SRCDB=/app/data/source.db   # its SQLite database inside that container
+docker -c qubo exec $SRC date   # must print UTC
 ```
 
 If it does not, convert the timestamps before importing: the converter adds `Z` and
 carries no offset on purpose, because a wrong offset corrupts every row silently.
 
-## 2. Export the heartbeats from the Kuma database
+## 2. Export the heartbeats from the source database
 
-Take the rows from Kuma's own SQLite database, not from the CSV the status page offers
-for download: the page export is a snapshot of what the browser was shown, and in this
-installation it stopped three days before the database did. The database is
-`/app/data/kuma.db` inside the Kuma container.
+Take the rows from the source's own SQLite database, not from the CSV its status page
+offers for download: the page export is a snapshot of what the browser was shown, and in
+this installation it stopped three days before the database did. The database is `$SRCDB`
+inside the `$SRC` container.
 
 Start by checking what is there:
 
 ```bash
-docker -c qubo exec -i uptime-kuma sqlite3 -header -column /app/data/kuma.db "
+docker -c qubo exec -i $SRC sqlite3 -header -column $SRCDB "
 SELECT m.name, h.monitor_id, COUNT(*) heartbeats, MIN(h.time) first, MAX(h.time) last
 FROM heartbeat h JOIN monitor m ON h.monitor_id = m.id
 GROUP BY h.monitor_id;"
 ```
 
-Then write the CSV the converter reads, with the same columns Kuma's page would have
+Then write the CSV the converter reads, with the same columns the source page would have
 written — `id,monitor_name,status,time,message,ping`:
 
 ```bash
-docker -c qubo exec -i uptime-kuma sqlite3 -header -csv /app/data/kuma.db "
+docker -c qubo exec -i $SRC sqlite3 -header -csv $SRCDB "
 SELECT h.id,
        m.name AS monitor_name,
        h.status,
@@ -52,7 +55,7 @@ SELECT h.id,
        CASE WHEN h.ping IS NULL THEN '' ELSE CAST(h.ping AS TEXT) END AS ping
 FROM heartbeat h
 JOIN monitor m ON h.monitor_id = m.id
-ORDER BY h.time, h.id;" > tmp/import/kuma-heartbeats.csv
+ORDER BY h.time, h.id;" > tmp/import/source-heartbeats.csv
 ```
 
 The count of physical lines is not the count of rows: a ping message spans several lines
@@ -62,9 +65,9 @@ the converter's report or with a CSV reader.
 The database and the page export can disagree in two ways, and the database is the one
 to trust:
 
-- **Coverage.** Kuma prunes the heartbeats it keeps, but it keeps every state change, so
-  the old months are transitions only while the last days hold every probe. A page export
-  taken earlier is both shorter and older.
+- **Coverage.** The source prunes the heartbeats it keeps, but it keeps every state
+  change, so the old months are transitions only while the last days hold every probe. A
+  page export taken earlier is both shorter and older.
 - **The monitor list.** A monitor that has since been deleted, or repointed, is visible
   in `monitor`; check `SELECT id, name, hostname, active FROM monitor` before converting,
   because the address in the messages is what decides the target.
@@ -90,9 +93,9 @@ id,monitor_name,status,time,message,ping
 101314,"DNS ping",1,"2026-09-02 08:00:40.000","",7.2
 ```
 
-[scripts/utils/kuma-example.csv](../scripts/utils/kuma-example.csv) holds these rows with
-the ping messages unabridged, so the command below can be tried on it before touching a
-real export. The file shows the four cases that matter:
+The file [scripts/utils/export-example.csv](../scripts/utils/export-example.csv) holds
+these rows with the ping messages unabridged, so the command below can be tried on it
+before touching a real export. It shows the four cases that matter:
 
 - the address lives in the `message`, in the `PING <address>` line, and an up heartbeat
   carries no message, so it inherits the address of its monitor;
@@ -103,11 +106,11 @@ real export. The file shows the four cases that matter:
 ## 4. Convert
 
 ```bash
-python3 scripts/utils/kuma2nm.py ~/Downloads/kuma-events.csv \
+python3 scripts/utils/export2nm.py ~/Downloads/events.csv \
     --initial "DNS ping=1.1.1.1" --initial "Gateway ping=192.168.1.1" \
     --alias 8.8.8.8=1.1.1.1 \
     --label 1.1.1.1=cloudflare-dns --label 192.168.1.1=gateway \
-    -o /tmp/kuma-network-monitor.csv
+    -o /tmp/network-monitor-events.csv
 ```
 
 `--initial` seeds the address of a monitor whose first heartbeats carry no message, and
@@ -156,7 +159,7 @@ then writes the archive. A target's history before and after its own window stay
 target the archive does not mention keeps everything.
 
 ```bash
-cat tmp/import/kuma-network-monitor.csv | docker -c qubo run --rm -i \
+cat /tmp/network-monitor-events.csv | docker -c qubo run --rm -i \
   -v network-monitor-data:/var/lib/network-monitor \
   network-monitor:dev \
   import --replace-window --database /var/lib/network-monitor/events.db -
@@ -213,7 +216,7 @@ stopped:
 
 ```bash
 # import from the pipe, in a one-off container on the same volume
-cat /tmp/kuma-network-monitor.csv | docker -c qubo run --rm -i \
+cat /tmp/network-monitor-events.csv | docker -c qubo run --rm -i \
   -v network-monitor-data:/var/lib/network-monitor \
   network-monitor:dev \
   import --database /var/lib/network-monitor/events.db -
@@ -233,10 +236,10 @@ docker -c qubo run --rm -v network-monitor-data:/var/lib/network-monitor \
 curl -s http://qubo:8642/healthz
 ```
 
-Then open `http://qubo:8642/target?target=<address>`: the last 30 days now hold the Kuma
-days as well, and the totals of the period include them. Check the labels in `query
-state` too: a null label means the live monitor has to be started with `label=` (see
-[Labels belong to the live configuration](#labels-belong-to-the-live-configuration)).
+Then open `http://qubo:8642/target?target=<address>`: the last 30 days now hold the
+imported days as well, and the totals of the period include them. Check the labels in
+`query state` too: a null label means the live monitor has to be started with `label=`
+(see [Labels belong to the live configuration](#labels-belong-to-the-live-configuration)).
 
 Re-running an import is harmless in outcome but not free: the rows that repeat a state
 are inserted again and then dropped by the normalisation, so a second run of a 32 000-row
@@ -255,8 +258,8 @@ docker -c qubo start network-monitor
 
 ## Reference: closing a measurement gap with an `unknown` row
 
-An imported chain carries its last state forward. When a Kuma monitor stopped hours or
-days before the live monitor started, that carried state describes a stretch nobody
+An imported chain carries its last state forward. When the source monitor stopped hours
+or days before the live monitor started, that carried state describes a stretch nobody
 measured: in this installation a stale `down` turned the 35 hours between the two chains
 into a day of down time that never happened.
 
@@ -287,7 +290,7 @@ time of the target from `4d01h` to `2d14h`, all of it difference in unmeasured h
 
 This is a repair, not a documented feature: nothing in the binary writes an `unknown`
 event. If it becomes routine, the honest fix is to let `import` accept an `unknown` state
-and let the Kuma converter emit the marker.
+and let the export converter emit the marker.
 
 ## Labels belong to the live configuration
 

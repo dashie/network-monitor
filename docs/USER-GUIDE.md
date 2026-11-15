@@ -402,13 +402,15 @@ is showing, on the left of the line, and carries the control that changes it, on
   lists. A lane is drawn as one bar: only its two outer ends are rounded, so the bands of the states
   meet square. A fault too short to reach a visible width is drawn at a minimum width and
   coloured **orange instead of red**, so a brief outage is not lost in a wide window and its
-  width is never mistaken for its duration; hover it for the exact instants.
+  width is never mistaken for its duration; hover it for the exact instants. The legend names
+  that band `short fault`.
   A lane states the drops, the average `up` run with its spread, the longest run, and how long
   the target has been up without a drop. Below the chart opens a table of the last 10 faults,
   under a rule that marks where it begins: a row names the target as its lane does — the label,
   with the key in smaller type under it, or the key alone when the target has no label — and
-  states the start, the cause of the fault, and — in the last column — the duration, with
-  "and counting" on a line of its own while the target is still down. The four columns start
+  states the start, the cause of the fault, and — in the last column — the duration. A fault
+  still running states it is `and counting`: on a line under the duration, and beside it on the
+  same line once the table is stacked. The four columns start
   from a stated share of the width (15, 30, 45 and 10 per cent) and every row is the same
   height. A share is a starting point, never a rule that lets a value be cut in two: a target
   name, a target address, a cause code, each half of an instant, and the average `up` run with

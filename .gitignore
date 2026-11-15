@@ -3,6 +3,9 @@
 **/*.rs.bk
 *.pdb
 
+# Assembled landing page, rebuilt by the Pages workflow
+/_site/
+
 # Tooling
 *.log
 
@@ -42,3 +45,8 @@ tmp/*
 # Create a copy from network-monitor.sample.toml to create a local
 # configuration file if needed
 network-monitor.toml
+
+# Event database and its write-ahead log, wherever a local run leaves them
+network-monitor.db
+network-monitor.db-shm
+network-monitor.db-wal

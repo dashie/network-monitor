@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert an Uptime Kuma heartbeat export into the `network-monitor import` format.
+"""Convert a monitoring heartbeat export into the `network-monitor import` format.
 
 # What it does
 
@@ -8,49 +8,49 @@ state change with the columns
 
     target,label,interface,state,occurred_at,rtt_us
 
-Uptime Kuma exports its heartbeats in another shape:
+Another monitoring tool exports its heartbeats in another shape:
 
     id,monitor_name,status,time,message,ping
 
-This script rewrites the second into the first, so a Kuma history can be loaded into a
-`network-monitor` database with the command it already has. It is a migration aid that
+This script rewrites the second into the first, so an existing history can be loaded into
+a `network-monitor` database with the command it already has. It is a migration aid that
 runs once per export and stays outside the binary; nothing in `src/` depends on it.
 
 # When to use it
 
-* Moving an existing Uptime Kuma installation to `network-monitor` and keeping the
+* Moving an existing installation of another monitor to `network-monitor` and keeping the
   history.
-* Merging a Kuma history into a database that already records transitions. The importer
+* Merging such a history into a database that already records transitions. The importer
   drops an event that repeats the state before it, so re-running the same file is safe.
 
 When the history comes from `network-monitor` itself, do not use this script: the page
 offers the file in the right format already.
 
-`kuma-example.csv`, next to this file, is the small export the runbook converts, and
-`docs/UPTIME-KUMA-IMPORT.md` is the step-by-step operation: check the Kuma clock, export
-the heartbeats from Kuma's own database with the SQL the runbook gives, convert, back up,
-import with the monitor stopped, verify, roll back. The CSV the Kuma status page offers
-for download is a snapshot of what the browser was shown and can stop days before the
+`export-example.csv`, next to this file, is the small export the runbook converts, and
+`docs/HISTORY-IMPORT.md` is the step-by-step operation: check the clock of the source,
+export the heartbeats from its own database with the SQL the runbook gives, convert, back
+up, import with the monitor stopped, verify, roll back. The CSV such a tool offers for
+download is a snapshot of what the browser was shown and can stop days before the
 database does, so prefer the SQL export.
 
 # How the fields map
 
-Kuma `message` (`PING 1.1.1.1 (1.1.1.1) ...`) becomes `target`: the address after
+The source `message` (`PING 1.1.1.1 (1.1.1.1) ...`) becomes `target`: the address after
 `PING `. A heartbeat without a message keeps the last address named for that monitor, so
 the heartbeat interval does not have to repeat it.
 
-Kuma `status` becomes `state`: `1` is `up`, `0` is `down`; `2` (pending) and `3`
+The source `status` becomes `state`: `1` is `up`, `0` is `down`; `2` (pending) and `3`
 (maintenance) are skipped and counted.
 
-Kuma `time` becomes `occurred_at`: `YYYY-MM-DD HH:MM:SS.mmm` read as UTC and written as
-`...T...Z`.
+The source `time` becomes `occurred_at`: `YYYY-MM-DD HH:MM:SS.mmm` read as UTC and
+written as `...T...Z`.
 
-Kuma `ping` becomes `rtt_us`: milliseconds to microseconds, rounded; empty when Kuma
-recorded none.
+The source `ping` becomes `rtt_us`: milliseconds to microseconds, rounded; empty when the
+source recorded none.
 
-`monitor_name` is not imported — Kuma names a monitor, `network-monitor` tracks an
+`monitor_name` is not imported — the source names a monitor, `network-monitor` tracks an
 address. `label` comes from `--label ADDRESS=LABEL` and is empty otherwise. `interface`
-is always empty: Kuma does not record which interface it probed.
+is always empty: the source does not record which interface it probed.
 
 Every heartbeat is written, including the ones that repeat the previous state: the
 importer collapses them (`BR-1`) in one pass, and letting it decide keeps this script
@@ -58,29 +58,30 @@ from needing the state machine the store already has.
 
 # Time zone
 
-Kuma stores the heartbeat time as a naive local-time string, produced by the Kuma
-process clock. The official image runs on UTC unless `TZ` is set, so the default here is
-to add `Z` and change nothing else. Check the installation before importing:
+The source stores the heartbeat time as a naive local-time string, produced by the clock
+of its own process. Its official image runs on UTC unless `TZ` is set, so the default
+here is to add `Z` and change nothing else. Check the installation before importing:
 
-    docker exec uptime-kuma date
+    docker exec <source-container> date
 
 If it prints a time other than UTC, convert the timestamps first: this script does not
 carry an offset, on purpose — a wrong offset corrupts every row silently.
 
 # Caveats worth reading before the import
 
-* **A monitor can be repointed.** Kuma keeps the monitor name when the address changes,
-  so the history of one name splits at that instant into two targets. The script follows
-  the address in the message and prints a `note:` line for every switch it sees.
+* **A monitor can be repointed.** The source keeps the monitor name when the address
+  changes, so the history of one name splits at that instant into two targets. The
+  script follows the address in the message and prints a `note:` line for every switch
+  it sees.
 * **`--alias` changes what the data claims.** Recording one address under another (for
   example a DNS monitor that moved from `1.1.1.1` to `8.8.8.8`, kept as a single
   `1.1.1.1` lane) makes one continuous chain out of two different endpoints. Use it only
   when that is the story the reader should see, and say so in the commit message.
-* **A gap in the export is not a state.** When Kuma stopped collecting, the export has no
-  row, and the imported chain continues with the last state it knows. On a database that
-  is already recording, the two chains join at the first live event; if that event
-  repeats the imported state, the importer folds it away and the page reports the state
-  as older than the first live probe.
+* **A gap in the export is not a state.** When the source stopped collecting, the export
+  has no row, and the imported chain continues with the last state it knows. On a
+  database that is already recording, the two chains join at the first live event; if
+  that event repeats the imported state, the importer folds it away and the page reports
+  the state as older than the first live probe.
 * **Labels never overwrite.** The store sets a target's label with `COALESCE`, so a label
   the live database already holds wins over the one given here.
 * **Exit status** is `0` on success and `2` on an unreadable input, so a shell chain
@@ -91,7 +92,7 @@ carry an offset, on purpose — a wrong offset corrupts every row silently.
 * Standard library only, Python 3.9 or newer; no dependency to install on the NAS or on
   a workstation.
 * The whole file is read and sorted by `time` before anything is written, because the
-  output must be ordered by target and instant while a Kuma export is ordered by id. 64k
+  output must be ordered by target and instant while the export is ordered by id. 64k
   heartbeats occupy a few tens of megabytes; this is not a streaming converter.
 * Nothing is guessed: a monitor whose first heartbeats carry no `PING` message needs
   `--initial MONITOR=ADDRESS`, and the script stops with that instruction instead of
@@ -99,18 +100,18 @@ carry an offset, on purpose — a wrong offset corrupts every row silently.
 * The report goes to standard error and the CSV to standard output (or `--output`), so
   the command composes with a pipe:
 
-      python3 scripts/utils/kuma2nm.py export.csv -o /tmp/events.csv
+      python3 scripts/utils/export2nm.py export.csv -o /tmp/events.csv
       cat /tmp/events.csv | docker run --rm -i ... network-monitor import -
 
 * Tests: `python3 -m unittest discover -s scripts/utils -p 'test_*.py'`.
 
 # Example: the migration this script was written for
 
-    python3 scripts/utils/kuma2nm.py ~/Downloads/kuma-events.csv \\
+    python3 scripts/utils/export2nm.py ~/Downloads/export.csv \\
         --initial "DNS ping=1.1.1.1" --initial "Gateway ping=192.168.1.1" \\
         --alias 8.8.8.8=1.1.1.1 \\
         --label 1.1.1.1=cloudflare-dns --label 192.168.1.1=gateway \\
-        -o /tmp/kuma-network-monitor.csv
+        -o /tmp/events-import.csv
 """
 
 from __future__ import annotations
@@ -124,17 +125,17 @@ from typing import Dict, List, Optional, Tuple
 
 HEADER = "target,label,interface,state,occurred_at,rtt_us"
 
-#: Kuma status codes that map onto a state `network-monitor` knows.
+#: The status codes of the source that map onto a state `network-monitor` knows.
 STATES = {"1": "up", "0": "down"}
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Convert an Uptime Kuma heartbeat export into the network-monitor "
+        description="Convert a monitoring heartbeat export into the network-monitor "
         "import format.",
         epilog="The module documentation states the mapping and the caveats.",
     )
-    parser.add_argument("source", type=Path, help="the Uptime Kuma CSV")
+    parser.add_argument("source", type=Path, help="the exported CSV")
     parser.add_argument(
         "-o", "--output", type=Path, help="write the CSV here instead of standard output"
     )
@@ -204,7 +205,7 @@ def instant(text: str) -> str:
 
 
 def micros(ping: str) -> str:
-    """Kuma's ping in milliseconds, as the microseconds the store keeps."""
+    """The source's ping in milliseconds, as the microseconds the store keeps."""
     if not ping.strip():
         return ""
     try:
@@ -301,7 +302,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("%s holds no row" % args.source, file=sys.stderr)
         return 2
 
-    # Kuma orders by id; the output wants the instants, and so does the report.
+    # The export orders by id; the output wants the instants, and so does the report.
     rows.sort(key=lambda row: row["time"])
 
     try:

@@ -195,7 +195,7 @@ pub(super) fn faults_table(faults: &[Fault], now_ms: i64, download: &str) -> Str
             },
             lasted = lasted,
             tail = if ongoing {
-                "<span class=\"ongoing\">and counting</span>"
+                " <span class=\"ongoing\">and counting</span>"
             } else {
                 ""
             }

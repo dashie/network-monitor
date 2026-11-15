@@ -4,6 +4,8 @@
 
 Every text artefact — code, comments, identifiers, documentation, commit messages, issues — is written in English.
 
+The project is released under the [MIT licence](./LICENSE). A contribution is offered under that same licence, and there is no separate agreement to sign.
+
 <!-- skill:block:contributing-before-you-start -->
 ## Before you start
 

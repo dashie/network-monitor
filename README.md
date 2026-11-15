@@ -2,6 +2,8 @@
 
 Event-based reachability monitor with ICMP, TCP, DNS, and HTTP checks, per-interface probes, TOML configuration, and an embedded SQLite history.
 
+Website: <https://dashie.github.io/network-monitor/> · Licence: MIT — see [LICENSE](./LICENSE).
+
 ## Overview
 
 `network-monitor` answers one narrow question continuously and cheaply: is this target reachable right now, from this interface?
@@ -102,16 +104,21 @@ Not done yet: the Windows raw-socket path is written but not exercised on a Wind
 
 | Document | Purpose |
 |---|---|
+| [Landing page](https://dashie.github.io/network-monitor/) | The public description of the project: what it does, the four checks, the screenshots, the quick start, the limits, the questions |
 | [docs/USER-GUIDE.md](docs/USER-GUIDE.md) | Install, configure, operate, troubleshoot — the manual to hand to a user |
 | [docs/PRODUCT.md](docs/PRODUCT.md) | Users, scope, functional requirements, business rules |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | arc42 structure, C4 views, component contracts, invariants |
 | [docs/ADR.md](docs/ADR.md) | Architecture decisions and their rationale |
 | [docs/GLOSSARY.md](docs/GLOSSARY.md) | One precise definition per domain term |
 | [docs/DEVELOPER-GUIDE.md](docs/DEVELOPER-GUIDE.md) | Build, run, test, extend, and the Git standards |
-| [docs/UPTIME-KUMA-IMPORT.md](docs/UPTIME-KUMA-IMPORT.md) | Runbook: import an Uptime Kuma history into a database |
+| [docs/HISTORY-IMPORT.md](docs/HISTORY-IMPORT.md) | Runbook: import a history from another monitor into a database |
 | [docs/TELEGRAM-NOTIFICATIONS.md](docs/TELEGRAM-NOTIFICATIONS.md) | Runbook: enable, verify, and repair the Telegram notification channel |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Branching, review, definition of done |
 | [AGENTS.md](AGENTS.md) | Rules for human and AI contributors |
+
+## Licence
+
+MIT. See [LICENSE](./LICENSE): use it, modify it, ship it, keep the notice.
 
 ## Contributing
 

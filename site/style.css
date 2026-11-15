@@ -1,0 +1,282 @@
+/* The landing page, one file. No framework, no script, no external font: the page is the
+   document and this stylesheet, and nothing is fetched from a third party. The palette is
+   the one the served page uses, so the product and its description look like one thing. */
+
+:root {
+  color-scheme: light dark;
+  --brand: #2d4ea9;
+  --up: #2d7d46;
+  --down: #c62828;
+  --alert: #b25000;
+  --ink: #16181d;
+  --muted: #5b6270;
+  --bg: #ffffff;
+  --surface: #f6f7f9;
+  --rule: #dfe3e9;
+  --code-bg: #101318;
+  --code-ink: #e8ecf3;
+  --measure: 68ch;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --alert: #ffab40;
+    --ink: #e9ecf1;
+    --muted: #a3abb9;
+    --bg: #14171c;
+    --surface: #1c2027;
+    --rule: #2c323c;
+    --code-bg: #0b0d10;
+    --code-ink: #e8ecf3;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+img { max-width: 100%; height: auto; }
+
+a { color: var(--brand); }
+a:hover { text-decoration-thickness: 2px; }
+:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; border-radius: 3px; }
+
+.skip {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  padding: 10px 16px;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  color: var(--ink);
+  text-decoration: none;
+  z-index: 10;
+}
+.skip:focus { left: 8px; top: 8px; }
+
+/* The header carries the mark and the way to each block. It wraps on a narrow screen
+   instead of scrolling the page sideways. */
+.site-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 24px;
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 18px 24px;
+  border-bottom: 1px solid var(--rule);
+}
+.wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-right: auto;
+  color: inherit;
+  text-decoration: none;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.site-header nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 18px;
+  font-size: 14px;
+}
+.site-header nav a { color: inherit; text-decoration: none; opacity: 0.8; }
+.site-header nav a:hover { opacity: 1; }
+
+main { max-width: 1040px; margin: 0 auto; padding: 0 24px; }
+
+section { padding: 56px 0 8px; }
+section + section { border-top: 1px solid var(--rule); }
+
+h1 {
+  margin: 0 0 18px;
+  font-size: clamp(28px, 5vw, 44px);
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  max-width: 22ch;
+}
+h2 {
+  margin: 0 0 22px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+h3 { margin: 0 0 6px; font-size: 16px; letter-spacing: -0.01em; }
+
+.hero { padding-top: 64px; }
+.lead { max-width: var(--measure); margin: 0 0 28px; font-size: 18px; color: var(--muted); }
+.actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 20px; }
+.platforms {
+  margin: 0;
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.button {
+  display: inline-block;
+  padding: 9px 16px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  color: inherit;
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 600;
+}
+.button:hover { border-color: var(--ink); }
+.button.primary { background: var(--brand); border-color: var(--brand); color: #ffffff; }
+
+/* Cards: one column on a phone, more when the width allows. */
+.cards {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+}
+.card {
+  padding: 16px 18px;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+}
+.card p { margin: 0; color: var(--muted); font-size: 15px; }
+.card code { font-size: 13px; }
+
+.table-scroll { overflow-x: auto; }
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 15px;
+}
+th, td { text-align: left; padding: 10px 16px 10px 0; vertical-align: top; }
+th {
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 1px solid var(--rule);
+}
+tbody tr + tr td { border-top: 1px solid var(--rule); }
+td code { white-space: nowrap; }
+.extension, .note { max-width: var(--measure); margin: 20px 0 0; color: var(--muted); }
+
+.steps { max-width: var(--measure); margin: 0; padding-left: 22px; }
+.steps li { margin-bottom: 12px; }
+.steps li:last-child { margin-bottom: 0; }
+
+/* Three slides on one row, each in the same square frame. The captures have three different
+   shapes — 0.97:1, 2:1 and 0.46:1 — so every frame shows its whole picture at its own
+   proportions and lets the frame fill the rest: a square tile is the one shape that leaves no
+   capture a sliver, and `contain` keeps the ratio instead of cropping it away. */
+.shots { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.shots .shot { margin: 0; }
+.shots a {
+  display: block;
+  aspect-ratio: 1;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--rule) 30%, Canvas);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+}
+.shots a:hover, .shots a:focus-visible { border-color: var(--brand); }
+.shots img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.shots figcaption { margin-top: 6px; font-size: 13px; color: var(--muted); }
+.shots-hint { margin: 10px 0 0; font-size: 13px; color: var(--muted); }
+
+/* A slide opens over the page. The overlay is a `:target`, so one click opens it and one click on
+   the backdrop closes it, with no script: the page keeps a single `<script>` and that is the
+   structured data. Escape does not close it — there is nothing to bind the key to. */
+.viewer { position: fixed; inset: 0; z-index: 10; display: none; }
+.viewer:target { display: grid; place-items: center; padding: 24px; }
+.viewer-close { position: absolute; inset: 0; background: rgba(10, 14, 22, 0.88); }
+/* The picture keeps its own proportions inside the viewport. `width`/`height: auto` make the box
+   follow the ratio stated by the `<img>`; without them a binding `max-height` clamps the box and
+   the picture is stretched to fill it, and `object-fit: contain` covers the case where the ratio
+   and the box ever disagree. */
+.viewer img {
+  position: relative;
+  width: auto;
+  height: auto;
+  max-width: calc(100vw - 48px);
+  max-height: calc(100vh - 96px);
+  object-fit: contain;
+  border-radius: 8px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+}
+.viewer p {
+  position: relative;
+  max-width: 68ch;
+  margin: 10px auto 0;
+  font-size: 13px;
+  color: #e8eaee;
+  text-align: center;
+}
+
+.snippets { display: grid; gap: 24px; grid-template-columns: minmax(0, 1fr); }
+.snippet h3 { margin-bottom: 4px; }
+.snippet p { margin: 0 0 8px; color: var(--muted); font-size: 14px; }
+pre {
+  margin: 0;
+  padding: 14px 16px;
+  overflow-x: auto;
+  background: var(--code-bg);
+  color: var(--code-ink);
+  border-radius: 10px;
+  font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+.limits { max-width: var(--measure); margin: 0; padding-left: 20px; color: var(--muted); }
+.limits li { margin-bottom: 6px; }
+
+.faq { display: grid; gap: 10px; max-width: var(--measure); }
+details {
+  padding: 12px 16px;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+}
+summary { cursor: pointer; font-weight: 600; }
+summary::marker { color: var(--muted); }
+details p { margin: 10px 0 0; color: var(--muted); font-size: 15px; }
+
+footer {
+  max-width: 1040px;
+  margin: 40px auto 0;
+  padding: 24px;
+  border-top: 1px solid var(--rule);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 20px;
+  font-size: 14px;
+  color: var(--muted);
+}
+footer p { margin: 0; margin-right: auto; }
+footer nav { display: flex; flex-wrap: wrap; gap: 8px 18px; }
+footer nav a { color: inherit; }
+
+@media (max-width: 620px) {
+  .site-header, main, footer { padding-left: 16px; padding-right: 16px; }
+  .site-header { padding-top: 14px; padding-bottom: 14px; }
+  section { padding-top: 40px; }
+  .hero { padding-top: 44px; }
+}

@@ -63,9 +63,10 @@ Rules for these documents:
 | Document | What it defines | Update it when |
 |---|---|---|
 | [docs/USER-GUIDE.md](./docs/USER-GUIDE.md) | Install, configure, operate, and troubleshoot: the manual handed to a user | A user-visible behaviour, a configuration key, a command, or an operating step changes |
-| [docs/UPTIME-KUMA-IMPORT.md](./docs/UPTIME-KUMA-IMPORT.md) | Runbook for importing an Uptime Kuma history | The import format or the Kuma procedure changes |
+| [docs/HISTORY-IMPORT.md](./docs/HISTORY-IMPORT.md) | Runbook for importing a history from another monitor | The import format or the source procedure changes |
 | [docs/TELEGRAM-NOTIFICATIONS.md](./docs/TELEGRAM-NOTIFICATIONS.md) | Runbook for enabling, verifying, and repairing the Telegram channel | The notification procedure, a key, or a failure mode changes |
 | [NOTES.md](./NOTES.md) | Deployment notes: compose and `docker run` against a Docker context | A deployment step changes |
+| [site/index.html](./site/index.html) | The public landing page published on GitHub Pages | A feature, a command, a limit or a screenshot changes |
 
 <!-- skill:block:agents-engineering-principles before="## Git standards" -->
 ## Engineering principles

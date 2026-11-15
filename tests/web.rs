@@ -252,6 +252,10 @@ fn serves_the_page_with_a_band_per_state() {
         response.contains("and counting"),
         "the seeded target was down at the end of the window"
     );
+    assert!(
+        response.contains(" <span class=\"ongoing\">and counting</span>"),
+        "the duration and the words that follow it are separated, so a stacked row reads \"4m and counting\" and not \"4mand counting\""
+    );
 
     let legend_start = response.find("<div class=\"legend\">").expect("a legend");
     let legend = &response[legend_start..];
@@ -260,13 +264,13 @@ fn serves_the_page_with_a_band_per_state() {
         legend.find(">up<").expect("up in the legend"),
         legend.find(">down<").expect("down in the legend"),
         legend
-            .find(">fault too short to draw<")
+            .find(">short fault<")
             .expect("the short fault in the legend"),
         legend.find(">unknown<").expect("unknown in the legend"),
     ];
     assert!(
         order.windows(2).all(|pair| pair[0] < pair[1]),
-        "the legend reads up, down, fault too short to draw, unknown: {legend}"
+        "the legend reads up, down, short fault, unknown: {legend}"
     );
 }
 
@@ -880,6 +884,7 @@ fn no_cell_of_a_table_breaks_a_token() {
         "table.days tr { grid-template-columns: minmax(0, 60%) minmax(0, 40%); }",
         "table.faults tr > *:nth-child(2) { grid-area: 2 / 1; }",
         "table.days tr > *:nth-child(3) { grid-area: 2 / 1; text-align: left; }",
+        "table.faults th:nth-child(n) { width: 100%; }",
         "table.faults tr[hidden] { display: none; }",
     ] {
         assert!(style.contains(rule), "the served stylesheet states {rule}");

@@ -1,4 +1,4 @@
-"""Tests of the Uptime Kuma converter, runnable without a test framework.
+"""Tests of the heartbeat export converter, runnable without a test framework.
 
     python3 -m unittest discover -s scripts/utils -p 'test_*.py'
 """
@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import kuma2nm
+import export2nm
 
 
 def heartbeat(monitor, status, time, message="", ping=""):
@@ -24,7 +24,7 @@ def heartbeat(monitor, status, time, message="", ping=""):
 class AddressTest(unittest.TestCase):
     def test_the_address_follows_the_ping_command(self):
         self.assertEqual(
-            kuma2nm.address_of("PING 1.1.1.1 (1.1.1.1) 56(84) bytes of data."),
+            export2nm.address_of("PING 1.1.1.1 (1.1.1.1) 56(84) bytes of data."),
             "1.1.1.1",
         )
 
@@ -33,33 +33,33 @@ class AddressTest(unittest.TestCase):
             "PING 192.168.1.1 (192.168.1.1) 56(84) bytes of data. "
             "From 192.168.2.1 icmp_seq=1 Destination Net Unreachable"
         )
-        self.assertEqual(kuma2nm.address_of(message), "192.168.1.1")
+        self.assertEqual(export2nm.address_of(message), "192.168.1.1")
 
     def test_a_message_without_a_ping_names_no_address(self):
-        self.assertIsNone(kuma2nm.address_of(""))
-        self.assertIsNone(kuma2nm.address_of("monitor is paused"))
+        self.assertIsNone(export2nm.address_of(""))
+        self.assertIsNone(export2nm.address_of("monitor is paused"))
 
 
 class FieldTest(unittest.TestCase):
     def test_the_time_becomes_an_instant_in_utc(self):
         self.assertEqual(
-            kuma2nm.instant("2026-07-05 16:23:47.590"), "2026-07-05T16:23:47.590Z"
+            export2nm.instant("2026-07-05 16:23:47.590"), "2026-07-05T16:23:47.590Z"
         )
-        self.assertEqual(kuma2nm.instant("2026-07-05 16:23:47"), "2026-07-05T16:23:47.000Z")
+        self.assertEqual(export2nm.instant("2026-07-05 16:23:47"), "2026-07-05T16:23:47.000Z")
 
     def test_the_ping_becomes_microseconds(self):
-        self.assertEqual(kuma2nm.micros("6.56"), "6560")
-        self.assertEqual(kuma2nm.micros("6"), "6000")
-        self.assertEqual(kuma2nm.micros(""), "")
+        self.assertEqual(export2nm.micros("6.56"), "6560")
+        self.assertEqual(export2nm.micros("6"), "6000")
+        self.assertEqual(export2nm.micros(""), "")
 
     def test_an_unreadable_ping_is_refused(self):
         with self.assertRaises(ValueError):
-            kuma2nm.micros("n/a")
+            export2nm.micros("n/a")
 
 
 class ConvertTest(unittest.TestCase):
     def convert(self, rows, **options):
-        return kuma2nm.convert(
+        return export2nm.convert(
             rows,
             options.get("initial", {}),
             options.get("aliases", {}),
@@ -161,11 +161,11 @@ class ExampleTest(unittest.TestCase):
     """The example the runbook states must stay the output of the command it shows."""
 
     def test_the_shipped_example_converts_to_the_documented_output(self):
-        origin = Path(__file__).with_name("kuma-example.csv")
+        origin = Path(__file__).with_name("export-example.csv")
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "events.csv"
             self.assertEqual(
-                kuma2nm.main(
+                export2nm.main(
                     [
                         str(origin),
                         "--initial",
@@ -195,11 +195,11 @@ class CommandTest(unittest.TestCase):
             '1,DNS,0,2026-08-17 05:21:03.875,PING 1.1.1.1 ...,\n'
         )
         with tempfile.TemporaryDirectory() as directory:
-            origin = Path(directory) / "kuma.csv"
+            origin = Path(directory) / "export.csv"
             origin.write_text(source, encoding="utf-8")
             target = Path(directory) / "events.csv"
             self.assertEqual(
-                kuma2nm.main([str(origin), "-o", str(target)]), 0
+                export2nm.main([str(origin), "-o", str(target)]), 0
             )
             self.assertEqual(
                 target.read_text(encoding="utf-8"),
@@ -211,7 +211,7 @@ class CommandTest(unittest.TestCase):
     def test_an_unreadable_file_exits_with_two(self):
         with tempfile.TemporaryDirectory() as directory:
             missing = Path(directory) / "absent.csv"
-            self.assertEqual(kuma2nm.main([str(missing)]), 2)
+            self.assertEqual(export2nm.main([str(missing)]), 2)
 
 
 if __name__ == "__main__":
