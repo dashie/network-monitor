@@ -38,6 +38,7 @@ tmp/*
 # Placeholder files that keep otherwise empty directories in the repository
 !.gitkeep
 
-# AI sandbox run logs
-.agent/logs/
+# Local configuration file, not to be committed
+# Create a copy from network-monitor.sample.toml to create a local
+# configuration file if needed
 network-monitor.toml

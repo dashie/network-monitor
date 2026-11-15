@@ -104,7 +104,6 @@ Not done yet: the Windows raw-socket path is written but not exercised on a Wind
 | [docs/DEVELOPER-GUIDE.md](docs/DEVELOPER-GUIDE.md) | Build, run, test, extend, and the Git standards |
 | [docs/UPTIME-KUMA-IMPORT.md](docs/UPTIME-KUMA-IMPORT.md) | Runbook: import an Uptime Kuma history into a database |
 | [docs/TELEGRAM-NOTIFICATIONS.md](docs/TELEGRAM-NOTIFICATIONS.md) | Runbook: enable, verify, and repair the Telegram notification channel |
-| [docs/AGENT-SANDBOX.md](docs/AGENT-SANDBOX.md) | Dev-container sandbox for unattended AI agent runs: isolation, autonomy, recovery |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Branching, review, definition of done |
 | [AGENTS.md](AGENTS.md) | Rules for human and AI contributors |
 

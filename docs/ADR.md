@@ -37,7 +37,7 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0023 | One probe contract with four methods and a prefixed target key | accepted | 2026-11-14 | `Endpoint` per method, one module each, `method://endpoint` as the stored identity; no schema change |
 | ADR-0024 | Use rustls, a hand-written DNS codec and socket2 instead of an async stack | accepted | 2026-11-14 | `ring` provider with embedded roots, one UDP question decoded here, `socket2` for interface-bound TCP |
 | ADR-0025 | Give every failure a code and a message, record the cause of a fault, and call the rows faults | accepted | 2026-11-14 | `probe::failure` holds the closed set of codes and one template each; schema version 2 adds `cause` and `cause_message`; the CSV grows two trailing columns and `/export/faults.csv.gz` replaces `/export/disconnections.csv.gz`, which answers `308` |
-| ADR-0026 | Expose the host personal skills read-only instead of copying them | accepted | 2026-11-14 | One read-only bind of `~/.copilot/skills` onto the same path; nothing else from the host home |
+| ADR-0026 | Expose the host personal skills read-only instead of copying them | deprecated: the sandbox is removed | 2026-11-14 | One read-only bind of `~/.copilot/skills` onto the same path; nothing else from the host home |
 | ADR-0027 | Notify state changes over Telegram, with a stabilisation window and a dedicated delivery thread | accepted | 2026-11-14 | Global `[telegram]` section read from the file only, token redacted everywhere; one message per incident; bounded queue and five attempts off the probe path |
 | ADR-0028 | Publish a read-only JSON API under `/api/v1` with an envelope and `limit`/`offset` | accepted | 2026-11-14 | Object root with `data` and `meta`, never a bare array; `limit` 1–1000, errors with a stable code; hand-written JSON, no new crate; an OpenAPI document served by the binary; `Access-Control-Allow-Origin: *` on an unauthenticated read-only surface |
 
@@ -975,7 +975,7 @@ worse as soon as the table carried a row that is not a lost connection.
 
 ## ADR-0026 — Expose the host personal skills read-only instead of copying them
 
-**Status:** accepted · **Date:** 2026-11-14
+**Status:** deprecated since 2026-11-15 — the dev-container sandbox is removed · **Date:** 2026-11-14
 
 ### Context
 
