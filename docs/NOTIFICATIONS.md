@@ -230,12 +230,14 @@ when there is one; it never contains a token or a URL path.
 - **A target must be silenced.** Give it `notify = []`; the root list still serves the
   others.
 - **A channel must be silenced without editing targets.** Take its name out of the root list
-  and out of every target's list, then delete the declaration: a channel that is declared but
-  enabled by nothing stops the process. A log file channel can instead keep its declaration and
-  raise `level` to `error`, which hides warnings and information.
+  and out of every target's list, or delete the declaration: a channel that nothing enables is
+  legal, so the monitor starts and logs one `WARN` line naming it, and the channel receives only
+  its own `CHANNEL` line. A log file channel can instead keep its declaration and raise `level`
+  to `error`, which hides warnings and information.
 - **The process refuses to start with `unknown notification channel`** — a `notify` list
   names a channel that is not declared. `--show-config` prints both lists.
-- **The process refuses to start with `channel 'x' is declared but nothing enables it`** —
-  add `x` to the root list or to a target's list, or remove the declaration.
+- **`WARN notification channel 'x' is declared but nothing enables it`** — the channel is in no
+  list, so it receives nothing. Add `x` to the root list or to a target's list, or remove the
+  declaration; the monitor runs either way.
 - **The process refuses to start with `both write to …`** — two channels share one file,
   URL or chat. Declare one channel per destination.

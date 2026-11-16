@@ -1507,6 +1507,10 @@ proportional to the longest window anybody can ask for.
 
 **Status:** accepted · **Date:** 2026-11-16 · Supersedes [ADR-0027](#adr-0027--notify-state-changes-over-telegram-with-a-stabilisation-window-and-a-dedicated-delivery-thread)
 
+**Amended:** 2026-11-16 — an orphan channel is no longer a configuration error: a channel that
+no list enables starts, receives nothing, and is reported as one `WARN` line. The model, the
+routing and the other refusals are unchanged.
+
 ### Context
 
 ADR-0027 admitted exactly one transport, Telegram, and welded it to the decision: the policy

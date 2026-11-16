@@ -533,6 +533,38 @@ fn an_unknown_notify_name_fails_before_the_monitor_starts() {
 }
 
 #[test]
+fn a_channel_that_nothing_enables_is_only_a_warning() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("network-monitor.toml"),
+        concat!(
+            "[[notification]]\n",
+            "name = \"audit\"\n",
+            "type = \"logfile\"\n",
+            "filename = \"audit.log\"\n\n",
+            "[[targets]]\n",
+            "ip = \"9.9.9.9\"\n",
+        ),
+    )
+    .unwrap();
+
+    monitor(directory.path())
+        .args([
+            "monitor",
+            "--database",
+            "events.db",
+            "--listen",
+            "not-an-address",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "WARN  notification notification channel audit (logfile) is declared but nothing enables it",
+        ))
+        .stderr(predicate::str::contains("invalid listen address"));
+}
+
+#[test]
 fn two_channels_on_one_destination_fail_before_the_monitor_starts() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(

@@ -366,9 +366,10 @@ ip = "10.0.0.1"
 notify = []                      # this target notifies nobody
 ```
 
-A typo in a name, a channel nothing enables, a duplicate name, two channels on one destination,
-and a `[telegram]` clash all stop the process before the first probe; `--show-config` prints the
-declarations and the lists, which makes the mistake visible.
+A typo in a name, a duplicate name, two channels on one destination, and a `[telegram]` clash all
+stop the process before the first probe; `--show-config` prints the declarations and the lists,
+which makes the mistake visible. A declared channel that no list enables is not an error: the
+process starts, logs one `WARN` line naming it, and the channel receives nothing.
 
 `[telegram]` from 0.7 is still accepted for one release: it declares a channel named `telegram`
 and enables it globally. The declarations and the lists are file-only, like the secrets they
@@ -806,7 +807,8 @@ snapshot, a backup, or a volume mounted read-only.
 | A `dns` target without `resolver` flaps | The system resolver is unreachable and the platform reports it as a missing name. Use `dns://name@server`. |
 | An `http` target is always `down` while `curl` works | The status is outside `expect_status` (a 3xx below the default? a 401?), or a TLS-inspecting proxy is at work and its root is not in the binary. |
 | The page shows two lanes for one host | The database carries both a bare address and its `icmp://` key (an older binary wrote after the rewrite). Import a backup or merge the rows. |
-| `unknown notification channel 'x'` or `channel 'x' is declared but nothing enables it` | A `notify` list names a channel that is not declared, or a declared channel is in no list. `--show-config` prints both, so the typo is visible. The process refuses to start. |
+| `unknown notification channel 'x'` | A `notify` list names a channel that is not declared. `--show-config` prints both, so the typo is visible. The process refuses to start. |
+| `WARN notification channel 'x' is declared but nothing enables it` | No `notify` list names the channel, so it receives nothing. The monitor starts anyway: add `x` to the root list or to a target's list, or remove the declaration. |
 | `channels 'one' and 'two' both write to …` | Two channels share one destination. Declare one channel per file, URL or chat; a target picks channels by name. |
 | A channel stays silent | Check, in this order: the channel is declared and named in the target's effective `notify` list (`--show-config`); the event is not hidden by the channel's `level`; for Telegram the bot is an **administrator** of the chat, `chat_id` copies `channel_post.chat.id` and starts with `-100`; for a webhook the endpoint answers `2xx`. The log shows no `WARN notification attempt …` line. A `400 Bad Request: chat not found` is a wrong `chat_id`; `401 Unauthorized` a revoked token; `429` too many messages at once. |
 | A `WARN notification attempt 1/5 failed` line repeats five times | The channel is unreachable or rejecting the call. The reason on the line names the answer without the secret; `--log-level debug` adds nothing, because a failed send is always a warning. Other channels are unaffected, and so is the event history — read it with `query events`. |

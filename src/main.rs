@@ -1,5 +1,6 @@
 //! Entry point: parse the command line, resolve the configuration, dispatch.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
@@ -80,6 +81,7 @@ fn run() -> Result<ExitCode, AppError> {
             settings.require_targets()?;
             validate_interfaces(&settings)?;
             log_notifications(&settings);
+            warn_unused_channels(&settings);
             log_targets(&settings);
             run_monitor(&settings, source.as_deref(), reload, listen, compression)?;
         }
@@ -212,6 +214,30 @@ fn log_notifications(settings: &Config) {
                 settings.notify.global.join(", ")
             ),
         );
+    }
+}
+
+/// State every declared channel that no `notify` list enables.
+///
+/// An unused channel is not an error: it starts and receives nothing, so the operator
+/// is warned and the monitor runs.
+fn warn_unused_channels(settings: &Config) {
+    let mut enabled: HashSet<&str> = settings.notify.global.iter().map(String::as_str).collect();
+    for names in settings.notify.by_target.values() {
+        enabled.extend(names.iter().map(String::as_str));
+    }
+    for channel in &settings.notify.channels {
+        if !enabled.contains(channel.name()) {
+            logging::notification(
+                Level::Warn,
+                None,
+                &format!(
+                    "notification channel {} ({}) is declared but nothing enables it; it receives no event",
+                    channel.name(),
+                    channel.kind().as_str()
+                ),
+            );
+        }
     }
 }
 

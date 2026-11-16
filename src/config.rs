@@ -1220,22 +1220,9 @@ fn resolve_notifications(
         }
     }
 
-    // Every declared channel must be reachable: a forgotten declaration or a name typo
-    // must not pass as silence.
-    let mut enabled: HashSet<String> = global.iter().cloned().collect();
-    for target in file_targets.unwrap_or(&[]) {
-        for name in clean_list(target.notify.clone()).unwrap_or_default() {
-            enabled.insert(name);
-        }
-    }
-    for name in names.keys() {
-        if !enabled.contains(name) {
-            return Err(invalid(
-                "notification",
-                format!("channel '{name}' is declared but nothing enables it; add it to notify or remove it"),
-            ));
-        }
-    }
+    // A declared channel that nothing enables is legal: it starts, states `CHANNEL` on
+    // itself, and receives nothing. The caller reports it as a `WARN`, never as a reason
+    // to refuse the configuration.
 
     let mut by_target = HashMap::new();
     for target in targets {
@@ -1989,14 +1976,16 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_channel_that_nothing_enables_is_refused() {
+    fn a_declared_channel_that_nothing_enables_is_accepted() {
         let file = FileConfig {
             notification: Some(vec![logfile("audit", "/tmp/a.log", None)]),
             targets: Some(vec![icmp("1.1.1.1")]),
             ..FileConfig::default()
         };
-        let error = Config::resolve(Some(file), overrides()).unwrap_err();
-        assert!(error.to_string().contains("nothing enables it"), "{error}");
+        let config = Config::resolve(Some(file), overrides()).expect("the channel is only unused");
+        assert_eq!(config.notify.channels.len(), 1);
+        assert!(config.notify.global.is_empty());
+        assert!(config.notify.by_target["icmp://1.1.1.1"].is_empty());
     }
 
     #[test]
