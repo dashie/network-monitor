@@ -234,11 +234,22 @@ the same commit.
 ### Preview it
 
 ```bash
-python3 -m http.server 8010 --directory site
+python3 scripts/utils/serve_site.py            # http://127.0.0.1:8010/, --port to change it
 ```
 
 Then open <http://127.0.0.1:8010/>. Serve it rather than opening the file: the relative
-`assets/` links and the icons behave as they will on Pages.
+`assets/` links behave as they will on Pages.
+
+`site/` is not the whole site. The mark and the favicon live once, in `assets/icon/`,
+because the executable embeds the same two files, and only the Pages workflow copies them
+next to the page when it assembles `_site/`. The preview performs that copy in memory: it
+mounts `site/` at `/` and `assets/icon/` at `/assets/`, and answers from the first mount
+that holds the file. A plain `python3 -m http.server --directory site` is therefore not a
+substitute — it answers `404` for `/assets/icon.svg` and `/assets/favicon-32.png`, and the
+page shows an empty image where the mark and the favicon should be.
+
+The search order is covered by `scripts/utils/test_serve_site.py`, run with the command of
+the other script: `python3 -m unittest discover -s scripts/utils -p 'test_*.py'`.
 
 ### Regenerate the screenshots
 

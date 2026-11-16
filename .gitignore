@@ -8,6 +8,8 @@
 
 # Tooling
 *.log
+__pycache__/
+*.pyc
 
 # OS noise
 .DS_Store
