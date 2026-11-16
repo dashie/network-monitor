@@ -221,7 +221,7 @@ framework, no JavaScript, no font download.
 
 | File | What it is |
 |---|---|
-| `site/index.html` | the whole page: hero, why, the four checks, how it works, screenshots, quick start, limits, questions |
+| `site/index.html` | the whole page: hero, why, the four checks, how it works, the API, screenshots, quick start, limits, questions |
 | `site/style.css` | the whole presentation, light and dark through `prefers-color-scheme` |
 | `site/assets/*.jpg` | the three screenshots and the social card |
 | `site/robots.txt`, `site/sitemap.xml` | the crawl files; the page's absolute addresses live in the canonical link, the `og:` tags, the JSON-LD block, `robots.txt` and the sitemap — everything a visitor clicks is relative |

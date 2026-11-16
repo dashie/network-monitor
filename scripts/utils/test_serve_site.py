@@ -3,6 +3,7 @@
     python3 -m unittest discover -s scripts/utils -p 'test_*.py'
 """
 
+import re
 import threading
 import unittest
 import urllib.error
@@ -12,6 +13,21 @@ from pathlib import Path
 import serve_site
 
 REPOSITORY = Path(__file__).resolve().parents[2]
+
+
+class AssetTest(unittest.TestCase):
+    def test_every_relative_asset_the_page_names_is_served(self):
+        page = (REPOSITORY / "site/index.html").read_text(encoding="utf-8")
+        references = [
+            reference
+            for reference in re.findall(r'(?:src|href)="([^"]*)"', page)
+            if not reference.startswith(("#", "/", "http://", "https://"))
+        ]
+        self.assertIn("assets/icon.svg", references)
+        roots = serve_site.default_roots(REPOSITORY)
+        for reference in references:
+            with self.subTest(reference=reference):
+                self.assertIsNotNone(serve_site.resolve(roots, "/" + reference))
 
 
 class ResolveTest(unittest.TestCase):

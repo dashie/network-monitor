@@ -45,7 +45,8 @@ Probes are bound to the configured interface with the semantics of `ping -I`, th
 
 ### Out of scope
 
-- Any programmatic API: the web page returns HTML for a browser; scripts use the database or the `query` command.
+- Any programmatic write API: the JSON API of `FR-26` reads the history and never changes it; the `import` command remains the only way to load events from outside.
+- A configuration UI: the configuration stays a TOML file on the server plus the command-line flags (`FR-1`, `FR-2`, `BR-3`), so it can be read, reviewed, versioned and restored from a backup with the rest of the machine. The page offers no settings screen, and no remote surface can add a target, change an interval or alter what is probed.
 - Notification transports other than Telegram (mail, webhook, MQTT, Slack, a command hook): the database stays the integration point for everything else.
 - Metrics export (Prometheus, OpenTelemetry) and dashboards.
 - Probe types other than ICMP echo: no TCP, UDP, HTTP, DNS, or traceroute probes.

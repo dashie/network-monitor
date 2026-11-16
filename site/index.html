@@ -48,6 +48,7 @@
     <a href="#why">Why</a>
     <a href="#checks">Checks</a>
     <a href="#how-it-works">How it works</a>
+    <a href="#api">API</a>
     <a href="#screenshots">Screenshots</a>
     <a href="#quick-start">Quick start</a>
     <a href="#faq">FAQ</a>
@@ -73,20 +74,22 @@
     <h2>Why it exists</h2>
     <div class="cards">
       <article class="card">
-        <h3>A history the size of your incidents</h3>
-        <p>A ping loop logs every reply and produces megabytes a day. This writes one row when a target
-          goes down and one when it comes back, so storage follows incidents, not probes.</p>
+        <h3>A small binary, a small history</h3>
+        <p>A ping loop logs every reply; this writes one row when a target goes down and one when it
+          comes back, so storage follows incidents, not probes. The monitor is one stripped Rust
+          executable of about 6 MB, SQLite and the certificate roots inside: no runtime, no sidecar.</p>
       </article>
       <article class="card">
-        <h3>About 6 MB, and nothing to install</h3>
-        <p>One stripped Rust executable, with SQLite embedded and the certificate roots compiled in.
-          Copy it to the box and run it: no runtime, no package manager, no sidecar service.</p>
+        <h3>Configured in a file, not in a form</h3>
+        <p>No settings screen: the whole configuration is one small TOML file on the server, diffed
+          and versioned like code and restored from a backup with the rest of the machine. Nothing else
+          decides what is probed.</p>
       </article>
       <article class="card">
-        <h3>The interface is part of the answer</h3>
-        <p>An <code>icmp</code> or <code>tcp</code> probe can be bound to a named interface with the
-          semantics of <code>ping -I eth1</code>. On a multi-homed host the record says which link
-          failed, not only that something did.</p>
+        <h3>The page is one client of the API</h3>
+        <p>Every figure drawn here is also JSON at <code>/api/v1</code> — same rows, same order, no key
+          — with an OpenAPI contract and a reference built into the binary. Scripts and dashboards read
+          the board itself: <a href="#api">the routes</a> are listed below.</p>
       </article>
       <article class="card">
         <h3>Four checks, one contract</h3>
@@ -110,6 +113,10 @@
 
   <section id="checks">
     <h2>The four checks</h2>
+    <p class="lead">Four kinds of probe answer one question each, and two of them can be told which link
+      to leave from: an <code>icmp</code> or <code>tcp</code> check bound to a named interface behaves
+      as <code>ping -I eth1</code> does, so on a multi-homed host the record says which link failed and
+      not only that something did.</p>
     <div class="table-scroll">
       <table>
         <thead><tr><th>Check</th><th>It is up when</th></tr></thead>
@@ -147,6 +154,40 @@
       <li>The page, the JSON API, the gzipped CSV export and <code>query</code> read the same rows. The
         page needs no account, no framework and no client-side chart library.</li>
     </ol>
+  </section>
+
+  <section id="api">
+    <h2>The same history as JSON</h2>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Route</th><th>What it states</th></tr></thead>
+        <tbody>
+          <tr><td><code>/api/v1/targets</code></td>
+            <td>every target: its key, label, interface, state, since when, its last round-trip time,
+              and how long it has been <code>up</code></td></tr>
+          <tr><td><code>/api/v1/faults</code></td>
+            <td>the faults newest first, each with its target, start, cause, end and duration, and
+              whether it is still open</td></tr>
+          <tr><td><code>/api/v1/faults/daily</code></td>
+            <td>one row per UTC day: the faults, the down time, the mean and the longest
+              <code>up</code> run</td></tr>
+          <tr><td><code>/api/v1/openapi.json</code></td>
+            <td>the OpenAPI 3.1 contract of those routes</td></tr>
+          <tr><td><code>/api/v1/docs</code></td>
+            <td>that contract as a reference a browser can read and call, embedded in the executable:
+              no internet access needed</td></tr>
+          <tr><td><code>/export/faults.csv.gz</code></td>
+            <td>every event as gzipped CSV — the same file <code>import</code> reads back</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="extension">The API is not a second product beside the page: it is the source of every
+      figure the page draws, from the same rows in the same order, on the same socket. It is read-only,
+      needs no credential and no key, states <code>Access-Control-Allow-Origin: *</code> so a dashboard
+      on another origin can read it, and answers <code>no-store</code> so nothing is cached in front of
+      the history. Every answer is an object with a <code>data</code> array and a
+      <code>meta</code> page, never a bare array, and a failure carries a stable code and names the
+      parameter it refuses.</p>
   </section>
 
   <section id="screenshots">
@@ -239,7 +280,9 @@ sudo ./target/release/network-monitor monitor --config ./network-monitor.toml \
       <li>DNS asks <code>A</code> and <code>AAAA</code> over UDP on port 53: no DNSSEC, no DNS over TLS
         or HTTPS.</li>
       <li><code>interface</code> is supported on <code>icmp</code> and <code>tcp</code> only.</li>
-      <li>The page has no authentication and no write path.</li>
+      <li>The page has no authentication and no write path, and there is no configuration UI: targets
+        and intervals live in the TOML file on the server, and neither the page nor the API can change
+        them.</li>
       <li>The trust store is the one compiled into the binary.</li>
     </ul>
     <p class="note">Each of these is deliberate rather than missing: one cheap probe, one portable
@@ -282,6 +325,23 @@ sudo ./target/release/network-monitor monitor --config ./network-monitor.toml \
         <p>Only <code>icmp</code>: raw sockets need <code>root</code>, <code>CAP_NET_RAW</code> or
           Administrator. <code>tcp</code>, <code>dns</code> and <code>http</code> run unprivileged, so a
           container started with <code>--cap-drop ALL</code> still monitors without a capability.</p>
+      </details>
+      <details>
+        <summary>Can a script or a dashboard read the history?</summary>
+        <p>Yes — the page is not the only surface. <code>GET /api/v1/targets</code>,
+          <code>GET /api/v1/faults</code> and <code>GET /api/v1/faults/daily</code> answer JSON on the
+          same socket, with <code>Access-Control-Allow-Origin: *</code> and no credential, and
+          <code>/export/faults.csv.gz</code> returns the whole history as CSV. The contract is OpenAPI
+          3.1 at <code>/api/v1/openapi.json</code>, and the reference at <code>/api/v1/docs</code> works
+          without a network. Nothing on that surface writes.</p>
+      </details>
+      <details>
+        <summary>Can I change the targets from the page?</summary>
+        <p>No, and that is deliberate. The configuration is a TOML file read from the disk — and
+          re-read within a second of a change while monitoring runs — plus the flags of the command
+          line, with the flag winning over the file. It stays a text file you can review, version and
+          back up, next to the database, and no remote surface can add a target, change an interval or
+          alter what is probed.</p>
       </details>
       <details>
         <summary>Can I add my own check?</summary>
