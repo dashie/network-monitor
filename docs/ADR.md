@@ -38,12 +38,13 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0024 | Use rustls, a hand-written DNS codec and socket2 instead of an async stack | accepted | 2026-11-14 | `ring` provider with embedded roots, one UDP question decoded here, `socket2` for interface-bound TCP |
 | ADR-0025 | Give every failure a code and a message, record the cause of a fault, and call the rows faults | accepted | 2026-11-14 | `probe::failure` holds the closed set of codes and one template each; schema version 2 adds `cause` and `cause_message`; the CSV grows two trailing columns and `/export/faults.csv.gz` replaces `/export/disconnections.csv.gz`, which answers `308` |
 | ADR-0026 | Expose the host personal skills read-only instead of copying them | deprecated: the sandbox is removed | 2026-11-14 | One read-only bind of `~/.copilot/skills` onto the same path; nothing else from the host home |
-| ADR-0027 | Notify state changes over Telegram, with a stabilisation window and a dedicated delivery thread | accepted | 2026-11-14 | Global `[telegram]` section read from the file only, token redacted everywhere; one message per incident; bounded queue and five attempts off the probe path |
+| ADR-0027 | Notify state changes over Telegram, with a stabilisation window and a dedicated delivery thread | superseded by ADR-0033 | 2026-11-14 | Global `[telegram]` section read from the file only, token redacted everywhere; one message per incident; bounded queue and five attempts off the probe path |
 | ADR-0028 | Publish a read-only JSON API under `/api/v1` with an envelope and `limit`/`offset` | accepted | 2026-11-14 | Object root with `data` and `meta`, never a bare array; `limit` 1–1000, errors with a stable code; hand-written JSON, no new crate; an OpenAPI document served by the binary; `Access-Control-Allow-Origin: *` on an unauthenticated read-only surface |
 | ADR-0029 | Render the API reference in the browser from the document the binary serves | accepted | 2026-11-15 | `/api/v1/docs` loads a vendored Swagger UI at `/api/v1/openapi.json`, embedded with `include_str!` so no network and no CDN are needed; `validatorUrl` off, `GET`/`HEAD` only; the footer of both pages links to it; a body larger than the socket buffer exposed and fixed a non-blocking accepted socket |
 | ADR-0030 | Hold the reload while a cause is open | accepted | 2026-11-15 | The `meta` moves into `noscript`; the script drives the 30 s countdown and holds it while a cause is open, and the open message states the hold and offers `Refresh now` |
 | ADR-0031 | Order the lanes by a priority the configuration states | accepted | 2026-11-15 | `priority` on a target, stored in `targets.priority` (schema 3) and written by the monitor on start, reload, and the event that creates the row; page and API order by `priority IS NULL, priority, target` |
 | ADR-0032 | Serve a deterministic simulated history from a dedicated `simulate` verb | accepted | 2026-11-15 | A `History`/`HistorySource` seam the page, the API and the export read through; `Store` and a generator that replays whole UTC days from `(seed, key, day)`; no probe, no database, no state kept between requests; `--listen` required, `--history` 1–3660 days, `--seed` |
+| ADR-0033 | Deliver notifications through declared channels with a typed message | accepted | 2026-11-16 | A channel is declared once and enabled by name; one typed `Message` rendered per transport; Telegram, webhook and log file; one queue, thread and policy per channel; secrets file-only |
 
 ## Records
 
@@ -1019,7 +1020,7 @@ home directory" guarantee of the isolation model.
 
 ## ADR-0027 — Notify state changes over Telegram, with a stabilisation window and a dedicated delivery thread
 
-**Status:** accepted · **Date:** 2026-11-14
+**Status:** superseded by [ADR-0033](#adr-0033--deliver-notifications-through-declared-channels-with-a-typed-message) · **Date:** 2026-11-14
 
 ### Context
 
@@ -1501,3 +1502,91 @@ proportional to the longest window anybody can ask for.
   behind.
 - **Adding a crate for the randomness (`rand`)**: rejected, `splitmix64` is a dozen lines and the
   determinism the mode needs is exactly the part a general crate would leave to its own versioning.
+
+## ADR-0033 — Deliver notifications through declared channels with a typed message
+
+**Status:** accepted · **Date:** 2026-11-16 · Supersedes [ADR-0027](#adr-0027--notify-state-changes-over-telegram-with-a-stabilisation-window-and-a-dedicated-delivery-thread)
+
+### Context
+
+ADR-0027 admitted exactly one transport, Telegram, and welded it to the decision: the policy
+produced the text, the notifier carried the text, and the only seam was a `Sender`. The operator
+now needs three destinations with different natures — a chat, an automation endpoint, and a
+durable file — and needs to scope them: a file may follow one target, a chat may follow all of
+them.
+
+The obvious way to scope a channel is to repeat its block on each target. That creates a second
+problem instead of solving the first: the same destination is then declared several times, and
+the process must decide which scope, level, or format wins. The same configuration would also
+hide a mistake — a channel declared but never enabled — as silence.
+
+The log line carries no logger name, so a file sink could not say which stream a line belongs
+to, and an operator cannot filter notification diagnostics from process lines.
+
+### Decision
+
+1. **One typed message.** `notify::Message` carries an event — start, stop, reload, channel
+   start, target down, target up — with its scope, target key and label, state, cause, and
+   instant. Each channel renders it in its own form; no channel parses another's output.
+2. **Declared once, enabled by name.** `[[notification]]` declares a channel with a required,
+   unique `name` and a `type`; it has no scope. The root `notify` list enables channels for
+   global events and as the default for every target; a target's `notify` list replaces it, an
+   absent key inherits, and `notify = []` silences the target. A typo in a name, a duplicate
+   name, an orphan declaration and a `[telegram]` clash stop the process before the first probe.
+3. **One destination, one channel.** A channel is identified by its real output destination:
+   the normalised filename, the canonical URL (lower-case scheme and host, resolved port, path
+   and query), or the `chat_id`. Two channels may not share one, so one event reaches a
+   destination exactly once (`INV-14`).
+4. **One queue, thread and policy per channel.** A slow or failing transport delays no other and
+   never a probe. Each queue holds 32 messages and drops the oldest; each delivery is rendered
+   once and attempted five times, waiting 1, 2, 4, and 8 seconds.
+5. **Three transports.** Telegram keeps its text and classification; a webhook posts the JSON
+   document (schema 1) with an optional bearer token that requires `https`, never follows a
+   redirect, and never prints the token or the URL path; a log file appends one line, as the
+   diagnostic format or as one JSON document per line, with its own logger name and level.
+6. **A logger name on every line.** The format becomes
+   `<RFC 3339> <LEVEL> <logger> [<target>] <message>`, with `monitor` and `notification` as the
+   two loggers; a log file channel writes the same shape.
+7. **No new crate.** The webhook reuses `rustls` through a shared `tls::connect`, and JSON is
+   written by the existing `json::string`; a `serde_json` dependency would grow the static
+   binary for one document.
+8. **Secrets stay in the file.** The channel declarations and the routing lists have no flag;
+   the bot token and the webhook token are read from the file alone, redacted by
+   `--show-config`, never logged, and a webhook is named by `scheme://host[:port]` only.
+9. **Failures are loud and local.** A channel that cannot open stops the process at startup; a
+   live delivery failure is one `WARN` line and affects neither recording nor another channel.
+   A changed notification configuration is reported on reload and applies at the next start.
+10. **The legacy alias.** `[telegram]` still works for one release: it declares a channel named
+    `telegram` and enables it globally.
+
+### Consequences
+
+- Egress is no longer one fixed host: a webhook reaches an operator-supplied URL. TLS
+  verification, no proxy, no redirect and an 8 KiB answer bound remain.
+- The configuration reads as a list of channels plus a routing table, so a mistake is a named
+  error at startup instead of a silent silence.
+- A channel has one configuration. Two targets that need two formats or two levels use two
+  channels and two destinations, which is the deliberate limit of the model.
+- `notify` is split like `probe`: a contract, a policy, a routing and one module per transport,
+  each tested with a fake channel and no network.
+- The log line format changes for every line; the user guide, `FR-15` and the architecture's
+  logging contract change in the same commit.
+- The delivery thread now runs per channel; a channel that is enabled nowhere is refused, so a
+  thread never runs without a reason.
+
+### Alternatives considered
+
+- **Per-channel `targets` lists with merge rules** (scope union, level precedence, format
+  agreement): rejected by the operator — repeating a destination invites contradictions that
+  must then be resolved, and the resolution is harder to explain than a name.
+- **One policy thread fanning out sequentially**: rejected, a dead endpoint would delay every
+  other channel by its full retry budget.
+- **One policy thread with a worker per channel**: two levels of queue for no benefit; one
+  queue and one policy per channel is the same isolation with fewer moving parts.
+- **`serde_json`**: rejected, the document is written by `json::string` and needs no crate.
+- **A plugin or dynamic channel loading**: rejected, it would put executable code in the
+  configuration and break the single-binary constraint.
+- **Rotation inside the tool**: rejected; the operator rotates files with the platform's
+  mechanism, and a rotation feature would add state and a failure mode for no requirement.
+- **Keeping `[telegram]` as the only Telegram form**: rejected; a second way to declare one
+  channel would defeat "declared once", so it is an alias for one release and no more.

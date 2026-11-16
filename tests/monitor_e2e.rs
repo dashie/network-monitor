@@ -9,6 +9,7 @@ use network_monitor::config::{Config, FileConfig, FileTarget, Overrides};
 use network_monitor::monitor;
 use network_monitor::notify::fake::FakeNotifier;
 use network_monitor::notify::Notifier;
+use network_monitor::notify::{Event, Message};
 use network_monitor::probe::fake::{down, up, FakeProbe};
 use network_monitor::probe::{Code, Details, Endpoint, Probe, ProbeError};
 use network_monitor::shutdown::Shutdown;
@@ -207,24 +208,23 @@ fn each_recorded_transition_is_notified_once() {
         .expect("the monitor thread does not panic")
         .unwrap();
 
-    let received = notifier.notifications();
+    let received = notifier.messages();
     assert_eq!(received.len(), 3, "one notification per transition");
-    let states: Vec<TargetState> = received.iter().map(|item| item.state).collect();
+    let events: Vec<&str> = received.iter().map(|item| item.event_name()).collect();
+    assert_eq!(events, vec!["target_up", "target_down", "target_up"]);
+    assert_eq!(target_of(&received[0]).key, "icmp://127.0.0.1");
+    assert_eq!(target_of(&received[0]).display(), "loop-test");
     assert_eq!(
-        states,
-        vec![TargetState::Up, TargetState::Down, TargetState::Up]
+        cause_of(&received[0]),
+        None,
+        "a return to up carries no cause"
     );
-    assert_eq!(received[0].key, "icmp://127.0.0.1");
-    assert_eq!(received[0].target, "loop-test");
-    assert_eq!(received[0].cause, None, "a return to up carries no cause");
     assert!(
-        received[1]
-            .cause
-            .as_deref()
+        cause_of(&received[1])
             .unwrap_or_default()
             .starts_with("TCP."),
         "unexpected: {:?}",
-        received[1].cause
+        cause_of(&received[1])
     );
 }
 
@@ -306,25 +306,22 @@ fn the_startup_announcement_reaches_the_channel_once() {
     let store = Arc::new(Mutex::new(Store::open_rw(&database).unwrap()));
     let notifier = Arc::new(FakeNotifier::new());
     let sink: Arc<dyn Notifier> = notifier.clone();
-    let announcement = "READY network-monitor\nTargets: 1\n".to_string();
+    let startup = Message::startup(
+        Some("/etc/network-monitor.toml".to_string()),
+        vec!["icmp://127.0.0.1".to_string()],
+        None,
+        0,
+    );
 
     let handle = thread::spawn(move || {
-        monitor::run_with_notifier(
-            &config,
-            prober,
-            store,
-            &running,
-            None,
-            sink,
-            Some(announcement),
-        )
+        monitor::run_with_notifier(&config, prober, store, &running, None, sink, Some(startup))
     });
 
     let deadline = Instant::now() + Duration::from_secs(5);
-    while notifier.announcements().is_empty() {
+    while notifier.messages().is_empty() {
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for the announcement"
+            "timed out waiting for the startup message"
         );
         thread::sleep(Duration::from_millis(20));
     }
@@ -334,9 +331,28 @@ fn the_startup_announcement_reaches_the_channel_once() {
         .expect("the monitor thread does not panic")
         .unwrap();
 
-    assert_eq!(
-        notifier.announcements(),
-        vec!["READY network-monitor\nTargets: 1\n".to_string()],
-        "one announcement per start"
-    );
+    let messages = notifier.messages();
+    let startup: Vec<&Message> = messages
+        .iter()
+        .filter(|message| message.event_name() == "startup")
+        .collect();
+    assert_eq!(startup.len(), 1, "one startup message per start");
+    assert!(startup[0].text().starts_with("READY network-monitor\n"));
+    assert!(startup[0]
+        .text()
+        .contains("Config: /etc/network-monitor.toml"));
+}
+
+fn target_of(message: &Message) -> &network_monitor::notify::TargetRef {
+    match &message.event {
+        Event::TargetUp { target } | Event::TargetDown { target, .. } => target,
+        other => panic!("not a target event: {other:?}"),
+    }
+}
+
+fn cause_of(message: &Message) -> Option<&str> {
+    match &message.event {
+        Event::TargetDown { cause, .. } => Some(&cause.code),
+        _ => None,
+    }
 }

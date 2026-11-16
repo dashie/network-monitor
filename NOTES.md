@@ -80,3 +80,18 @@ The runtime image is `scratch`: no shell, no `sqlite3`, but the binary itself ru
 docker -c qubo exec network-monitor \
   /network-monitor query state --database /var/lib/network-monitor/events.db
 ```
+
+## Notification log files in the container
+
+A `logfile` notification channel writes to a path inside the container. The declared
+volume is mounted at `/var/lib/network-monitor`, so a file there survives a recreate:
+
+```toml
+[[notification]]
+name = "audit"
+type = "logfile"
+filename = "/var/lib/network-monitor/audit.log"
+```
+
+Any other directory needs its own mount and must exist before the monitor starts: a channel
+that cannot open the file stops the process.

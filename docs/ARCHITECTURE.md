@@ -26,7 +26,7 @@ Top quality goals, in order:
 - **Filesystem.** The SQLite file must live on a local filesystem; WAL on SMB or NFS shares is not supported and is documented as such.
 - **Synchronous design.** No async runtime, no daemon framework, no plugin system. Threads are used per target, and that is the whole concurrency model.
 - **No listening socket unless asked.** The process opens a port only when `--listen` is given (INV-11); otherwise its only integration surface is the event database and the query command.
-- **One optional egress.** Outbound traffic is the probes plus, only when the `[telegram]` section of the configuration exists, one HTTPS connection to `api.telegram.org`. There is no proxy, no second host, and no way to disable certificate verification; without the section the process makes no connection other than its probes.
+- **Optional egress, one per channel.** Outbound traffic is the probes plus the messages of the configured channels: one HTTPS connection to `api.telegram.org` for a Telegram channel, one POST to the operator's URL for a webhook, and nothing for a log file. There is no proxy and no way to disable certificate verification, and a redirect is never followed; without a channel the process makes no connection other than its probes.
 - **Language of the repository.** English only, for every artefact.
 
 ## 3. Context and scope
@@ -45,25 +45,29 @@ System_Ext(os, "Operating system", "Provides raw ICMP sockets, the routing table
 System_Ext(runtime, "Container runtime", "Runs the image on a NAS or server, granting NET_RAW")
 System_Ext(consumer, "Query consumer", "Reads the event database through the query command or any SQLite client")
 System_Ext(telegram, "Telegram Bot API", "Receives one message per incident when the channel is enabled")
+System_Ext(hook, "Webhook endpoint", "Receives one JSON document per reported event when the channel is enabled")
 
 Rel(operator, monitor, "Runs and configures", "CLI + TOML")
 Rel(operator, consumer, "Runs queries", "CLI")
 Rel(runtime, monitor, "Launches", "Docker")
 Rel(monitor, os, "Opens raw sockets, binds an interface", "syscalls")
 Rel(monitor, hosts, "Sends echo requests, receives replies", "ICMP")
-Rel(monitor, telegram, "Posts a state change, only with a [telegram] section", "HTTPS")
+Rel(monitor, telegram, "Posts a state change when the channel is enabled", "HTTPS")
+Rel(monitor, hook, "Posts a JSON document when the channel is enabled", "HTTP/HTTPS")
 Rel(monitor, consumer, "Exposes the event database", "SQLite WAL")
 @enduml
 ```
 
 | External element | Input to the system | Output from the system |
 |---|---|---|
-| Operator | Configuration file, command-line options, signals | Human-readable logs on stderr, exit codes, query output |
+| Operator | Configuration file, command-line options, signals | Human-readable logs on stderr, log files, exit codes, query output |
 | Monitored hosts | ICMP echo replies, or nothing | ICMP echo requests, one per target per interval |
 | Operating system | Raw socket capability, routing table, interface list, clock | Socket creation and bind calls, packets |
 | Container runtime | Process launch, `NET_RAW` capability, mounted configuration and volume | Exit status, log stream |
 | Query consumer | Read-only SQL or `query` invocations | Rows and reports |
 | Telegram Bot API | The result of one `sendMessage` call: `ok` or an error description | One HTTPS request per reported state change, and only when the channel is enabled |
+| Webhook endpoint | The HTTP status of one POST | One JSON document per reported event, only when the channel is enabled |
+| Notification log file | Nothing | One line per event, only when the channel is enabled |
 
 Trust boundaries: the database file is written only by the `monitor` process and read by anyone with filesystem access to it; the raw socket capability is the only privileged operation. No external service is trusted and none is required.
 
@@ -77,7 +81,7 @@ Trust boundaries: the database file is written only by the `monitor` process and
 - **Thread per target, shared store.** Each target runs its own interval loop; transitions are serialized through one SQLite writer connection, guarded by a mutex.
 - **WAL for concurrent reads.** `journal_mode = WAL` with `synchronous = NORMAL` and a 5 s `busy_timeout` lets the query process read while the monitor writes.
 - **Supervised reload.** The supervisor owns the set of workers and compares the configuration file content once per second. A valid change restarts the workers with the new target list, interval, and timeout, keeps the database it already opened, and logs one `INFO` line.
-- **Optional push channel off the probe path.** `notify` owns the decision and the delivery of a message. A worker hands it a recorded transition and moves on; a dedicated thread applies the per-target policy — `down` at once, `up` only after a stable `up` window — and delivers over Telegram with a bounded retry. The monitor knows only the `Notifier` contract, so recording never waits for a send and a failed send never changes a stored event.
+- **Optional push channels off the probe path.** `notify` owns one typed `Message` per fact — a recorded transition, a start, a stop, a reload, a channel start — and each channel renders it in its own form. The configuration declares a channel once and enables it by name; a worker hands the notifier the message and moves on, one thread per declared channel applies the per-target policy (`down` at once, `up` only after a stable `up` window) and delivers with a bounded retry. The monitor knows only the `Notifier` contract, so recording never waits for a send and a failed send never changes a stored event or delays another channel.
 - **One read seam, two sources.** `history` states the questions the page, the API and the export ask — state, timeline, histogram, faults, events, export pages — and `HistorySource` hands out one `History` per request. `store` answers it over SQLite, `sim` answers it over generated days, and `web` names neither: which mode is running is a decision taken once, in `main`, when the source is built.
 - **Determinism instead of memory.** `simulate` keeps nothing. A target's UTC day is a pure function of `(seed, target key, day)`, so the same command replays the same history and a request costs only the days its window covers. Faults, the histogram and the current state are computed by the same pure helpers the SQL path is checked against, so the two sources cannot drift.
 - **Read-only page generated server-side.** `web` answers `/` with HTML and SVG built in Rust from the same timeline query the CLI uses, and `/target` with one bar per day and the same days in a table for a single target. One small HTTP/1.1 loop, no framework, no client-side chart library and no client-side chart state: the page reloads itself every 30 s — the `meta` serves a browser without the script, the script drives the countdown otherwise and holds it while a cause is open, stating the hold in a banner across the top of the page — and asks only for the page, its stylesheet, and its script. The same code serves while the monitor runs (`monitor --listen`) and without probing (`serve`), so a page and the recording share one process when both are wanted.
@@ -132,7 +136,9 @@ Rel(cli, hosts, "Sends echo requests", "ICMP")
 | `probe::failure` | The vocabulary of a failure: the closed set of codes, the details a message may insert, and the template of each code | `Code`, `Details`, `Failure` |
 | `probe::interface` | Validate an interface name and bind a socket to it | `validate`, `bind_socket` per platform |
 | `monitor` | Supervise one interval loop per target, decide whether a transition occurred, reload the configuration file, dispatch transitions to the store | `run(config, prober, store, shutdown, reload)`, `run_with_notifier(…)` |
-| `notify` | Decide which state changes are reported, hold the stable `up` window, and deliver the messages off the probe path | `Notifier`, `Notification`, `Engine`, `start`, `start_with`, `deliver` |
+| `notify` | Decide which state changes are reported, hold the stable `up` window, route a message by channel name, and deliver it off the probe path | `Notifier`, `Message`, `Event`, `Channel`, `Routing`, `Engine`, `start`, `start_with` |
+| `notify::telegram`, `notify::webhook`, `notify::logfile` | One transport each: a Bot API message, a JSON POST, an appended line | `Telegram`, `Webhook`, `LogFile` |
+| `logging` | Write one diagnostic line, with a logger name, and filter it by level | `Level`, `format_line_at`, `notification` |
 | `reload` | Compare the configuration file with the last accepted content and report a change | `Watcher`, `Change`, `POLL_INTERVAL` |
 | `history` | State what the read surface asks of a recorded past, and where a request gets it from | `History` trait, `HistorySource` trait, `HistoryError` |
 | `sim` | Generate a deterministic past from the configuration, the seed and the calendar, and serve it through the read contract | `SimulatedSource`, `SimulatedHistory`, `life`, `day`, `rng` |
@@ -169,17 +175,32 @@ Rel(cli, hosts, "Sends echo requests", "ICMP")
 
 ### `monitor`
 
-- **Input:** the effective configuration, a `Probe` implementation, a `Store`, a `Shutdown` handle, optionally the path to re-read, and optionally the `READY` text for the channel.
-- **Output:** database writes, log lines, the startup announcement handed to the notifier once every worker runs, and a process exit status.
+- **Input:** the effective configuration, a `Probe` implementation, a `Store`, a `Shutdown` handle, optionally the path to re-read, and optionally the startup `Message` for the channels.
+- **Output:** database writes, log lines, the startup `Message` handed to the notifier once every worker runs, and a process exit status.
 - **Guarantees:** at most one in-flight probe per target; a transition is written at most once per cycle; shutdown on `SIGINT` or `SIGTERM` happens between two cycles, never inside a transaction; a reload is applied only when the new file parses and resolves to at least one target, and the database path in use never changes at runtime.
 
 ### `notify`
 
-- **Input:** a `Notification` for every recorded transition, the `READY` text once the monitor
-  has started every worker, and the resolved `[telegram]` settings when the section exists.
-- **Output:** one Telegram message per reported state change and one for the start, or a `WARN`
-  line when a message is lost.
-- **Guarantees:** the decision is per target and lives in `notify::policy`, free of I/O: `down` is reported at once unless the last reported state was already `down`, `up` is reported only after `stabilize_seconds` of continuous `up`, and a `down` inside that window cancels it. The startup announcement bypasses that decision and is sent as it is, through the same bounded queue and retries. Delivery runs on its own thread behind a bounded queue of 32 messages that drops the oldest instead of blocking a probe; one message is attempted five times, waiting 1, 2, 4, and 8 seconds, and a non-retryable answer or a shutdown stops the retries at once. A notification is never a condition of recording (INV-12), and the bot token never reaches a log line, an error message, or `--show-config`. The section is read when the delivery thread starts; a reload that changes it is reported and ignored until the next start.
+- **Input:** one `Message` for every recorded transition and every global event (start, stop,
+  reload, channel start), and the resolved `NotificationConfig`: the declared channels and the
+  routing lists.
+- **Output:** one rendering per channel a message routes to, or a `WARN` line when a delivery
+  is lost; a channel that cannot open stops the start.
+- **Guarantees:** a channel is declared once and enabled by name, and two channels may not
+  share a destination (INV-14). The root list carries global events and the default for every
+  target; a target's list replaces it, an absent key inherits, and an empty list silences the
+  target. The decision is per target and lives in `notify::policy`, free of I/O: `down` at once
+  unless the last reported state was already `down`, `up` after `stabilize_seconds` of
+  continuous `up`, and a `down` inside the window cancels it. Each declared channel has its own
+  bounded queue of 32 messages that drops the oldest instead of blocking a probe, its own
+  delivery thread, and its own policy, so one slow or failing transport delays no other and
+  never delays a probe. A message is rendered once and attempted five times, waiting 1, 2, 4,
+  and 8 seconds; a non-retryable answer or a shutdown stops the retries at once. The start
+  message bypasses the policy, and the farewell is attempted once before the queues close. A
+  notification is never a condition of recording (INV-12). A token never reaches a log line, an
+  error message, or `--show-config`, and a webhook is printed as `scheme://host[:port]` only.
+  The channels are read when the delivery threads start; a reload that changes them is
+  reported and ignored until the next start.
 
 ### `reload`
 
@@ -358,19 +379,19 @@ Typed errors with `thiserror`. Startup errors (configuration, privileges, unwrit
 
 ### Logging
 
-Line-based output on stderr, never stdout: stdout carries only query results, so a query can be piped into `jq`. Format: `<RFC 3339 timestamp> <LEVEL> [<target>] <message>`. Transitions are logged at `info`, every probe cycle at `debug`, local probe failures at `warn`, fatal conditions at `error`. The level comes from `--log-level` and defaults to `info`.
+Line-based output on stderr, never stdout: stdout carries only query results, so a query can be piped into `jq`. Format: `<RFC 3339 timestamp> <LEVEL> <logger> [<target>] <message>`, with `monitor` as the process logger and `notification` as the channel logger. A log file channel writes the same line, or the JSON document, under the logger name it was given. Transitions are logged at `info`, every probe cycle at `debug`, local probe failures at `warn`, fatal conditions at `error`. The level comes from `--log-level` and defaults to `info`.
 
 ### Security
 
-The only privileged operation is opening the raw socket; the container keeps only `NET_RAW` and drops everything else. The database is created with mode `0600`. The configuration may contain addresses, interface names, and — only when the operator enables the Telegram channel — one secret, the bot token, which is read from the file alone, printed as `<redacted>` by `--show-config`, and kept out of every log line and error message. Probes are generated by this process, so no input from the network is parsed as a command; a Telegram answer is bounded at 8 KiB and only pattern-matched for its result.
+The only privileged operation is opening the raw socket; the container keeps only `NET_RAW` and drops everything else. The database is created with mode `0600`. The configuration may contain addresses, interface names, and the secrets of the channels it enables — a Telegram bot token and a webhook token — which are read from the file alone, printed as `<redacted>` by `--show-config`, and kept out of every log line and error message. A webhook token is refused on an `http` URL, a redirect is never followed, and a webhook destination is printed as `scheme://host[:port]`, because the path may itself be a secret. A log file is created with mode `0600` on Unix. Probes are generated by this process, so no input from the network is parsed as a command; an answer is bounded at 8 KiB and only pattern-matched for its result.
 
 `web` is the only component that listens, and only when `--listen` is given. It answers `GET` and `HEAD` on a fixed set of paths — the timeline, the detail page, the stylesheet, the script, the streamed export, the health check, and the icon — escapes every dynamic value, sets `nosniff` and `no-store`, and never writes. It has **no authentication**: the default bind of `serve` is `127.0.0.1`, the monitor binds nothing unless asked, and exposing the page on a LAN is a deliberate operator decision that must be paired with a firewall rule. The export path is a bulk read of the whole history, so a firewall rule protects the contents of the database as much as the page itself.
 
 ### Configuration
 
-Three layers merged in a fixed order: built-in defaults, TOML file, command line. The result is validated once and printed by `--show-config`. Keys are stable; a removed key is a breaking change recorded in [ADR.md](./ADR.md). The annotated example lives in [README.md](../README.md#quick-start). The `[telegram]` section is the one documented exception to the command-line layer: its token is a secret, so it is read from the file only (ADR-0027).
+Three layers merged in a fixed order: built-in defaults, TOML file, command line. The result is validated once and printed by `--show-config`. Keys are stable; a removed key is a breaking change recorded in [ADR.md](./ADR.md). The annotated example lives in [README.md](../README.md#quick-start). The `[[notification]]` declarations and the `notify` lists are the documented exception to the command-line layer: they carry secrets and are read from the file only (ADR-0033).
 
-While monitoring runs, the file is polled once per second and a valid change is applied to the interval, timeout, target list, and retention, keeping the command line overrides on top (INV-2). An unreadable, unparseable, or target-less file is rejected with a warning and the running configuration stays active (INV-9). A changed `database` path, and a changed `[telegram]` section, are reported and take effect only at the next start.
+While monitoring runs, the file is polled once per second and a valid change is applied to the interval, timeout, target list, and retention, keeping the command line overrides on top (INV-2). An unreadable, unparseable, or target-less file is rejected with a warning and the running configuration stays active (INV-9). A changed `database` path and a changed notification configuration are reported and take effect only at the next start.
 
 ### Data ownership
 
@@ -390,6 +411,8 @@ See [ADR.md](./ADR.md). Decisions are recorded there and are not duplicated here
 | Portability | The same source tree built on macOS, Linux, and Windows | Build and test suite green on all three; binary runs with no installed dependency | CI matrix |
 | Probe accuracy | A target reachable only through `eth1` while the default route uses `eth0` | Reported reachable when probed on `eth1`, unreachable when probed on `eth0` | Manual acceptance test on a two-interface host |
 | Robustness | The monitored interface is removed while the monitor runs | No false `down` event; warning logged; recovery when the interface returns | Integration test with a fake prober returning `LocalError` |
+| Notification | A webhook endpoint is unreachable while targets change | Bounded retries, one `WARN` line, the other channels deliver, recording untouched | Integration test with a channel whose send fails |
+| Notification | A log file cannot be opened at startup | One error line naming the channel and the file; the process does not start | CLI test with an unwritable path |
 | Testability | The full suite executed in a container without `NET_RAW` | Green, because every test uses the fake prober | CI, unprivileged job |
 
 ## 11. Risks and technical debt
@@ -432,3 +455,4 @@ enforced or verified.
 - `INV-11`: A process opens at most one listener, and only when `--listen` is given; `monitor --listen` binds it before the first probe and stops it with the monitor. Enforced by the single call to `web::bind`, verified by the CLI and web tests.
 - `INV-12`: A notification is never a condition of recording, and a delivery failure never changes a stored event. Enforced by the monitor notifying only after `record_transition` returned, and by the notifier having no access to the store, verified by `tests/monitor_e2e.rs` (one notification per recorded transition, none for a local probe error) and by `tests/notify.rs` (a failed send leaves the sequence intact).
 - `INV-13`: The simulated mode probes nothing, reads and writes no database, and keeps nothing between requests: the same command replays the same history. Enforced by `sim` holding no file handle and no cache and by `probe::simulated_day` never calling the network, verified by `tests/simulate.rs` (a working directory left empty, two processes of the same seed answering the same bytes) and by the `sim` unit tests (a day is reproducible from its tuple and independent of the days before it).
+- `INV-14`: One event reaches a given channel destination at most once. A channel is its output destination — the normalised log filename, the canonical webhook URL, the Telegram `chat_id` — and two channels may not share one; a channel is enabled by name and never declared twice. Enforced by `config::resolve_notifications`, which refuses a duplicate destination, a duplicate name, an unknown name and an orphan declaration before the first probe, and by one queue per declared channel; verified by the `config` unit tests and by `tests/notify.rs` and `tests/notify_channels.rs`.

@@ -174,16 +174,18 @@ fn the_startup_log_states_the_defaults_and_every_target() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("INFO  initializing"))
+        .stderr(predicate::str::contains("INFO  monitor initializing"))
         .stderr(predicate::str::contains(
-            "INFO  no configuration file; using the command line and the built-in defaults",
-        ))
-        .stderr(predicate::str::contains("INFO  telegram not configured"))
-        .stderr(predicate::str::contains(
-            "INFO  initialized target icmp://1.1.1.1",
+            "INFO  monitor no configuration file; using the command line and the built-in defaults",
         ))
         .stderr(predicate::str::contains(
-            "INFO  initialized target tcp://1.1.1.1:443",
+            "INFO  monitor notification defaults: none",
+        ))
+        .stderr(predicate::str::contains(
+            "INFO  monitor initialized target icmp://1.1.1.1",
+        ))
+        .stderr(predicate::str::contains(
+            "INFO  monitor initialized target tcp://1.1.1.1:443",
         ));
 }
 
@@ -207,7 +209,7 @@ fn the_startup_log_names_the_configuration_file() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "INFO  reading configuration from network-monitor.toml",
+            "INFO  monitor reading configuration from network-monitor.toml",
         ));
 }
 
@@ -231,7 +233,7 @@ fn the_startup_log_names_the_configured_chat() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "INFO  telegram configured for chat -100200",
+            "INFO  monitor notification channel telegram (telegram) configured for chat -100200",
         ))
         .stderr(predicate::str::contains("123456:abc-def").not());
 }
@@ -394,4 +396,166 @@ fn the_startup_log_states_the_simulation_and_that_no_database_is_used() {
              probe runs and no database is read or written",
         ))
         .stderr(predicate::str::contains("simulated target icmp://1.1.1.1"));
+}
+
+#[test]
+fn a_channel_is_declared_once_and_printed_redacted() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("network-monitor.toml"),
+        concat!(
+            "notify = [\"telegram\"]\n\n",
+            "[[notification]]\n",
+            "name = \"telegram\"\n",
+            "type = \"telegram\"\n",
+            "bot_token = \"123456:secret\"\n",
+            "chat_id = \"-100200\"\n\n",
+            "[[notification]]\n",
+            "name = \"audit\"\n",
+            "type = \"logfile\"\n",
+            "filename = \"audit.log\"\n",
+            "format = \"jsonl\"\n",
+            "level = \"info\"\n\n",
+            "[[targets]]\n",
+            "ip = \"9.9.9.9\"\n",
+            "notify = [\"telegram\", \"audit\"]\n",
+        ),
+    )
+    .unwrap();
+
+    let output = monitor(directory.path())
+        .arg("--show-config")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[[notification]]"))
+        .stdout(predicate::str::contains("name = \"audit\""))
+        .stdout(predicate::str::contains("format = \"jsonl\""))
+        .stdout(predicate::str::contains("<redacted>"))
+        .stdout(predicate::str::contains("123456:secret").not())
+        .get_output()
+        .stdout
+        .clone();
+
+    // The printed configuration parses back into the same routing.
+    std::fs::write(directory.path().join("roundtrip.toml"), output).unwrap();
+    monitor(directory.path())
+        .args(["--config", "roundtrip.toml", "--show-config"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn show_config_prints_a_webhook_without_its_token() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("network-monitor.toml"),
+        concat!(
+            "notify = [\"hook\"]\n\n",
+            "[[notification]]\n",
+            "name = \"hook\"\n",
+            "type = \"webhook\"\n",
+            "url = \"https://hooks.example.test/notify?room=ops\"\n",
+            "token = \"s3cret-bearer\"\n\n",
+            "[[targets]]\n",
+            "ip = \"9.9.9.9\"\n",
+        ),
+    )
+    .unwrap();
+
+    monitor(directory.path())
+        .arg("--show-config")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "url = \"https://hooks.example.test/notify?room=ops\"",
+        ))
+        .stdout(predicate::str::contains("token = \"<redacted>\""))
+        .stdout(predicate::str::contains("s3cret-bearer").not());
+}
+
+#[test]
+fn the_startup_log_names_a_webhook_by_host_only() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("network-monitor.toml"),
+        concat!(
+            "notify = [\"hook\"]\n\n",
+            "[[notification]]\n",
+            "name = \"hook\"\n",
+            "type = \"webhook\"\n",
+            "url = \"http://127.0.0.1:1/secret-path\"\n\n",
+            "[[targets]]\n",
+            "ip = \"9.9.9.9\"\n",
+        ),
+    )
+    .unwrap();
+
+    monitor(directory.path())
+        .args([
+            "monitor",
+            "--database",
+            "events.db",
+            "--listen",
+            "not-an-address",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "INFO  monitor notification channel hook (webhook) configured for http://127.0.0.1:1",
+        ))
+        .stderr(predicate::str::contains("secret-path").not());
+}
+
+#[test]
+fn an_unknown_notify_name_fails_before_the_monitor_starts() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("network-monitor.toml"),
+        concat!(
+            "notify = [\"missing\"]\n\n",
+            "[[notification]]\n",
+            "name = \"audit\"\n",
+            "type = \"logfile\"\n",
+            "filename = \"audit.log\"\n\n",
+            "[[targets]]\n",
+            "ip = \"9.9.9.9\"\n",
+        ),
+    )
+    .unwrap();
+
+    monitor(directory.path())
+        .args(["monitor", "--database", "events.db"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "unknown notification channel 'missing'",
+        ));
+}
+
+#[test]
+fn two_channels_on_one_destination_fail_before_the_monitor_starts() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("network-monitor.toml"),
+        concat!(
+            "notify = [\"one\", \"two\"]\n\n",
+            "[[notification]]\n",
+            "name = \"one\"\n",
+            "type = \"logfile\"\n",
+            "filename = \"audit.log\"\n\n",
+            "[[notification]]\n",
+            "name = \"two\"\n",
+            "type = \"logfile\"\n",
+            "filename = \"./audit.log\"\n\n",
+            "[[targets]]\n",
+            "ip = \"9.9.9.9\"\n",
+        ),
+    )
+    .unwrap();
+
+    monitor(directory.path())
+        .args(["monitor", "--database", "events.db"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("both write to"));
 }

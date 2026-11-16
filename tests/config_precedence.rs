@@ -3,7 +3,7 @@
 use clap::Parser;
 
 use network_monitor::cli::Cli;
-use network_monitor::config::{Config, FileConfig, FileTarget, Overrides};
+use network_monitor::config::{Config, FileConfig, FileNotification, FileTarget, Overrides};
 
 fn parse(arguments: &[&str]) -> Cli {
     let mut full = vec!["network-monitor"];
@@ -154,4 +154,34 @@ fn the_target_keys_of_every_method_are_reachable_from_the_flag() {
     assert_eq!(config.targets[0].timeout.as_millis(), 1_500);
     assert_eq!(config.targets[0].interval.as_millis(), 900);
     assert_eq!(config.timeout.as_millis(), 2_000, "the global default");
+}
+
+/// The notification channels and the routing lists are the deliberate exception to
+/// INV-2: they carry secrets, so they are read from the file only.
+#[test]
+fn the_notification_channels_have_no_flag() {
+    assert!(Cli::try_parse_from(["network-monitor", "--notification", "x"]).is_err());
+    assert!(Cli::try_parse_from(["network-monitor", "--notify", "x"]).is_err());
+
+    let file = FileConfig {
+        notification: Some(vec![FileNotification {
+            name: Some("audit".to_string()),
+            kind: Some("logfile".to_string()),
+            filename: Some("/tmp/a.log".to_string()),
+            ..FileNotification::default()
+        }]),
+        notify: Some(vec!["audit".to_string()]),
+        targets: Some(vec![FileTarget {
+            ip: Some("1.1.1.1".to_string()),
+            ..FileTarget::default()
+        }]),
+        ..FileConfig::default()
+    };
+    let config = Config::resolve(Some(file), parse(&[]).overrides().unwrap()).unwrap();
+    assert_eq!(config.notify.channels.len(), 1);
+    assert_eq!(config.notify.global, vec!["audit".to_string()]);
+    assert_eq!(
+        config.notify.by_target["icmp://1.1.1.1"],
+        vec!["audit".to_string()]
+    );
 }

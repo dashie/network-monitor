@@ -1,206 +1,258 @@
-//! Notification of state changes: the decision ([`policy`]), the hand-off ([`queue`]),
-//! and the delivery thread.
+//! Notification: the message, the decision, the routing, and the delivery threads.
 //!
 //! The monitor depends only on the [`Notifier`] contract published here, so the
-//! stabilisation rules and the transport are testable without a network.
+//! stabilisation rules, the routing and the transports are testable without a network.
+//!
+//! One channel is declared once and enabled by name; one queue, thread and policy run
+//! per declared channel, so a slow or failing transport delays nobody else.
 
+pub mod channel;
 pub mod fake;
+pub mod logfile;
+pub mod message;
 pub mod policy;
 pub mod queue;
 pub mod telegram;
+pub mod webhook;
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::logging;
+use thiserror::Error;
+
+use crate::config::{ChannelSettings, NotificationConfig};
+use crate::logging::{self, Level};
 use crate::shutdown::{self, Shutdown};
+use crate::time::now_ms;
 
+use channel::{deliver, deliver_once, Channel, Routing};
 use policy::Engine;
-use queue::{Message, Queue};
+use queue::Queue;
 
-pub use policy::Notification;
+pub use channel::{Payload, SendError};
+pub use message::Message;
+pub use message::{Cause, Event, Kind, TargetRef};
 
 /// How often the delivery thread wakes to close a stabilisation window.
 const IDLE_POLL: Duration = Duration::from_secs(1);
 
-/// How many times one message is attempted before it is declared lost.
-pub const ATTEMPTS: usize = 5;
-
-/// What the monitor knows about notifications: a sole method for a state change, one
-/// for the startup announcement, and no result.
+/// What the monitor knows about notifications: one method, no result, never blocking.
 pub trait Notifier: Send + Sync {
-    fn notify(&self, notification: Notification);
-
-    /// Hand the startup announcement to the channel, in its own words.
-    fn announce(&self, text: String);
+    fn send(&self, message: Message);
 }
 
-/// The notifier of a process without a `[telegram]` section.
+/// The notifier of a process without notification channels.
 #[derive(Debug, Default)]
 pub struct NoopNotifier;
 
 impl Notifier for NoopNotifier {
-    fn notify(&self, _notification: Notification) {}
-
-    fn announce(&self, _text: String) {}
+    fn send(&self, _message: Message) {}
 }
 
-/// Why a delivery attempt failed, and whether another attempt can help.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SendError {
-    pub retryable: bool,
+/// Why a channel could not start: the process does not begin without it.
+#[derive(Debug, Error)]
+#[error("notification channel '{channel}' cannot start: {reason}")]
+pub struct StartError {
+    pub channel: String,
     pub reason: String,
 }
 
-/// One transport of one message.
-pub trait Sender: Send {
-    fn send(&mut self, text: &str) -> Result<(), SendError>;
+/// The notifier the monitor holds: it routes and enqueues, and never blocks.
+#[derive(Debug)]
+pub struct FanoutNotifier {
+    queues: Vec<Arc<Queue>>,
+    routing: Routing,
 }
 
-/// The waits between two attempts: 1, 2, 4, and 8 seconds.
-const BACKOFF: [Duration; 4] = [
-    Duration::from_secs(1),
-    Duration::from_secs(2),
-    Duration::from_secs(4),
-    Duration::from_secs(8),
-];
-
-/// Attempt one message: five tries, waiting 1, 2, 4, and 8 seconds between them.
-///
-/// A non-retryable error and a shutdown request stop at once; every failure is one
-/// `WARN` line, and giving up is one more.
-pub fn deliver(sender: &mut dyn Sender, text: &str, shutdown: &Shutdown) -> Result<(), SendError> {
-    deliver_with(sender, text, shutdown, &BACKOFF)
-}
-
-/// [`deliver`] with an explicit backoff, so a test needs no real wait.
-pub(crate) fn deliver_with(
-    sender: &mut dyn Sender,
-    text: &str,
-    shutdown: &Shutdown,
-    waits: &[Duration],
-) -> Result<(), SendError> {
-    let mut last = None;
-
-    for attempt in 1..=ATTEMPTS {
-        match sender.send(text) {
-            Ok(()) => return Ok(()),
-            Err(error) => {
-                logging::warn(
-                    None,
-                    &format!(
-                        "notification attempt {attempt}/{ATTEMPTS} failed: {}",
-                        error.reason
-                    ),
-                );
-                let stop = !error.retryable || attempt == ATTEMPTS || shutdown::stopped(shutdown);
-                last = Some(error);
-                if stop {
-                    break;
-                }
-                if let Some(wait) = waits.get(attempt - 1).copied() {
-                    shutdown::pause(wait, shutdown);
+impl Notifier for FanoutNotifier {
+    fn send(&self, message: Message) {
+        for &index in self.routing.channels_for(&message) {
+            if let Some(queue) = self.queues.get(index) {
+                if queue.push(message.clone()) {
+                    logging::notification(
+                        Level::Warn,
+                        message.target_key(),
+                        "notification queue full; the oldest message was dropped",
+                    );
                 }
             }
         }
     }
-
-    let error = last.expect("a failed attempt leaves an error");
-    logging::warn(None, &format!("notification lost: {}", error.reason));
-    Err(error)
 }
 
-/// The notifier the monitor holds: it enqueues and never blocks.
-#[derive(Debug)]
-pub struct ChannelNotifier {
-    queue: Arc<Queue>,
-}
-
-impl Notifier for ChannelNotifier {
-    fn notify(&self, notification: Notification) {
-        report_drop(self.queue.push(notification));
-    }
-
-    fn announce(&self, text: String) {
-        report_drop(self.queue.push_announcement(text));
-    }
-}
-
-fn report_drop(dropped: bool) {
-    if dropped {
-        logging::warn(
-            None,
-            "notification queue full; the oldest message was dropped",
-        );
-    }
-}
-
-/// The delivery thread and the notifier that feeds it.
-pub struct Handle {
-    pub notifier: Arc<dyn Notifier>,
+struct Runner {
+    channel: Arc<Mutex<Box<dyn Channel>>>,
     queue: Arc<Queue>,
     stop: Shutdown,
     thread: Option<JoinHandle<()>>,
 }
 
+/// The delivery threads and the notifier that feeds them.
+pub struct Handle {
+    pub notifier: Arc<dyn Notifier>,
+    runners: Vec<Runner>,
+    routing: Routing,
+}
+
+impl std::fmt::Debug for Handle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Handle")
+            .field("runners", &self.runners.len())
+            .finish()
+    }
+}
+
 impl Handle {
-    /// Stop the thread and wait for it; pending messages are dropped.
-    pub fn shutdown(mut self) {
-        self.queue.close();
-        self.stop.request();
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+    /// Deliver the farewell once to the channels the root list enables, then stop.
+    ///
+    /// Pending incidents are dropped: the process is leaving, and a queue must not hold
+    /// it. The farewell itself is attempted once, under the channel lock.
+    pub fn shutdown(mut self, farewell: Option<Message>) {
+        if let Some(farewell) = farewell {
+            for &index in self.routing.global() {
+                if let Some(runner) = self.runners.get(index) {
+                    let mut channel = runner
+                        .channel
+                        .lock()
+                        .expect("the channel lock is not poisoned");
+                    let _ = deliver_once(&mut **channel, &farewell);
+                }
+            }
+        }
+
+        for runner in &mut self.runners {
+            runner.queue.close();
+            runner.stop.request();
+        }
+        for runner in &mut self.runners {
+            if let Some(thread) = runner.thread.take() {
+                let _ = thread.join();
+            }
+            let mut channel = runner
+                .channel
+                .lock()
+                .expect("the channel lock is not poisoned");
+            channel.close();
         }
     }
 }
 
-/// Start the delivery thread for the configured channel.
-pub fn start(settings: &crate::config::Telegram, shutdown: &Shutdown) -> Handle {
-    start_with(
-        settings,
-        Box::new(telegram::Telegram::new(settings)),
-        shutdown,
-    )
+/// Start one delivery thread per declared channel.
+pub fn start(config: &NotificationConfig, shutdown: &Shutdown) -> Result<Handle, StartError> {
+    start_with(config, build, shutdown)
 }
 
-/// Start the delivery thread over a caller-supplied sender.
+/// Start the delivery threads over caller-supplied channels.
 ///
 /// This is the seam the tests use.
-pub fn start_with(
-    settings: &crate::config::Telegram,
-    sender: Box<dyn Sender>,
+pub fn start_with<F>(
+    config: &NotificationConfig,
+    build: F,
     shutdown: &Shutdown,
-) -> Handle {
-    let queue = Arc::new(Queue::new());
-    let notifier: Arc<dyn Notifier> = Arc::new(ChannelNotifier {
-        queue: Arc::clone(&queue),
+) -> Result<Handle, StartError>
+where
+    F: Fn(&ChannelSettings) -> Box<dyn Channel>,
+{
+    let mut channels: Vec<Box<dyn Channel>> = config.channels.iter().map(build).collect();
+
+    for index in 0..channels.len() {
+        if let Err(reason) = channels[index].open() {
+            let name = channels[index].name().to_string();
+            for opened in &mut channels[..index] {
+                opened.close();
+            }
+            return Err(StartError {
+                channel: name,
+                reason,
+            });
+        }
+    }
+
+    let indices: HashMap<&str, usize> = config
+        .channels
+        .iter()
+        .enumerate()
+        .map(|(index, settings)| (settings.name(), index))
+        .collect();
+
+    let mut by_target: HashMap<String, Vec<usize>> = HashMap::new();
+    for (target, names) in &config.by_target {
+        by_target.insert(target.clone(), indices_for(&indices, names));
+    }
+    let routing = Routing::new(indices_for(&indices, &config.global), by_target);
+
+    let mut runners = Vec::with_capacity(channels.len());
+    let mut queues = Vec::with_capacity(channels.len());
+    for (index, channel) in channels.into_iter().enumerate() {
+        let queue = Arc::new(Queue::new());
+        let name = config.channels[index].name().to_string();
+        let kind = config.channels[index].kind();
+        let stabilize = config.channels[index].stabilize();
+        // The channel announces itself on itself, so a target-only channel still
+        // states that it started.
+        queue.push(Message::channel_started(name, kind, now_ms()));
+
+        let channel = Arc::new(Mutex::new(channel));
+        let stop = Shutdown::new();
+        let thread_stop = stop.clone();
+        let thread_queue = Arc::clone(&queue);
+        let thread_channel = Arc::clone(&channel);
+        let process = shutdown.clone();
+        let thread = thread::spawn(move || {
+            run(
+                thread_channel,
+                thread_queue,
+                &thread_stop,
+                &process,
+                stabilize,
+            )
+        });
+
+        queues.push(Arc::clone(&queue));
+        runners.push(Runner {
+            channel,
+            queue,
+            stop,
+            thread: Some(thread),
+        });
+    }
+
+    let notifier: Arc<dyn Notifier> = Arc::new(FanoutNotifier {
+        queues,
+        routing: routing.clone(),
     });
-
-    let stop = Shutdown::new();
-    let thread_stop = stop.clone();
-    let thread_queue = Arc::clone(&queue);
-    let process = shutdown.clone();
-    let stabilize = settings.stabilize;
-
-    let thread =
-        thread::spawn(move || run(stabilize, sender, thread_queue, &thread_stop, &process));
-
-    Handle {
+    Ok(Handle {
         notifier,
-        queue,
-        stop,
-        thread: Some(thread),
+        runners,
+        routing,
+    })
+}
+
+fn build(settings: &ChannelSettings) -> Box<dyn Channel> {
+    match settings {
+        ChannelSettings::Telegram(settings) => Box::new(telegram::Telegram::new(settings)),
+        ChannelSettings::Webhook(settings) => Box::new(webhook::Webhook::new(settings)),
+        ChannelSettings::LogFile(settings) => Box::new(logfile::LogFile::new(settings)),
     }
 }
 
-/// The delivery loop: apply the policy to what arrives, and close the windows on time.
+fn indices_for(indices: &HashMap<&str, usize>, names: &[String]) -> Vec<usize> {
+    names
+        .iter()
+        .filter_map(|name| indices.get(name.as_str()).copied())
+        .collect()
+}
+
+/// The delivery loop: apply the policy to target events and deliver everything else.
 fn run(
-    stabilize: Duration,
-    mut sender: Box<dyn Sender>,
+    channel: Arc<Mutex<Box<dyn Channel>>>,
     queue: Arc<Queue>,
     stop: &Shutdown,
     shutdown: &Shutdown,
+    stabilize: Duration,
 ) {
     let mut engine = Engine::new(stabilize);
 
@@ -211,34 +263,223 @@ fn run(
             .map_or(IDLE_POLL, |remaining| remaining.min(IDLE_POLL));
 
         match queue.pop_timeout(wait) {
-            Some(Message::Notification(notification)) => {
-                if let Some(due) = engine.observe(notification) {
-                    send(&mut *sender, &due, shutdown);
+            Some(message) => match message.event {
+                Event::TargetDown { .. } | Event::TargetUp { .. } => {
+                    if let Some(due) = engine.observe(message) {
+                        send(&channel, &due, shutdown);
+                    }
                 }
-            }
-            Some(Message::Announcement(text)) => announce(&mut *sender, &text, shutdown),
+                _ => send(&channel, &message, shutdown),
+            },
             None => {
                 if queue.is_closed() {
                     break;
                 }
                 for due in engine.due_all(Instant::now()) {
-                    send(&mut *sender, &due, shutdown);
+                    send(&channel, &due, shutdown);
                 }
             }
         }
     }
 }
 
-/// Deliver one notification and report the outcome.
-fn send(sender: &mut dyn Sender, notification: &Notification, shutdown: &Shutdown) {
-    if deliver(sender, &notification.text(), shutdown).is_ok() {
-        logging::info(Some(&notification.target), "notification sent");
+fn send(channel: &Arc<Mutex<Box<dyn Channel>>>, message: &Message, shutdown: &Shutdown) {
+    let mut channel = channel.lock().expect("the channel lock is not poisoned");
+    if deliver(&mut **channel, message, shutdown).is_ok() {
+        logging::notification(
+            Level::Info,
+            message.target_key(),
+            &format!("{} sent", message.event_name()),
+        );
     }
 }
 
-/// Deliver the startup announcement and report the outcome.
-fn announce(sender: &mut dyn Sender, text: &str, shutdown: &Shutdown) {
-    if deliver(sender, text, shutdown).is_ok() {
-        logging::info(None, "startup announcement sent");
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{LogFile, LogFormat, NotificationConfig};
+    use crate::logging::Level;
+    use crate::notify::fake::FakeChannel;
+    use crate::notify::message::{Cause, TargetRef};
+    use std::path::PathBuf;
+
+    fn settings(name: &str) -> ChannelSettings {
+        ChannelSettings::LogFile(LogFile {
+            name: name.to_string(),
+            filename: PathBuf::from(format!("/tmp/{name}.log")),
+            logger: "notification".to_string(),
+            level: Level::Info,
+            format: LogFormat::Text,
+            stabilize: Duration::from_millis(50),
+        })
+    }
+
+    fn config(global: Vec<&str>, by_target: Vec<(&str, Vec<&str>)>) -> NotificationConfig {
+        NotificationConfig {
+            channels: vec![settings("a"), settings("b")],
+            global: global.into_iter().map(str::to_string).collect(),
+            by_target: by_target
+                .into_iter()
+                .map(|(key, names)| {
+                    (
+                        key.to_string(),
+                        names.into_iter().map(str::to_string).collect(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn down(key: &str) -> Message {
+        let mut message = Message::target_down(
+            TargetRef::new(key, None),
+            Cause::new("ICMP.NO_REPLY", "no reply"),
+            0,
+        );
+        message.at = Instant::now();
+        message
+    }
+
+    fn wait_for(condition: impl Fn() -> bool, what: &str) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !condition() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn start_two(
+        config: &NotificationConfig,
+        shutdown: &Shutdown,
+        a: &FakeChannel,
+        b: &FakeChannel,
+    ) -> Handle {
+        start_with(
+            config,
+            |settings| match settings.name() {
+                "a" => Box::new(a.clone()),
+                _ => Box::new(b.clone()),
+            },
+            shutdown,
+        )
+        .expect("both channels start")
+    }
+
+    #[test]
+    fn a_target_event_reaches_only_the_channels_its_list_names() {
+        let a = FakeChannel::always_ok("a", Kind::LogFile);
+        let b = FakeChannel::always_ok("b", Kind::LogFile);
+        let shutdown = Shutdown::new();
+        let handle = start_two(
+            &config(vec![], vec![("icmp://1.1.1.1", vec!["a"])]),
+            &shutdown,
+            &a,
+            &b,
+        );
+
+        handle.notifier.send(down("icmp://1.1.1.1"));
+        wait_for(
+            || a.sent().iter().any(|body| body.starts_with("DOWN")),
+            "the down",
+        );
+
+        assert!(a.sent().iter().any(|body| body.starts_with("DOWN")));
+        assert!(
+            !b.sent().iter().any(|body| body.starts_with("DOWN")),
+            "b was not enabled for this target: {:?}",
+            b.sent()
+        );
+        handle.shutdown(None);
+    }
+
+    #[test]
+    fn a_global_event_reaches_the_root_list() {
+        let a = FakeChannel::always_ok("a", Kind::LogFile);
+        let b = FakeChannel::always_ok("b", Kind::LogFile);
+        let shutdown = Shutdown::new();
+        let handle = start_two(
+            &config(vec!["a"], vec![("icmp://1.1.1.1", vec![])]),
+            &shutdown,
+            &a,
+            &b,
+        );
+
+        handle
+            .notifier
+            .send(Message::config_reload(true, "/etc/test.toml", 0));
+        wait_for(
+            || {
+                a.sent()
+                    .iter()
+                    .any(|body| body.starts_with("CONFIG applied"))
+            },
+            "the reload",
+        );
+        assert!(!b.sent().iter().any(|body| body.starts_with("CONFIG")));
+        handle.shutdown(None);
+    }
+
+    #[test]
+    fn every_channel_states_that_it_started() {
+        let a = FakeChannel::always_ok("a", Kind::LogFile);
+        let b = FakeChannel::always_ok("b", Kind::LogFile);
+        let shutdown = Shutdown::new();
+        let handle = start_two(
+            &config(vec![], vec![("icmp://1.1.1.1", vec!["a"])]),
+            &shutdown,
+            &a,
+            &b,
+        );
+
+        wait_for(
+            || {
+                a.sent().iter().any(|body| body.contains("CHANNEL a"))
+                    && b.sent().iter().any(|body| body.contains("CHANNEL b"))
+            },
+            "the start lines",
+        );
+        assert_eq!(a.opened(), 1);
+        assert_eq!(b.opened(), 1);
+        handle.shutdown(None);
+    }
+
+    #[test]
+    fn a_channel_that_cannot_open_stops_the_start() {
+        let channel = FakeChannel::failing_open("a", Kind::LogFile);
+        let shutdown = Shutdown::new();
+        let error = start_with(
+            &config(vec!["a"], vec![]),
+            |_| Box::new(channel.clone()),
+            &shutdown,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.channel, "a");
+        assert!(error.to_string().contains("the endpoint is unreachable"));
+    }
+
+    #[test]
+    fn the_farewell_reaches_only_the_root_channels_once() {
+        let a = FakeChannel::always_ok("a", Kind::LogFile);
+        let b = FakeChannel::always_ok("b", Kind::LogFile);
+        let shutdown = Shutdown::new();
+        let handle = start_two(
+            &config(vec!["a"], vec![("icmp://1.1.1.1", vec!["a"])]),
+            &shutdown,
+            &a,
+            &b,
+        );
+
+        handle.shutdown(Some(Message::shutdown(0)));
+        assert_eq!(
+            a.sent()
+                .iter()
+                .filter(|body| body.starts_with("STOPPED"))
+                .count(),
+            1
+        );
+        assert!(!b.sent().iter().any(|body| body.starts_with("STOPPED")));
+        assert_eq!(a.closed(), 1);
+        assert_eq!(b.closed(), 1);
     }
 }

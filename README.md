@@ -53,10 +53,11 @@ curl -s http://127.0.0.1:8642/api/v1/faults?limit=10
 cargo test
 ```
 
-To hear about an outage without opening the page, add the optional `[telegram]` section:
-one message per incident to a Telegram chat, a recovery only once `up` has held for the
-stabilisation window, and the bot token redacted everywhere it is printed. Setup and
-failure modes are in [docs/TELEGRAM-NOTIFICATIONS.md](docs/TELEGRAM-NOTIFICATIONS.md).
+To hear about an outage without opening the page, declare a notification channel and enable
+it by name: a Telegram chat, a webhook, or a log file, one message per incident and a
+recovery only once `up` has held for the stabilisation window. The declarations and the
+routing lists are in the sample configuration; setup and failure modes are in
+[docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md).
 
 A minimal `network-monitor.toml`:
 
@@ -112,7 +113,7 @@ Not done yet: the Windows raw-socket path is written but not exercised on a Wind
 | [docs/GLOSSARY.md](docs/GLOSSARY.md) | One precise definition per domain term |
 | [docs/DEVELOPER-GUIDE.md](docs/DEVELOPER-GUIDE.md) | Build, run, test, extend, and the Git standards |
 | [docs/HISTORY-IMPORT.md](docs/HISTORY-IMPORT.md) | Runbook: import a history from another monitor into a database |
-| [docs/TELEGRAM-NOTIFICATIONS.md](docs/TELEGRAM-NOTIFICATIONS.md) | Runbook: enable, verify, and repair the Telegram notification channel |
+| [docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md) | Runbook: declare, enable, verify, and repair a notification channel |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Branching, review, definition of done |
 | [AGENTS.md](AGENTS.md) | Rules for human and AI contributors |
 

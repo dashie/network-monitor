@@ -131,6 +131,7 @@ parse is rejected with a warning and the running configuration stays in effect. 
 | `timeout_ms` | `2000` | Maximum wait for an answer, per probe |
 | `database` | `./network-monitor.db` | SQLite file; keep it on a local filesystem. Ignored by `simulate`, which reads and writes no database |
 | `retention_days` | `0` | Delete events older than this; `0` keeps everything |
+| `notify` | empty | Channel names enabled for global events and as the default for every target; see [Notifications](#notifications) |
 
 ### Common target keys
 
@@ -142,6 +143,7 @@ parse is rejected with a warning and the running configuration stays in effect. 
 | `timeout_ms` | all | Overrides the global timeout for this target |
 | `interval_ms` | all | Overrides the global interval for this target |
 | `interface` | `icmp`, `tcp` | Bind the probe to a device; refused on the other methods |
+| `notify` | all | Declared channel names for this target: replaces the root list, `[]` silences it; see [Notifications](#notifications) |
 
 A target states only the keys of its method; a key that belongs to another method is a
 configuration error, not something ignored.
@@ -224,26 +226,36 @@ configuration error; the same host checked by two methods, or on two ports, is t
 A URL with the default port states it once — `https://example.com:443/` is the same key as
 `https://example.com/`.
 
-### Telegram notifications
+### Notifications
 
-The tool can post one message per incident to a Telegram chat. The feature is opt-in: without
-the section nothing is sent and the process opens no connection other than its probes.
+A notification channel tells the operator about an incident without opening the page. A channel
+is declared once, at the top level of the file, in a `[[notification]]` entry and enabled by
+name, globally or per target.
+Three types exist: Telegram, a webhook, and a log file. The feature is opt-in: with no
+`[[notification]]` entry nothing is sent and the process opens no connection other than its
+probes.
 
-`[telegram]` is a single global section of the file, and it is the one documented exception to
-the rule that every key has a command-line flag: the bot token is a secret, so it is read from
-the file only.
+`name` and `type` are required, a name is unique, and a channel has no scope of its own.
+
+| Common key | Default | Meaning |
+|---|---|---|
+| `name` | — | Required. Unique, and only ASCII letters, digits, `.`, `_` and `-`; the only way a channel is enabled anywhere |
+| `type` | — | Required: `telegram`, `webhook` or `logfile` |
+| `stabilize_seconds` | `60` | How long `up` must hold before a recovery is reported; `0` reports it at once |
+
+#### Telegram
 
 | Key | Default | Meaning |
 |---|---|---|
-| `bot_token` | — | Required. The token Telegram issued for the bot |
+| `bot_token` | — | Required. The token BotFather issued for the bot |
 | `chat_id` | — | Required. The chat or channel the messages go to, e.g. `-1001234567890` |
-| `stabilize_seconds` | `60` | How long `up` must hold before a recovery is reported; `0` reports it at once |
 
 ```toml
-[telegram]
+[[notification]]
+name = "telegram"
+type = "telegram"
 bot_token = "123456789:replace-me"
 chat_id = "-1001234567890"
-stabilize_seconds = 60
 ```
 
 Setting it up, from an empty Telegram account:
@@ -256,25 +268,134 @@ Setting it up, from an empty Telegram account:
    `https://api.telegram.org/bot<token>/getUpdates` in a browser. For a channel post the id is
    in `channel_post.chat.id` and starts with `-100`; a private chat has a positive id. An empty
    answer means the bot has not seen a message yet.
-4. Write the section into the configuration file, `chmod 600` it, and restart the monitor.
+4. Write the declaration and the root `notify` list into the configuration file, `chmod 600` it,
+   and restart the monitor.
 5. Check the channel: the first probe of every target reports its observed state, so a target
    that answers produces one `UP` message, held by the stabilisation window.
 
-What is sent, and when:
+#### Webhook
+
+| Key | Default | Meaning |
+|---|---|---|
+| `url` | — | Required. `http://` or `https://`; the path and the query are part of the destination |
+| `token` | — | Optional bearer credential; requires an `https` URL so it is not sent in clear |
+
+```toml
+[[notification]]
+name = "hook"
+type = "webhook"
+url = "https://automation.example.test/hooks/network-monitor"
+token = "replace-me"
+```
+
+Every event is one `POST` with `Content-Type: application/json; charset=utf-8`; when a token is
+configured it travels as `Authorization: Bearer <token>`. A `2xx` answer is success; `429`, any
+`5xx`, and a transport failure are retried, five attempts in total; a redirect is not followed
+and any other `4xx` is not retried. The body is one JSON document:
+
+```json
+{
+  "schema": 1,
+  "event": "target_down",
+  "occurred_at": "2025-11-24T16:00:00.000Z",
+  "target": { "key": "icmp://1.1.1.1", "label": "cloudflare-dns" },
+  "state": "down",
+  "cause": { "code": "ICMP.NO_REPLY", "message": "no reply within 2000 ms" }
+}
+```
+
+`target`, `state` and `cause` appear only on a target event, and `label` only when the target
+has one. `event` is `target_down`, `target_up`, `startup`, `config_reload`, `channel_started`
+or `shutdown`. A global event adds one member of its own and nothing else: `startup` states
+the configuration, the target keys and the page; `reload` states whether it was applied and
+why; `channel` states the name and the type of the channel that started. A `shutdown` adds
+nothing.
+
+The token is a secret: it is read from the file only, redacted by `--show-config` and in every
+error, and refused on an `http` URL. The URL path may be a secret too, so a log line and an
+error name only `scheme://host[:port]`.
+
+#### Log file
+
+| Key | Default | Meaning |
+|---|---|---|
+| `filename` | — | Required. Append-only; created with mode `0600` on Unix; its directory must exist |
+| `logger` | `notification` | The logger name on every line, or the `logger` member in JSONL; the same characters as a `name` |
+| `level` | `info` | The most verbose level written: `error`, `warn`, `info`, `debug` |
+| `format` | `text` | `text` (the diagnostic line) or `jsonl` (one JSON document per line) |
+
+```toml
+[[notification]]
+name = "audit"
+type = "logfile"
+filename = "/var/log/network-monitor/audit.log"
+logger = "notification"
+level = "info"
+format = "jsonl"
+```
+
+A `text` line is exactly a diagnostic line, so the same file can be read by the same tools:
+
+```text
+2025-11-24T16:00:00.000Z WARN  notification [icmp://1.1.1.1] DOWN cloudflare-dns (icmp://1.1.1.1) cause=ICMP.NO_REPLY: no reply within 2000 ms
+```
+
+A `jsonl` line is the webhook document plus `"logger":"notification"`, one compact document per
+line. The file is appended to and never rotated by the tool: rotate it with `logrotate` or the
+platform's mechanism, and create its directory yourself.
+
+#### Enabling a channel
+
+`[[notification]]` only declares a channel. The root `notify` list enables channels for global
+events — startup, shutdown, reload, channel start — and for every target that does not state
+its own list. A target's `notify` list replaces the root list for that target; an absent key
+inherits; `notify = []` silences the target.
+
+```toml
+notify = ["telegram"]            # global events, and the default for every target
+
+[[targets]]
+ip = "1.1.1.1"                   # inherits ["telegram"]
+
+[[targets]]
+ip = "192.168.1.1"
+notify = ["telegram", "audit"]   # this target also writes the audit file
+
+[[targets]]
+ip = "10.0.0.1"
+notify = []                      # this target notifies nobody
+```
+
+A typo in a name, a channel nothing enables, a duplicate name, two channels on one destination,
+and a `[telegram]` clash all stop the process before the first probe; `--show-config` prints the
+declarations and the lists, which makes the mistake visible.
+
+`[telegram]` from 0.7 is still accepted for one release: it declares a channel named `telegram`
+and enables it globally. The declarations and the lists are file-only, like the secrets they
+carry: there is no flag for them. `--target` replaces the file target list and with it the
+per-target lists; the root list still applies to the targets given on the command line, so a
+channel that only a file target enables still starts, states its `CHANNEL` line, and receives
+no target event.
+
+#### What is sent, and when
 
 - The monitor starts: one `READY` message as soon as every target is being probed, stating the
   configuration file it read, the keys of the targets it started, and the address of the page
-  when it serves one. A restart sends it again.
+  when it serves one.
 - A target stops answering: one `DOWN` message at once, with the cause as a code and a sentence.
 - A target answers again: one `UP` message only after `up` has held continuously for
   `stabilize_seconds`. A target that drops again inside that window produces no message at all,
   because the operator was already told it is down.
 - After an `UP` message, the next drop is a new `DOWN`. A repeated `DOWN` in the same incident is
-  silent, so a flapping link cannot flood the chat even when the interval is a few seconds.
+  silent, so a flapping link cannot flood the channel even when the interval is a few seconds.
+- The configuration file is reloaded: one `CONFIG` message, applied or rejected with the reason.
+- A channel starts: one `CHANNEL` message on that channel itself, so even a target-only file
+  states that it began.
+- The monitor stops: one `STOPPED` message to the channels the root list enables, attempted once.
 - A restart reports the first observed state under the same rules; the tool keeps no
   notification state between runs.
 
-The message is plain text with a fixed layout — state, label and key, cause, UTC instant:
+The Telegram text keeps the 0.7 layout — state, label and key, cause, UTC instant:
 
 ```text
 DOWN cloudflare-dns (icmp://1.1.1.1)
@@ -298,16 +419,16 @@ An `UP` message is the first and the last line; a target without a label shows o
 only a `DOWN` carries a cause.
 
 A failed delivery is attempted five times, waiting 1, 2, 4, and 8 seconds, and then dropped
-with one `WARN` line naming the reason. A `400` or `401` answer is not retried, because the
-token or the chat cannot be fixed by waiting. Notification never delays a probe and never changes
-what is recorded: the database remains the history, the channel is a copy of it.
+with one `WARN` line naming the reason. A channel never delays a probe and never changes what is
+recorded: the database remains the history, the channels are a copy of it. A channel that cannot
+open — an unwritable file, a malformed URL — stops the process at startup.
 
-A changed `[telegram]` section is reported on stderr and applied at the next start, exactly like
-a changed `database` path. The bot token never appears in `--show-config` (which prints
+A changed notification declaration or list is reported on stderr and applied at the next start,
+exactly like a changed `database` path. A secret never appears in `--show-config` (which prints
 `<redacted>`), in a log line, or in an error message.
 
-The failure modes of the Bot API — the answer Telegram returns, and whether it is retried —
-are listed in [Troubleshooting](#troubleshooting), later in this guide.
+The failure modes of each channel — the answer it receives, and whether it is retried — are
+listed in [Troubleshooting](#troubleshooting), later in this guide.
 
 ## Command line
 
@@ -381,7 +502,7 @@ layout; `20` is a board in trouble.
 
 Two runs of the same command show the same faults, with the same causes, durations and
 latencies, on any machine. `--database` and the `database` key of the file are accepted and
-ignored, the Telegram channel is not started, and the startup log states which mode is running:
+ignored, no notification channel is started, and the startup log states which mode is running:
 
 ```
 INFO  simulating 7 target(s) over the last 30 day(s), seed 0, 3 fault(s) per day: no probe runs and no database is read or written
@@ -660,8 +781,12 @@ snapshot, a backup, or a volume mounted read-only.
 - `retention_days > 0` deletes older events periodically; `0` keeps everything.
 - `--log-level debug` logs every verdict; `info` logs every transition (the default), `warn`
   local probe failures, `error` fatal conditions.
-- A start writes, at `info`, the lines that state what the process does: `initializing`, the
-  configuration file it read (or that it read none), whether Telegram is configured, one
+- Every diagnostic line is `<RFC 3339> <LEVEL> <logger> [<target>] <message>`, where the logger
+  is `monitor` for the process and `notification` for a channel. A log file channel writes the
+  same line, or the JSON document, under the logger name it was given.
+- A start writes, at `info`, `initializing`, the configuration file it read (or that it read
+  none), one `notification channel <name> (<type>) configured for <destination>` line per
+  declared channel, `notification defaults: <names>` (or `none`), one
   `initialized target <key>` line per target, and — when the page is served —
   `web interface ready on http://<address>/` with the address it listens on.
 - `SIGINT`/`SIGTERM` stop the process between two probe cycles, with no partial write.
@@ -681,8 +806,12 @@ snapshot, a backup, or a volume mounted read-only.
 | A `dns` target without `resolver` flaps | The system resolver is unreachable and the platform reports it as a missing name. Use `dns://name@server`. |
 | An `http` target is always `down` while `curl` works | The status is outside `expect_status` (a 3xx below the default? a 401?), or a TLS-inspecting proxy is at work and its root is not in the binary. |
 | The page shows two lanes for one host | The database carries both a bare address and its `icmp://` key (an older binary wrote after the rewrite). Import a backup or merge the rows. |
-| The Telegram channel stays silent | Check, in this order: the section is present and parses (`--show-config` prints it with `<redacted>`); the bot is an **administrator** of the channel, not merely a member; `chat_id` copies `channel_post.chat.id` and starts with `-100`; the log shows no `WARN notification attempt …` line. A `400 Bad Request: chat not found` is a wrong `chat_id`; `401 Unauthorized` a revoked token; `429` too many messages at once. |
-| A `WARN notification attempt 1/5 failed` line repeats five times | The channel is unreachable or rejecting the call. The reason on the line names the answer of the Bot API without the token; `--log-level debug` adds nothing, because a failed send is always a warning. The event history is unaffected — read it with `query events`. |
+| `unknown notification channel 'x'` or `channel 'x' is declared but nothing enables it` | A `notify` list names a channel that is not declared, or a declared channel is in no list. `--show-config` prints both, so the typo is visible. The process refuses to start. |
+| `channels 'one' and 'two' both write to …` | Two channels share one destination. Declare one channel per file, URL or chat; a target picks channels by name. |
+| A channel stays silent | Check, in this order: the channel is declared and named in the target's effective `notify` list (`--show-config`); the event is not hidden by the channel's `level`; for Telegram the bot is an **administrator** of the chat, `chat_id` copies `channel_post.chat.id` and starts with `-100`; for a webhook the endpoint answers `2xx`. The log shows no `WARN notification attempt …` line. A `400 Bad Request: chat not found` is a wrong `chat_id`; `401 Unauthorized` a revoked token; `429` too many messages at once. |
+| A `WARN notification attempt 1/5 failed` line repeats five times | The channel is unreachable or rejecting the call. The reason on the line names the answer without the secret; `--log-level debug` adds nothing, because a failed send is always a warning. Other channels are unaffected, and so is the event history — read it with `query events`. |
+| A log file channel writes nothing | The event is below the channel's `level` (`error` hides warnings and information), or the directory of `filename` does not exist. The tool creates the file, never its directory. |
+| The process refuses to start with `cannot open …/audit.log for append` | The file or its directory is not writable by the process user. Create the directory and grant write access; a channel that cannot open is fatal at startup. |
 | No `UP` message arrives after an outage while the page shows the target up | The recovery is still inside the stable `up` window (`stabilize_seconds`, 60 s by default). Wait for the window to close; a drop inside it cancels the message by design. |
 
 ## Limits and deliberate choices
@@ -694,6 +823,8 @@ snapshot, a backup, or a volume mounted read-only.
 - `interface` is supported on `icmp` and `tcp` only.
 - The page has no authentication and no write path.
 - The trust store is the one compiled into the binary.
+- Notification channels are Telegram, a webhook, and a log file; no mail, MQTT, Slack-specific
+  payload or command hook, and no rotation by the tool.
 
 Each item is deliberate rather than missing: leaving out IPv6, redirects, DNSSEC, DoT/DoH and
 client certificates keeps one probe cheap and the binary portable, the trust store travels

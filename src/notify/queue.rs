@@ -1,24 +1,15 @@
-//! The bounded hand-off between the probe loops and the delivery thread.
+//! The bounded hand-off between the fan-out and one delivery thread.
 //!
 //! A probe never blocks on a notification: it pushes the message and moves on. When the
-//! operator is not draining the queue — a Telegram outage, a slow link — the oldest
+//! operator is not draining the queue — a slow endpoint, a stalled link — the oldest
 //! message is dropped so the newest state change is the one that survives.
 
 use std::collections::VecDeque;
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
-use super::Notification;
-
-/// How many messages may wait for delivery before the oldest is dropped.
-pub const CAPACITY: usize = 32;
-
-/// What the delivery thread carries: a state change to decide, or a text to send as it is.
-#[derive(Debug)]
-pub enum Message {
-    Notification(Notification),
-    Announcement(String),
-}
+use super::channel::CAPACITY;
+use super::message::Message;
 
 #[derive(Debug, Default)]
 struct State {
@@ -38,21 +29,10 @@ impl Queue {
         Queue::default()
     }
 
-    /// Append a state change, dropping the oldest when the queue is full.
+    /// Append a message, dropping the oldest when the queue is full.
     ///
     /// Returns `true` when a message was dropped to make room.
-    pub fn push(&self, notification: Notification) -> bool {
-        self.push_message(Message::Notification(notification))
-    }
-
-    /// Append the startup announcement, dropping the oldest when the queue is full.
-    ///
-    /// Returns `true` when a message was dropped to make room.
-    pub fn push_announcement(&self, text: String) -> bool {
-        self.push_message(Message::Announcement(text))
-    }
-
-    fn push_message(&self, message: Message) -> bool {
+    pub fn push(&self, message: Message) -> bool {
         let mut state = self.lock();
         let dropped = state.items.len() >= CAPACITY;
         if dropped {
@@ -95,61 +75,59 @@ impl Queue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::TargetState;
-    use std::time::Instant;
+    use crate::notify::message::{Cause, TargetRef};
 
-    fn notification(index: usize) -> Notification {
-        Notification {
-            target: format!("target-{index}"),
-            key: format!("icmp://10.0.0.{index}"),
-            state: TargetState::Down,
-            cause: None,
-            occurred_at_ms: index as i64,
-            at: Instant::now(),
-        }
+    fn message(index: usize) -> Message {
+        let mut message = Message::target_down(
+            TargetRef::new(format!("icmp://10.0.0.{index}"), None),
+            Cause::new("ICMP.NO_REPLY", "no reply"),
+            index as i64,
+        );
+        message.at = std::time::Instant::now();
+        message
+    }
+
+    fn pop_key(queue: &Queue) -> String {
+        queue
+            .pop_timeout(Duration::ZERO)
+            .expect("a queued message")
+            .target_key()
+            .expect("a target message")
+            .to_string()
     }
 
     #[test]
     fn messages_come_out_in_order() {
         let queue = Queue::new();
-        assert!(!queue.push(notification(1)));
-        assert!(!queue.push(notification(2)));
+        assert!(!queue.push(message(1)));
+        assert!(!queue.push(message(2)));
         assert_eq!(pop_key(&queue), "icmp://10.0.0.1");
         assert_eq!(pop_key(&queue), "icmp://10.0.0.2");
         assert!(queue.pop_timeout(Duration::ZERO).is_none());
     }
 
-    fn pop_key(queue: &Queue) -> String {
-        match queue.pop_timeout(Duration::ZERO).unwrap() {
-            Message::Notification(item) => item.key,
-            other => panic!("unexpected message: {other:?}"),
-        }
-    }
-
     #[test]
-    fn an_announcement_travels_with_the_state_changes() {
+    fn a_global_message_travels_with_the_state_changes() {
         let queue = Queue::new();
-        assert!(!queue.push(notification(1)));
-        assert!(!queue.push_announcement("READY".to_string()));
+        assert!(!queue.push(message(1)));
+        assert!(!queue.push(Message::shutdown(0)));
 
         assert_eq!(pop_key(&queue), "icmp://10.0.0.1");
-        match queue.pop_timeout(Duration::ZERO).unwrap() {
-            Message::Announcement(text) => assert_eq!(text, "READY"),
-            other => panic!("unexpected message: {other:?}"),
-        }
+        let next = queue.pop_timeout(Duration::ZERO).expect("the shutdown");
+        assert_eq!(next.event_name(), "shutdown");
     }
 
     #[test]
     fn a_full_queue_drops_the_oldest() {
         let queue = Queue::new();
         for index in 0..CAPACITY {
-            assert!(!queue.push(notification(index)), "no drop below capacity");
+            assert!(!queue.push(message(index)), "no drop below capacity");
         }
-        assert!(queue.push(notification(CAPACITY)), "the oldest was dropped");
+        assert!(queue.push(message(CAPACITY)), "the oldest was dropped");
 
         let mut seen = Vec::new();
-        while let Some(Message::Notification(item)) = queue.pop_timeout(Duration::ZERO) {
-            seen.push(item.occurred_at_ms);
+        while let Some(message) = queue.pop_timeout(Duration::ZERO) {
+            seen.push(message.occurred_at_ms);
         }
         assert_eq!(seen.len(), CAPACITY);
         assert_eq!(seen[0], 1, "the first message was dropped");

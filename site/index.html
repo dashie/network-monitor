@@ -104,7 +104,7 @@
       </article>
       <article class="card">
         <h3>One message per incident</h3>
-        <p>An optional Telegram channel states the transition as it happens, and a recovery only once
+        <p>Optional notification channels — Telegram, a webhook, a log file — state the transition as it happens, and a recovery only once
           <code>up</code> has held for the stabilisation window — so a flapping link does not become a
           stream of alarms.</p>
       </article>
@@ -316,7 +316,7 @@ sudo ./target/release/network-monitor monitor --config ./network-monitor.toml \
       </details>
       <details>
         <summary>Does it send my data anywhere?</summary>
-        <p>Only if you enable the Telegram channel, which sends one message per incident. The page and
+        <p>Only if you enable a notification channel, which sends one message per incident. The page and
           the JSON API answer on the address you bind, and <code>serve</code> binds
           <code>127.0.0.1</code> unless you say otherwise.</p>
       </details>

@@ -738,6 +738,7 @@ cargo test
 cargo test --test monitor_e2e
 cargo test --test reload
 cargo test --test notify
+cargo test --test notify_channels
 cargo test --test store
 cargo test --test web
 cargo test --test simulate
@@ -768,10 +769,10 @@ cargo clippy --all-targets -- -D warnings
 ### Adding a configuration option
 
 1. Add the field to `Config` with its default expressed in `Default`.
-2. Add the matching `clap` argument in `cli.rs`; there is no option without a flag (INV-2). The one deliberate exception is a secret: the `[telegram]` section of `FR-25` is read from the file only, and every rendering of its bot token reads `<redacted>` in `Debug`, `to_toml`, and every error string (ADR-0027). Never add a flag, an environment variable, or a log line for a secret.
+2. Add the matching `clap` argument in `cli.rs`; there is no option without a flag (INV-2). The one deliberate exception is the notification declarations and the `notify` lists of `FR-25`: they carry secrets, so they are read from the file only, and every secret reads `<redacted>` in `Debug`, `to_toml`, and every error string (ADR-0033). Never add a flag, an environment variable, or a log line for a secret.
 3. Apply the merge in `config.rs`, which is the only place that knows the precedence order.
 4. Decide whether the value applies to a running monitor: if it does, apply it in `Supervisor::apply` and cover it in `tests/reload.rs`; if it needs a restart, warn there instead.
-5. Document the key in `network-monitor.toml`, in the README example, and in [PRODUCT.md](./PRODUCT.md) when it changes behaviour.
+5. Document the key in `network-monitor.sample.toml`, in the README example, in the user guide, and in [PRODUCT.md](./PRODUCT.md) when it changes behaviour.
 6. Test three cases: value from the file only, value from the flag only, flag overriding the file.
 
 ### Adding a probe type
@@ -806,6 +807,24 @@ cargo clippy --all-targets -- -D warnings
 A new crate is a decision, not an implementation detail: it needs an ADR with the rejected
 alternatives and the effect on the static build (ADR-0024 is the example).
 
+### Adding a notification channel
+
+1. Add the type to `ChannelSettings` in `config.rs`, its keys to `FileNotification`, its
+   validation to `resolve_channel`, and its rendering to `Config::to_toml`. Give it a
+   `Destination` — the real sink — so two channels cannot share one (INV-14).
+2. Create `notify/<type>.rs` and implement `Channel`: `name`, `kind`, `open`, `payload`,
+   `send`, `close`. Keep the serialisation inside the module; the trait is the only contract
+   the runner knows.
+3. Refuse a key that belongs to another type, and refuse a secret on a plaintext URL. Scrub
+   every secret from a `SendError` before returning it, and never name a URL path.
+4. Add the arm to `notify::build`; the monitor, the policy and the routing must not change.
+5. Document it: the keys in [USER-GUIDE.md](./USER-GUIDE.md#notifications), an FR in
+   [PRODUCT.md](./PRODUCT.md), the terms in [GLOSSARY.md](./GLOSSARY.md), the component in
+   [ARCHITECTURE.md](./ARCHITECTURE.md), and the procedure in
+   [NOTIFICATIONS.md](./NOTIFICATIONS.md).
+6. Test the transport without the internet: a listener bound to `127.0.0.1:0` or a temporary
+   directory, plus `notify::fake::FakeChannel` for the delivery rules.
+
 ### Changing the schema
 
 1. Append a migration step in `store/schema.rs` and bump `schema_meta.version`; never edit an applied migration.
@@ -828,7 +847,10 @@ alternatives and the effect on the static build (ADR-0024 is the example).
 1. Put the test next to the module for unit-level checks and in `tests/` for cross-module contracts.
 2. Never open a raw socket in a test: use `probe::fake`, and a temporary database from `tempfile`.
 3. Keep the test deterministic: inject the clock or assert on monotonic ordering instead of wall time.
-4. Test the notifier without the network: `notify::start_with` takes a `notify::fake::FakeSender`, which replays scripted outcomes and records every text it was given, and `notify::fake::FakeNotifier` records what a monitor handed it. The policy needs no clock either, because it reads the `Instant` carried by the `Notification`.
+4. Test the notifier without the network: `notify::start_with` takes a builder that returns one
+   `notify::fake::FakeChannel` per declaration, which replays scripted send outcomes and records
+   every payload it was given, and `notify::fake::FakeNotifier` records what a monitor handed it.
+   The policy needs no clock either, because it reads the `Instant` carried by the `Message`.
 
 <!-- skill:block:devguide-design-rules section="## Extending the project" -->
 ### Design rules

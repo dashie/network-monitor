@@ -9,40 +9,15 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::store::TargetState;
-use crate::time::format_rfc3339;
 
-/// One state change worth telling the operator about.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Notification {
-    /// The label shown to the operator, or the key when the target has no label.
-    pub target: String,
-    /// The identity of the target in the database.
-    pub key: String,
-    pub state: TargetState,
-    /// The code and message of a failure; `None` on the way back up.
-    pub cause: Option<String>,
-    /// When the event was recorded, as epoch milliseconds.
-    pub occurred_at_ms: i64,
-    /// The instant the notification was created, which starts the stabilisation window.
-    pub at: Instant,
-}
+use super::message::{Event, Message};
 
-impl Notification {
-    /// The plain-text message, one fact per line.
-    pub fn text(&self) -> String {
-        let state = self.state.as_str().to_ascii_uppercase();
-        let mut text = if self.target == self.key {
-            format!("{state} {}", self.target)
-        } else {
-            format!("{state} {} ({})", self.target, self.key)
-        };
-        if let Some(cause) = &self.cause {
-            text.push_str("\nCause: ");
-            text.push_str(cause);
-        }
-        text.push('\n');
-        text.push_str(&format_rfc3339(self.occurred_at_ms));
-        text
+/// The state a target event reports, or `None` for a global event.
+fn state(message: &Message) -> Option<TargetState> {
+    match message.event {
+        Event::TargetDown { .. } => Some(TargetState::Down),
+        Event::TargetUp { .. } => Some(TargetState::Up),
+        _ => None,
     }
 }
 
@@ -53,7 +28,7 @@ pub struct Policy {
     /// The last state actually reported.
     notified: Option<TargetState>,
     /// An `up` that has not yet held long enough, with the instant it may be reported.
-    pending: Option<(Instant, Notification)>,
+    pending: Option<(Instant, Message)>,
 }
 
 impl Policy {
@@ -65,9 +40,9 @@ impl Policy {
         }
     }
 
-    /// Feed an observed change and return the notification to send now, if any.
-    pub fn observe(&mut self, notification: Notification) -> Option<Notification> {
-        match notification.state {
+    /// Feed an observed change and return the message to send now, if any.
+    pub fn observe(&mut self, message: Message) -> Option<Message> {
+        match state(&message)? {
             TargetState::Down => {
                 // A disconnection cancels a recovery that has not been announced.
                 self.pending = None;
@@ -75,7 +50,7 @@ impl Policy {
                     return None;
                 }
                 self.notified = Some(TargetState::Down);
-                Some(notification)
+                Some(message)
             }
             TargetState::Up => {
                 if self.notified == Some(TargetState::Up) {
@@ -84,9 +59,9 @@ impl Policy {
                 if self.stabilize.is_zero() {
                     self.pending = None;
                     self.notified = Some(TargetState::Up);
-                    return Some(notification);
+                    return Some(message);
                 }
-                let deadline = notification.at + self.stabilize;
+                let deadline = message.at + self.stabilize;
                 // The window runs from the first `up` of the episode; a later one
                 // neither shortens nor restarts it.
                 if let Some((existing, _)) = &self.pending {
@@ -94,7 +69,7 @@ impl Policy {
                         return None;
                     }
                 }
-                self.pending = Some((deadline, notification));
+                self.pending = Some((deadline, message));
                 None
             }
             TargetState::Unknown => None,
@@ -107,18 +82,18 @@ impl Policy {
     }
 
     /// Report the pending `up` once its window has closed.
-    pub fn due(&mut self, now: Instant) -> Option<Notification> {
+    pub fn due(&mut self, now: Instant) -> Option<Message> {
         match &self.pending {
             Some((deadline, _)) if *deadline <= now => {}
             _ => return None,
         }
-        let (_, notification) = self.pending.take()?;
+        let (_, message) = self.pending.take()?;
         self.notified = Some(TargetState::Up);
-        Some(notification)
+        Some(message)
     }
 }
 
-/// One policy per target, keyed by [`Notification::key`].
+/// One policy per target, keyed by the target key.
 #[derive(Debug)]
 pub struct Engine {
     stabilize: Duration,
@@ -133,12 +108,16 @@ impl Engine {
         }
     }
 
-    /// Feed an observed change and return the notification to send now, if any.
-    pub fn observe(&mut self, notification: Notification) -> Option<Notification> {
+    /// Feed an observed change and return the message to send now, if any.
+    ///
+    /// A global event is never given to a policy: it bypasses the window and the
+    /// per-target state.
+    pub fn observe(&mut self, message: Message) -> Option<Message> {
+        let key = message.target_key()?.to_string();
         self.policies
-            .entry(notification.key.clone())
+            .entry(key)
             .or_insert_with(|| Policy::new(self.stabilize))
-            .observe(notification)
+            .observe(message)
     }
 
     /// The earliest instant at which [`Engine::due_all`] has something to return.
@@ -149,9 +128,9 @@ impl Engine {
             .min()
     }
 
-    /// Every notification whose window has closed, in a deterministic order.
-    pub fn due_all(&mut self, now: Instant) -> Vec<Notification> {
-        let mut due: Vec<Notification> = self
+    /// Every message whose window has closed, in a deterministic order.
+    pub fn due_all(&mut self, now: Instant) -> Vec<Message> {
+        let mut due: Vec<Message> = self
             .policies
             .values_mut()
             .filter_map(|policy| policy.due(now))
@@ -159,7 +138,7 @@ impl Engine {
         due.sort_by(|left, right| {
             left.occurred_at_ms
                 .cmp(&right.occurred_at_ms)
-                .then_with(|| left.key.cmp(&right.key))
+                .then_with(|| left.target_key().cmp(&right.target_key()))
         });
         due
     }
@@ -168,21 +147,30 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::notify::message::{Cause, TargetRef};
 
-    fn notification(
-        key: &str,
-        state: TargetState,
-        cause: Option<&str>,
-        at: Instant,
-    ) -> Notification {
-        Notification {
-            target: key.to_string(),
-            key: key.to_string(),
-            state,
-            cause: cause.map(str::to_string),
-            occurred_at_ms: 0,
-            at,
-        }
+    fn down(key: &str, at: Instant) -> Message {
+        let mut message = Message::target_down(
+            TargetRef::new(key, None),
+            Cause::new("ICMP.NO_REPLY", "no reply"),
+            0,
+        );
+        message.at = at;
+        message
+    }
+
+    fn up(key: &str, at: Instant) -> Message {
+        let mut message = Message::target_up(TargetRef::new(key, None), 0);
+        message.at = at;
+        message
+    }
+
+    fn is_down(message: &Message) -> bool {
+        matches!(message.event, Event::TargetDown { .. })
+    }
+
+    fn is_up(message: &Message) -> bool {
+        matches!(message.event, Event::TargetUp { .. })
     }
 
     fn window() -> Duration {
@@ -194,14 +182,9 @@ mod tests {
         let now = Instant::now();
         let mut policy = Policy::new(window());
         let sent = policy
-            .observe(notification(
-                "icmp://1.1.1.1",
-                TargetState::Down,
-                Some("ICMP.NO_REPLY — no reply"),
-                now,
-            ))
+            .observe(down("icmp://1.1.1.1", now))
             .expect("a disconnection needs no window");
-        assert_eq!(sent.state, TargetState::Down);
+        assert!(is_down(&sent));
         assert_eq!(policy.next_deadline(), None);
     }
 
@@ -209,21 +192,17 @@ mod tests {
     fn a_recovery_is_reported_only_after_the_window() {
         let now = Instant::now();
         let mut policy = Policy::new(window());
-        assert!(policy
-            .observe(notification("icmp://1.1.1.1", TargetState::Down, None, now))
-            .is_some());
+        assert!(policy.observe(down("icmp://1.1.1.1", now)).is_some());
 
         let up_at = now + Duration::from_secs(5);
-        assert!(policy
-            .observe(notification("icmp://1.1.1.1", TargetState::Up, None, up_at))
-            .is_none());
+        assert!(policy.observe(up("icmp://1.1.1.1", up_at)).is_none());
         assert_eq!(policy.next_deadline(), Some(up_at + window()));
 
         assert!(policy
             .due(up_at + window() - Duration::from_millis(1))
             .is_none());
         let sent = policy.due(up_at + window()).expect("the window closed");
-        assert_eq!(sent.state, TargetState::Up);
+        assert!(is_up(&sent));
         assert_eq!(policy.next_deadline(), None);
     }
 
@@ -231,18 +210,13 @@ mod tests {
     fn a_disconnection_inside_the_window_cancels_the_recovery() {
         let now = Instant::now();
         let mut policy = Policy::new(window());
-        policy.observe(notification("icmp://1.1.1.1", TargetState::Down, None, now));
+        policy.observe(down("icmp://1.1.1.1", now));
 
         let up_at = now + Duration::from_secs(5);
-        policy.observe(notification("icmp://1.1.1.1", TargetState::Up, None, up_at));
+        policy.observe(up("icmp://1.1.1.1", up_at));
         assert!(
             policy
-                .observe(notification(
-                    "icmp://1.1.1.1",
-                    TargetState::Down,
-                    None,
-                    up_at + Duration::from_secs(10)
-                ))
+                .observe(down("icmp://1.1.1.1", up_at + Duration::from_secs(10)))
                 .is_none(),
             "the operator already knows the target is down"
         );
@@ -253,16 +227,10 @@ mod tests {
     fn a_flap_reports_one_disconnection_per_incident() {
         let now = Instant::now();
         let mut policy = Policy::new(window());
-        assert!(policy
-            .observe(notification("icmp://1.1.1.1", TargetState::Down, None, now))
-            .is_some());
-        assert!(policy
-            .observe(notification("icmp://1.1.1.1", TargetState::Up, None, now))
-            .is_none());
+        assert!(policy.observe(down("icmp://1.1.1.1", now)).is_some());
+        assert!(policy.observe(up("icmp://1.1.1.1", now)).is_none());
         assert!(
-            policy
-                .observe(notification("icmp://1.1.1.1", TargetState::Down, None, now))
-                .is_none(),
+            policy.observe(down("icmp://1.1.1.1", now)).is_none(),
             "a second down in the same incident is silent"
         );
     }
@@ -271,107 +239,53 @@ mod tests {
     fn a_disconnection_after_a_notified_recovery_is_reported_again() {
         let now = Instant::now();
         let mut policy = Policy::new(window());
-        policy.observe(notification("icmp://1.1.1.1", TargetState::Down, None, now));
+        policy.observe(down("icmp://1.1.1.1", now));
         let up_at = now + Duration::from_secs(10);
-        policy.observe(notification("icmp://1.1.1.1", TargetState::Up, None, up_at));
+        policy.observe(up("icmp://1.1.1.1", up_at));
         let recovered = policy
             .due(up_at + window())
             .expect("the recovery is reported");
-        assert_eq!(recovered.state, TargetState::Up);
+        assert!(is_up(&recovered));
 
         let again = policy
-            .observe(notification(
-                "icmp://1.1.1.1",
-                TargetState::Down,
-                None,
-                up_at + window(),
-            ))
+            .observe(down("icmp://1.1.1.1", up_at + window()))
             .expect("a new incident is a new message");
-        assert_eq!(again.state, TargetState::Down);
+        assert!(is_down(&again));
     }
 
     #[test]
     fn a_zero_window_reports_a_recovery_at_once() {
         let now = Instant::now();
         let mut policy = Policy::new(Duration::ZERO);
-        policy.observe(notification("icmp://1.1.1.1", TargetState::Down, None, now));
+        policy.observe(down("icmp://1.1.1.1", now));
 
         let sent = policy
-            .observe(notification("icmp://1.1.1.1", TargetState::Up, None, now))
+            .observe(up("icmp://1.1.1.1", now))
             .expect("no window means no waiting");
-        assert_eq!(sent.state, TargetState::Up);
-        assert!(policy
-            .observe(notification("icmp://1.1.1.1", TargetState::Up, None, now))
-            .is_none());
+        assert!(is_up(&sent));
+        assert!(policy.observe(up("icmp://1.1.1.1", now)).is_none());
     }
 
     #[test]
     fn the_first_verdict_reports_the_observed_state() {
         let now = Instant::now();
         let mut policy = Policy::new(window());
-        assert!(policy
-            .observe(notification("icmp://1.1.1.1", TargetState::Down, None, now))
-            .is_some());
-        assert!(policy
-            .observe(notification("icmp://1.1.1.1", TargetState::Up, None, now))
-            .is_none());
+        assert!(policy.observe(down("icmp://1.1.1.1", now)).is_some());
+        assert!(policy.observe(up("icmp://1.1.1.1", now)).is_none());
 
         let mut fresh = Policy::new(window());
-        assert!(fresh
-            .observe(notification("icmp://1.1.1.1", TargetState::Up, None, now))
-            .is_none());
+        assert!(fresh.observe(up("icmp://1.1.1.1", now)).is_none());
         assert_eq!(fresh.next_deadline(), Some(now + window()));
-    }
-
-    #[test]
-    fn the_message_carries_the_cause_and_the_instant() {
-        let now = Instant::now();
-        let mut notification = notification(
-            "icmp://1.1.1.1",
-            TargetState::Down,
-            Some("ICMP.NO_REPLY — no reply within 2000 ms"),
-            now,
-        );
-        notification.target = "cloudflare-dns".to_string();
-        notification.occurred_at_ms = 1_764_000_000_000;
-
-        assert_eq!(
-            notification.text(),
-            "DOWN cloudflare-dns (icmp://1.1.1.1)\n\
-             Cause: ICMP.NO_REPLY — no reply within 2000 ms\n\
-             2025-11-24T16:00:00.000Z"
-        );
-
-        let up = Notification {
-            target: "icmp://1.1.1.1".to_string(),
-            key: "icmp://1.1.1.1".to_string(),
-            state: TargetState::Up,
-            cause: None,
-            occurred_at_ms: 0,
-            at: now,
-        };
-        assert_eq!(up.text(), "UP icmp://1.1.1.1\n1970-01-01T00:00:00.000Z");
     }
 
     #[test]
     fn the_engine_keeps_one_policy_per_key() {
         let now = Instant::now();
         let mut engine = Engine::new(window());
-        assert!(engine
-            .observe(notification("icmp://1.1.1.1", TargetState::Down, None, now))
-            .is_some());
-        assert!(engine
-            .observe(notification("icmp://1.1.1.1", TargetState::Down, None, now))
-            .is_none());
+        assert!(engine.observe(down("icmp://1.1.1.1", now)).is_some());
+        assert!(engine.observe(down("icmp://1.1.1.1", now)).is_none());
 
-        assert!(engine
-            .observe(notification(
-                "tcp://1.1.1.1:443",
-                TargetState::Down,
-                None,
-                now
-            ))
-            .is_some());
+        assert!(engine.observe(down("tcp://1.1.1.1:443", now)).is_some());
         assert_eq!(engine.next_deadline(), None);
         assert!(engine.due_all(now).is_empty());
     }
@@ -381,8 +295,8 @@ mod tests {
         let now = Instant::now();
         let mut engine = Engine::new(window());
         for key in ["icmp://1.1.1.1", "icmp://1.0.0.1"] {
-            engine.observe(notification(key, TargetState::Down, None, now));
-            engine.observe(notification(key, TargetState::Up, None, now));
+            engine.observe(down(key, now));
+            engine.observe(up(key, now));
         }
 
         assert_eq!(engine.next_deadline(), Some(now + window()));
@@ -392,12 +306,18 @@ mod tests {
 
         let due = engine.due_all(now + window());
         assert_eq!(due.len(), 2);
-        assert!(due
-            .iter()
-            .all(|notification| notification.state == TargetState::Up));
+        assert!(due.iter().all(is_up));
         assert!(
             engine.due_all(now + window()).is_empty(),
             "one message per window"
         );
+    }
+
+    #[test]
+    fn a_global_event_is_never_given_to_a_policy() {
+        let mut engine = Engine::new(window());
+        assert!(engine.observe(Message::shutdown(0)).is_none());
+        assert_eq!(engine.next_deadline(), None);
+        assert!(engine.due_all(Instant::now()).is_empty());
     }
 }

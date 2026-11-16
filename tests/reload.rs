@@ -345,3 +345,32 @@ fn a_changed_target_takes_its_new_method_and_timeout() {
     assert!(!running.is_finished(), "the monitor keeps running");
     running.stop();
 }
+
+/// An applied reload reaches the channels as a message, so a chat hears that the
+/// configuration changed and not only that a target moved.
+#[test]
+fn an_applied_reload_is_reported_as_a_message() {
+    let (_directory, config_path, database) = temp_paths();
+    write_config(&config_path, &database, 30, &["127.0.0.1"]);
+
+    let (running, notifier) = start_with_notifier(&config_path, &database);
+    wait_for_notifications(&notifier, 1, Duration::from_secs(5));
+
+    write_config(&config_path, &database, 30, &["127.0.0.1", "127.0.0.2"]);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if notifier
+            .messages()
+            .iter()
+            .any(|message| message.event_name() == "config_reload")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the reload message"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    running.stop();
+}

@@ -16,6 +16,14 @@ use tempfile::TempDir;
 
 const DAY_MS: i64 = 86_400_000;
 
+/// How long a client waits for one answer.
+///
+/// Above the 60 second budget `every_answer_costs_what_it_returns_at_the_widest_settings`
+/// allows the fault count, because ten simulated years at a thousand faults a day take about
+/// twenty seconds to count: a client timeout below the budget the test states fails the test
+/// for a reason the test is not about.
+const READ_TIMEOUT: Duration = Duration::from_secs(70);
+
 /// One simulated server, killed when the test ends.
 struct Sim {
     child: Child,
@@ -77,7 +85,7 @@ impl Sim {
     fn response(&self, path: &str) -> (u16, String) {
         let mut stream = TcpStream::connect(&self.address).expect("a connection");
         stream
-            .set_read_timeout(Some(Duration::from_secs(20)))
+            .set_read_timeout(Some(READ_TIMEOUT))
             .expect("a timeout");
         let request = format!(
             "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
@@ -88,7 +96,9 @@ impl Sim {
             .expect("the request is sent");
 
         let mut answer = Vec::new();
-        stream.read_to_end(&mut answer).expect("the answer arrives");
+        stream.read_to_end(&mut answer).unwrap_or_else(|error| {
+            panic!("{path}: the answer did not arrive within {READ_TIMEOUT:?}: {error}")
+        });
         let answer = String::from_utf8_lossy(&answer).to_string();
         let (head, body) = answer.split_once("\r\n\r\n").expect("headers and a body");
         let status = head

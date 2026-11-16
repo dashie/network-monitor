@@ -4,16 +4,35 @@
 # file (FR-2). The effective configuration after the merge is printed by
 # `network-monitor --show-config`.
 
-# Optional Telegram channel (FR-25): one message per incident, and a recovery only
-# after `up` has held for `stabilize_seconds`. This section is the one exception to
-# the rule above — the bot token is a secret, so it is read from this file only, and
-# every rendering of it reads `<redacted>`. Remove the section to disable it; the
-# runbook is docs/TELEGRAM-NOTIFICATIONS.md.
+# Notification channels (FR-25): declare a channel once with a unique `name`, then
+# enable it by name. The root `notify` list enables channels for global events and as
+# the default for every target; a target's `notify` list replaces it, and
+# `notify = []` silences the target. A declaration holds secrets, so it is read from
+# this file only and every rendering of a secret reads `<redacted>`. The runbook is
+# docs/NOTIFICATIONS.md.
 #
-# [telegram]
+# notify = ["telegram"]
+#
+# [[notification]]
+# name = "telegram"
+# type = "telegram"
 # bot_token = "123456789:replace-me"
 # chat_id = "-1001234567890"
 # stabilize_seconds = 60
+#
+# [[notification]]
+# name = "hook"
+# type = "webhook"
+# url = "https://automation.example.test/hooks/network-monitor"
+# token = "replace-me"          # optional, and only with an https URL
+#
+# [[notification]]
+# name = "audit"
+# type = "logfile"
+# filename = "/var/log/network-monitor/audit.log"
+# logger = "notification"
+# level = "info"
+# format = "jsonl"              # or "text"
 
 # Probe interval in milliseconds. Every target may state its own `interval_ms`.
 interval_ms = 5000
@@ -39,6 +58,7 @@ ip = "1.1.1.1"
 # interface = "eth1"
 label = "cloudflare-dns"
 priority = 1
+# notify = ["telegram", "audit"]   # replaces the root list for this target
 
 [[targets]]
 ip = "192.168.1.1"

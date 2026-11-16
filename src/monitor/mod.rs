@@ -6,18 +6,18 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use thiserror::Error;
 
 use crate::config::{Config, Overrides, Target};
 use crate::logging;
-use crate::notify::{self, NoopNotifier, Notification, Notifier};
+use crate::notify::{self, Cause, Message, Notifier, TargetRef};
 use crate::probe::Probe;
 use crate::reload::{self, Change, Watcher};
 use crate::shutdown::{self, Shutdown};
 use crate::store::{Event, Store, StoreError, TargetState};
-use crate::time::{format_rfc3339, now_ms};
+use crate::time::now_ms;
 
 use state::Transition;
 
@@ -27,6 +27,8 @@ pub enum RunError {
     NoTargets,
     #[error("{0}")]
     Store(#[from] StoreError),
+    #[error("{0}")]
+    Notification(#[from] notify::StartError),
     #[error("the event store is unavailable")]
     Lock,
     #[error("a monitor thread stopped unexpectedly")]
@@ -162,6 +164,8 @@ impl Supervisor {
                         "configuration reload rejected: {error}; keeping the current configuration"
                     ),
                 );
+                self.notifier
+                    .send(Message::config_reload(false, error.to_string(), now_ms()));
                 return Ok(());
             }
         };
@@ -175,6 +179,8 @@ impl Supervisor {
                         "configuration reload rejected: {error}; keeping the current configuration"
                     ),
                 );
+                self.notifier
+                    .send(Message::config_reload(false, error.to_string(), now_ms()));
                 return Ok(());
             }
         };
@@ -184,6 +190,11 @@ impl Supervisor {
                 None,
                 "configuration reload rejected: no targets configured; keeping the current configuration",
             );
+            self.notifier.send(Message::config_reload(
+                false,
+                "no targets configured".to_string(),
+                now_ms(),
+            ));
             return Ok(());
         }
 
@@ -198,12 +209,13 @@ impl Supervisor {
             next.database = self.config.database.clone();
         }
 
-        if next.telegram != self.config.telegram {
+        let notify_changed = next.notify != self.config.notify;
+        if notify_changed {
             logging::warn(
                 None,
-                "telegram settings changed; restart the monitor to use them",
+                "notification settings changed; restart the monitor to use them",
             );
-            next.telegram = self.config.telegram.clone();
+            next.notify = self.config.notify.clone();
         }
 
         self.stop_workers();
@@ -222,63 +234,52 @@ impl Supervisor {
                 self.config.timeout.as_millis()
             ),
         );
+        let mut detail = format!(
+            "{} ({} target(s), interval {} ms, timeout {} ms)",
+            path.display(),
+            self.config.targets.len(),
+            self.config.interval.as_millis(),
+            self.config.timeout.as_millis()
+        );
+        if notify_changed {
+            detail.push_str("; notification settings need a restart");
+        }
+        self.notifier
+            .send(Message::config_reload(true, detail, now_ms()));
         Ok(())
     }
 }
 
-/// The message the channel receives once the monitor is ready, so a start is visible
-/// where the incidents are: the configuration it read, the targets it started, and the
-/// address of the page when it serves one.
-pub fn startup_message(config: &Config, source: Option<&Path>, serving: Option<&str>) -> String {
-    let mut text = String::from("READY network-monitor\n");
-    let source = source.map_or_else(|| "none".to_string(), |path| path.display().to_string());
-    text.push_str(&format!("Config: {source}\n"));
-    text.push_str(&format!("Targets: {}\n", config.targets.len()));
-    for target in &config.targets {
-        text.push_str(&format!("- {}\n", target.key()));
-    }
-    match serving {
-        Some(address) => text.push_str(&format!("Web: http://{address}/\n")),
-        None => text.push_str("Web: none\n"),
-    }
-    text.push_str(&format_rfc3339(now_ms()));
-    text
+/// The message every chosen channel receives once the monitor is ready, so a start is
+/// visible where the incidents are: the configuration it read, the targets it started,
+/// and the address of the page when it serves one.
+pub fn startup_event(config: &Config, source: Option<&Path>, serving: Option<&str>) -> Message {
+    Message::startup(
+        source.map(|path| path.display().to_string()),
+        config.targets.iter().map(Target::key).collect(),
+        serving.map(|address| format!("http://{address}/")),
+        now_ms(),
+    )
 }
 
 /// Probe every target until shutdown, persisting transitions.
 ///
-/// Without a `[telegram]` section no delivery thread is started and the process makes
-/// no outbound connection beyond the probes. `announcement`, when present, reaches the
-/// channel once every worker runs.
+/// One delivery thread runs per declared channel. Without a channel no thread is
+/// started and the process makes no outbound connection beyond the probes. `startup`,
+/// when present, reaches the channels the root list enables once every worker runs.
 pub fn run(
     config: &Config,
     prober: Arc<dyn Probe>,
     store: Arc<Mutex<Store>>,
     shutdown: &Shutdown,
     reload: Option<Reload>,
-    announcement: Option<String>,
+    startup: Option<Message>,
 ) -> Result<(), RunError> {
-    let handle = config
-        .telegram
-        .as_ref()
-        .map(|settings| notify::start(settings, shutdown));
-    let notifier: Arc<dyn Notifier> = match &handle {
-        Some(handle) => Arc::clone(&handle.notifier),
-        None => Arc::new(NoopNotifier),
-    };
+    let handle = notify::start(&config.notify, shutdown)?;
+    let notifier: Arc<dyn Notifier> = Arc::clone(&handle.notifier);
 
-    let result = run_with_notifier(
-        config,
-        prober,
-        store,
-        shutdown,
-        reload,
-        notifier,
-        announcement,
-    );
-    if let Some(handle) = handle {
-        handle.shutdown();
-    }
+    let result = run_with_notifier(config, prober, store, shutdown, reload, notifier, startup);
+    handle.shutdown(Some(Message::shutdown(now_ms())));
     result
 }
 
@@ -290,7 +291,7 @@ pub fn run_with_notifier(
     shutdown: &Shutdown,
     reload: Option<Reload>,
     notifier: Arc<dyn Notifier>,
-    announcement: Option<String>,
+    startup: Option<Message>,
 ) -> Result<(), RunError> {
     config.require_targets().map_err(|_| RunError::NoTargets)?;
 
@@ -328,8 +329,8 @@ pub fn run_with_notifier(
     };
     supervisor.start_workers()?;
 
-    if let Some(text) = announcement {
-        channel.announce(text);
+    if let Some(startup) = startup {
+        channel.send(startup);
     }
 
     let mut watcher = reload.as_ref().map(|reload| Watcher::new(&reload.path));
@@ -407,15 +408,29 @@ fn monitor_target(
                 store.record_transition(&event)?;
             }
 
-            // The event is committed: only now may the operator hear about it (INV-11).
-            notifier.notify(Notification {
-                target: target.display(),
-                key: event.target.clone(),
-                state: event.state,
-                cause: cause.map(|failure| failure.to_string()),
-                occurred_at_ms: event.occurred_at_ms,
-                at: Instant::now(),
-            });
+            // The event is committed: only now may the operator hear about it (INV-12).
+            let message = match event.state {
+                TargetState::Down => Some(Message::target_down(
+                    TargetRef::new(event.target.clone(), target.label.clone()),
+                    Cause::new(
+                        cause
+                            .map(|failure| failure.code().to_string())
+                            .unwrap_or_default(),
+                        cause
+                            .map(|failure| failure.message().to_string())
+                            .unwrap_or_default(),
+                    ),
+                    event.occurred_at_ms,
+                )),
+                TargetState::Up => Some(Message::target_up(
+                    TargetRef::new(event.target.clone(), target.label.clone()),
+                    event.occurred_at_ms,
+                )),
+                TargetState::Unknown => None,
+            };
+            if let Some(message) = message {
+                notifier.send(message);
+            }
             logging::debug(Some(&name), "notification queued");
 
             previous = transition.to;
@@ -498,11 +513,12 @@ mod tests {
 
     #[test]
     fn the_startup_message_names_the_file_the_targets_and_the_page() {
-        let text = startup_message(
+        let text = startup_event(
             &config(),
             Some(Path::new("/etc/network-monitor.toml")),
             Some("0.0.0.0:8642"),
-        );
+        )
+        .text();
 
         assert!(
             text.starts_with(
@@ -523,7 +539,7 @@ mod tests {
 
     #[test]
     fn a_start_without_a_file_or_a_page_says_so() {
-        let text = startup_message(&config(), None, None);
+        let text = startup_event(&config(), None, None).text();
 
         assert!(text.contains("Config: none\n"), "unexpected: {text}");
         assert!(text.contains("Web: none\n"), "unexpected: {text}");

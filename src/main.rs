@@ -8,7 +8,7 @@ use clap::Parser;
 use thiserror::Error;
 
 use network_monitor::cli::{Cli, Command, Compression};
-use network_monitor::config::{self, Config, ConfigError};
+use network_monitor::config::{self, ChannelSettings, Config, ConfigError};
 use network_monitor::history::HistorySource;
 use network_monitor::import::{self, ImportError};
 use network_monitor::logging::{self, Level};
@@ -79,7 +79,7 @@ fn run() -> Result<ExitCode, AppError> {
             log_initializing(source.as_deref());
             settings.require_targets()?;
             validate_interfaces(&settings)?;
-            log_telegram(&settings);
+            log_notifications(&settings);
             log_targets(&settings);
             run_monitor(&settings, source.as_deref(), reload, listen, compression)?;
         }
@@ -180,13 +180,38 @@ fn log_initializing(source: Option<&Path>) {
     }
 }
 
-fn log_telegram(settings: &Config) {
-    match &settings.telegram {
-        Some(telegram) => logging::info(
+fn log_notifications(settings: &Config) {
+    for channel in &settings.notify.channels {
+        let destination = match channel {
+            ChannelSettings::LogFile(logfile) => format!(
+                "{} (logger {}, level {}, format {})",
+                logfile.filename.display(),
+                logfile.logger,
+                logfile.level.label().to_ascii_lowercase(),
+                logfile.format.as_str()
+            ),
+            other => other.destination().to_string(),
+        };
+        logging::info(
             None,
-            &format!("telegram configured for chat {}", telegram.chat_id),
-        ),
-        None => logging::info(None, "telegram not configured"),
+            &format!(
+                "notification channel {} ({}) configured for {}",
+                channel.name(),
+                channel.kind().as_str(),
+                destination
+            ),
+        );
+    }
+    if settings.notify.global.is_empty() {
+        logging::info(None, "notification defaults: none");
+    } else {
+        logging::info(
+            None,
+            &format!(
+                "notification defaults: {}",
+                settings.notify.global.join(", ")
+            ),
+        );
     }
 }
 
@@ -262,8 +287,8 @@ fn run_monitor(
         None => None,
     };
 
-    let announcement = monitor::startup_message(settings, source, serving.as_deref());
-    let outcome = monitor::run(settings, prober, store, &stop, reload, Some(announcement));
+    let startup = monitor::startup_event(settings, source, serving.as_deref());
+    let outcome = monitor::run(settings, prober, store, &stop, reload, Some(startup));
 
     if let Some(thread) = web_thread {
         stop.request();

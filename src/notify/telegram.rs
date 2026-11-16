@@ -1,20 +1,16 @@
-//! The Telegram Bot API client: one HTTPS `POST …/sendMessage` per message.
+//! The Telegram Bot API channel: one HTTPS `POST …/sendMessage` per message.
 //!
 //! The token travels in the request path, so it is never part of an error: a failure
 //! names the host, the status, and the `description` of the answer only.
 
 use std::io::{self, Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
-use std::sync::Arc;
 use std::time::Duration;
 
-use rustls::pki_types::ServerName;
-use rustls::{ClientConnection, StreamOwned};
-
-use super::{SendError, Sender};
+use super::channel::{Channel, Payload, SendError};
+use super::message::{Kind, Message};
 use crate::config::{Telegram as Settings, REDACTED_TOKEN};
 
-/// The only host this client speaks to (ADR-0024, ADR-0026).
+/// The only host this channel speaks to (ADR-0024, ADR-0027).
 const HOST: &str = "api.telegram.org";
 const PORT: u16 = 443;
 /// The budget of one request: connect, write, and read share it.
@@ -25,6 +21,7 @@ const MAX_RESPONSE: usize = 8 * 1024;
 /// The Telegram transport of one channel.
 #[derive(Clone)]
 pub struct Telegram {
+    name: String,
     token: String,
     chat_id: String,
 }
@@ -34,6 +31,7 @@ impl std::fmt::Debug for Telegram {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Telegram")
+            .field("name", &self.name)
             .field("token", &REDACTED_TOKEN)
             .field("chat_id", &self.chat_id)
             .finish()
@@ -43,18 +41,23 @@ impl std::fmt::Debug for Telegram {
 impl Telegram {
     pub fn new(settings: &Settings) -> Self {
         Telegram {
+            name: settings.name.clone(),
             token: settings.bot_token.clone(),
             chat_id: settings.chat_id.clone(),
         }
     }
 
-    /// The HTTP request that sends `text` to the channel.
-    fn request(&self, text: &str) -> String {
-        let body = format!(
+    /// The form body that sends `text` to the chat.
+    fn body(&self, text: &str) -> String {
+        format!(
             "chat_id={}&text={}&disable_web_page_preview=true",
             form_encode(&self.chat_id),
             form_encode(text)
-        );
+        )
+    }
+
+    /// The HTTP request around an already encoded body.
+    fn request(&self, body: &str) -> String {
         format!(
             "POST /bot{}/sendMessage HTTP/1.1\r\n\
              Host: {HOST}\r\n\
@@ -68,7 +71,7 @@ impl Telegram {
         )
     }
 
-    /// Remove the token from anything this client reports.
+    /// Remove the token from anything this channel reports.
     fn scrub(&self, error: SendError) -> SendError {
         SendError {
             retryable: error.retryable,
@@ -82,7 +85,10 @@ impl Telegram {
 
     /// One request over TLS, classified by the answer.
     fn exchange(&self, request: &str) -> Result<(), SendError> {
-        let stream = connect()?;
+        let stream = crate::tls::connect(HOST, PORT, TIMEOUT).map_err(|error| SendError {
+            retryable: error.retryable,
+            reason: error.reason,
+        })?;
         let mut stream = stream;
 
         stream
@@ -122,56 +128,32 @@ impl Telegram {
     }
 }
 
-impl Sender for Telegram {
-    fn send(&mut self, text: &str) -> Result<(), SendError> {
-        self.exchange(&self.request(text))
+impl Channel for Telegram {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> Kind {
+        Kind::Telegram
+    }
+
+    fn open(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn payload(&self, message: &Message) -> Option<Payload> {
+        Some(Payload {
+            body: self.body(&message.text()),
+            media_type: "application/x-www-form-urlencoded",
+        })
+    }
+
+    fn send(&mut self, payload: &Payload) -> Result<(), SendError> {
+        self.exchange(&self.request(&payload.body))
             .map_err(|error| self.scrub(error))
     }
-}
 
-/// Open the TLS connection and complete the handshake.
-fn connect() -> Result<StreamOwned<ClientConnection, TcpStream>, SendError> {
-    let address = (HOST, PORT)
-        .to_socket_addrs()
-        .map_err(|error| SendError {
-            retryable: true,
-            reason: format!("cannot resolve {HOST}: {error}"),
-        })?
-        .next()
-        .ok_or_else(|| SendError {
-            retryable: true,
-            reason: format!("cannot resolve {HOST}: no address"),
-        })?;
-
-    let tcp = TcpStream::connect_timeout(&address, TIMEOUT).map_err(|error| SendError {
-        retryable: true,
-        reason: format!("cannot connect to {HOST}: {error}"),
-    })?;
-    for setting in [
-        tcp.set_read_timeout(Some(TIMEOUT)),
-        tcp.set_write_timeout(Some(TIMEOUT)),
-    ] {
-        setting.map_err(|error| SendError {
-            retryable: true,
-            reason: format!("cannot configure the connection to {HOST}: {error}"),
-        })?;
-    }
-
-    let config = crate::tls::config().map_err(|reason| SendError {
-        retryable: false,
-        reason: format!("cannot start TLS: {reason}"),
-    })?;
-    let server_name = ServerName::try_from(HOST.to_string()).map_err(|_| SendError {
-        retryable: false,
-        reason: format!("'{HOST}' is not a server name"),
-    })?;
-    let connection =
-        ClientConnection::new(Arc::clone(config), server_name).map_err(|reason| SendError {
-            retryable: false,
-            reason: format!("cannot start TLS: {reason}"),
-        })?;
-
-    Ok(StreamOwned::new(connection, tcp))
+    fn close(&mut self) {}
 }
 
 /// The status of the answer and its body.
@@ -248,22 +230,23 @@ fn form_encode(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::FileTelegram;
-    use crate::notify::fake::FakeSender;
-    use crate::notify::{deliver_with, ATTEMPTS};
-    use crate::shutdown::Shutdown;
+    use crate::notify::message::{Cause, TargetRef};
 
     fn settings() -> Settings {
-        let file = FileTelegram {
-            bot_token: Some("123456:secret-token".to_string()),
-            chat_id: Some("-100200".to_string()),
-            stabilize_seconds: None,
-        };
         Settings {
-            bot_token: file.bot_token.unwrap(),
-            chat_id: file.chat_id.unwrap(),
+            name: "telegram".to_string(),
+            bot_token: "123456:secret-token".to_string(),
+            chat_id: "-100200".to_string(),
             stabilize: Duration::from_secs(60),
         }
+    }
+
+    fn down() -> Message {
+        Message::target_down(
+            TargetRef::new("icmp://1.1.1.1", Some("cloudflare-dns".to_string())),
+            Cause::new("ICMP.NO_REPLY", "no reply within 2000 ms"),
+            0,
+        )
     }
 
     #[test]
@@ -284,17 +267,28 @@ mod tests {
     }
 
     #[test]
+    fn the_payload_is_the_form_body_of_the_message() {
+        let channel = Telegram::new(&settings());
+        let payload = channel
+            .payload(&down())
+            .expect("telegram renders every event");
+        assert_eq!(payload.media_type, "application/x-www-form-urlencoded");
+        assert!(payload
+            .body
+            .starts_with("chat_id=-100200&text=DOWN%20cloudflare-dns"));
+        assert!(payload.body.contains("Cause%3A%20ICMP.NO_REPLY"));
+    }
+
+    #[test]
     fn the_request_carries_the_bot_path_and_the_form_body() {
-        let client = Telegram::new(&settings());
-        let request = client.request("DOWN site\nCause: TCP.REFUSED");
+        let channel = Telegram::new(&settings());
+        let request = channel.request("chat_id=-100200&text=DOWN%20site");
 
         assert!(request.starts_with("POST /bot123456:secret-token/sendMessage HTTP/1.1\r\n"));
         assert!(request.contains("Host: api.telegram.org\r\n"));
         assert!(request.contains("Content-Type: application/x-www-form-urlencoded\r\n"));
         assert!(request.contains("Connection: close\r\n"));
-        assert!(request.contains(
-            "chat_id=-100200&text=DOWN%20site%0ACause%3A%20TCP.REFUSED&disable_web_page_preview=true"
-        ));
+        assert!(request.contains("chat_id=-100200&text=DOWN%20site"));
 
         let body = request.split_once("\r\n\r\n").unwrap().1;
         assert!(request.contains(&format!("Content-Length: {}\r\n", body.len())));
@@ -355,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn the_client_debug_form_hides_the_token() {
+    fn the_channel_debug_form_hides_the_token() {
         let rendered = format!("{:?}", Telegram::new(&settings()));
         assert!(
             !rendered.contains("secret-token"),
@@ -366,8 +360,8 @@ mod tests {
 
     #[test]
     fn a_reported_failure_never_carries_the_token() {
-        let client = Telegram::new(&settings());
-        let scrubbed = client.scrub(SendError {
+        let channel = Telegram::new(&settings());
+        let scrubbed = channel.scrub(SendError {
             retryable: true,
             reason: "cannot reach bot123456:secret-token".to_string(),
         });
@@ -379,56 +373,9 @@ mod tests {
     }
 
     #[test]
-    fn a_retryable_failure_is_attempted_again() {
-        let sink = FakeSender::new(vec![
-            Err(SendError {
-                retryable: true,
-                reason: "temporary".to_string(),
-            }),
-            Err(SendError {
-                retryable: true,
-                reason: "temporary".to_string(),
-            }),
-        ]);
-        let mut sender = sink.clone();
-        let shutdown = Shutdown::new();
-
-        deliver_with(&mut sender, "hello", &shutdown, &[]).expect("the third attempt succeeds");
-        assert_eq!(sink.attempts(), 3);
-        assert!(sink.sent().iter().all(|text| text == "hello"));
-    }
-
-    #[test]
-    fn five_failed_attempts_lose_the_message() {
-        let failures = std::iter::repeat_with(|| {
-            Err(SendError {
-                retryable: true,
-                reason: "temporary".to_string(),
-            })
-        })
-        .take(ATTEMPTS)
-        .collect();
-
-        let sink = FakeSender::new(failures);
-        let mut sender = sink.clone();
-        let shutdown = Shutdown::new();
-
-        let error = deliver_with(&mut sender, "hello", &shutdown, &[]).unwrap_err();
-        assert!(error.retryable);
-        assert_eq!(sink.attempts(), ATTEMPTS, "the cap is five attempts");
-    }
-
-    #[test]
-    fn a_permanent_failure_is_not_retried() {
-        let sink = FakeSender::new(vec![Err(SendError {
-            retryable: false,
-            reason: "bad request".to_string(),
-        })]);
-        let mut sender = sink.clone();
-        let shutdown = Shutdown::new();
-
-        let error = deliver_with(&mut sender, "hello", &shutdown, &[]).unwrap_err();
-        assert_eq!(error.reason, "bad request");
-        assert_eq!(sink.attempts(), 1);
+    fn the_channel_states_its_name_and_kind() {
+        let channel = Telegram::new(&settings());
+        assert_eq!(channel.name(), "telegram");
+        assert_eq!(channel.kind(), Kind::Telegram);
     }
 }
