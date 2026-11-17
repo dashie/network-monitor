@@ -260,6 +260,22 @@ sudo ./target/release/network-monitor monitor --config ./network-monitor.toml \
   --listen 0.0.0.0:8642</code></pre>
       </div>
       <div class="snippet">
+        <h3>From an empty folder</h3>
+        <p>A scaffolded folder with a configuration, a database directory, and an event log; the
+          active TCP target needs no privilege.</p>
+        <pre><code>./target/release/network-monitor init ./monitor
+(cd ./monitor && ../target/release/network-monitor check --config network-monitor.toml)
+(cd ./monitor && ../target/release/network-monitor monitor --config network-monitor.toml \
+  --listen 127.0.0.1:8642)</code></pre>
+      </div>
+      <div class="snippet">
+        <h3>Read the manual</h3>
+        <p>The user guide is embedded in the binary and works offline. Pipe it to a pager or a
+          renderer if you want one.</p>
+        <pre><code>./target/release/network-monitor manual | less -R
+./target/release/network-monitor manual | mdcat --ansi | less -R</code></pre>
+      </div>
+      <div class="snippet">
         <h3>Look first, install later</h3>
         <p>A generated history: no network, no database, and the same seed replays the same board.</p>
         <pre><code>./target/release/network-monitor simulate --listen 127.0.0.1:8660 \

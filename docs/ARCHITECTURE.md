@@ -7,7 +7,7 @@ decisions and their rationale live in [ADR.md](./ADR.md).
 
 ## 1. Introduction and goals
 
-`network-monitor` is a single-process Rust command-line program. One invocation is either a long-running `monitor` that owns the probing loop and the SQLite writer, or one of the short-lived commands — `check` that verifies a configuration without starting, `serve` and `simulate` that read a history and publish it, `query` and `import` that read or restore the database.
+`network-monitor` is a single-process Rust command-line program. One invocation is either a long-running `monitor` that owns the probing loop and the SQLite writer, or one of the short-lived commands — `init` that scaffolds a folder, `check` that verifies a configuration without starting, `manual` that prints the embedded guide, `serve` and `simulate` that read a history and publish it, `query` and `import` that read or restore the database.
 
 Top quality goals, in order:
 
@@ -138,6 +138,8 @@ Rel(cli, hosts, "Sends echo requests", "ICMP")
 | `probe::interface` | Validate an interface name and bind a socket to it | `validate`, `bind_socket` per platform |
 | `monitor` | Supervise one interval loop per target, decide whether a transition occurred, reload the configuration file, dispatch transitions to the store, and gate the snapshot and a candidate promotion on the first probe round | `run(config, prober, store, shutdown, reload, start)`, `run_with_notifier(…, start)`, `Start`, `FirstRound` |
 | `check` | Verify the conditions a start checks, without a probe loop and without writing the event database | `run`, `Options`, `Report`, `Line`, `LineLevel` |
+| `init` | Create a minimal, runnable setup in a new folder: the template configuration and its data and log directories | `run`, `Report`, `InitError`, `TEMPLATE` |
+| `manual` | Print the user guide embedded at build time, without reading configuration or touching the database | `USER_GUIDE`, `write_guide`, `run`, `ManualError` |
 | `promote` | Name a backup, capture the verified candidate bytes, and replace the main configuration atomically | `Candidate`, `commit`, `backup_path`, `PromoteError` |
 | `snapshot` | Name, publish, and describe the active snapshot of the configuration a start used | `Snapshot`, `path_for`, `write`, `describe` |
 | `notify` | Decide which state changes are reported, hold the stable `up` window, route a message by channel name, and deliver it off the probe path | `Notifier`, `Message`, `Event`, `Channel`, `Routing`, `Engine`, `start`, `start_with` |
@@ -188,6 +190,18 @@ Rel(cli, hosts, "Sends echo requests", "ICMP")
 - **Input:** the resolved `Config` and `Options { listen, probe, active }`.
 - **Output:** a `Report` of `Line { level, subject, detail }`, rendered as one aligned line per check.
 - **Guarantees:** the pipeline follows the order a start checks in, so the first `fail` is the condition that would have stopped it; the event database is opened read-only; the listener `--listen` names is bound and dropped; every declared channel is built and verified without sending anything; a `down` probe verdict is a warning, never a failure; no secret reaches a line; nothing is written to the event database and no worker starts. The one write it may perform is the file of a `logfile` channel, which a start performs too.
+
+### `init`
+
+- **Input:** one folder path; no configuration.
+- **Output:** the folder with `network-monitor.toml`, `data/`, and `logs/`, or an `InitError`.
+- **Guarantees:** the folder must not exist or must be empty; the template is parsed and resolved before the folder is touched; the configuration is written last with `create_new`; nothing outside the folder is written; no probe, database, socket, or configuration is read; the template's active target is TCP and the ICMP example is a comment.
+
+### `manual`
+
+- **Input:** none.
+- **Output:** the bytes of `docs/USER-GUIDE.md`, embedded at build time, on stdout.
+- **Guarantees:** no configuration is read, no probe runs, no database or socket is opened, no file is written, and no pager or subprocess is started; the guide is `include_str!("../docs/USER-GUIDE.md")`, so it matches the build; `man` is an alias; when stdout is a terminal one hint goes to stderr; a closed stdout pipe is a quiet success.
 
 ### `promote`
 
@@ -387,7 +401,8 @@ Takeaway: the write path is one transaction per transition, and the read path ne
 ## 7. Deployment view
 
 - **Local development.** `cargo run -- monitor --config ./network-monitor.toml`, database at `./network-monitor.db`, raw sockets through `sudo` on macOS and Linux or an elevated shell on Windows.
-- **Bare host.** The release binary copied anywhere on `PATH`, the configuration in `/etc/network-monitor/config.toml`, the database in `/var/lib/network-monitor/events.db`, supervised by systemd, launchd, or the Windows scheduler. The binary requires `CAP_NET_RAW` or `root`.
+- **Scaffolded folder.** `network-monitor init <folder>` creates a self-contained folder — `network-monitor.toml`, `data/`, and `logs/` — and prints the commands that check and start it. The folder is run from its own directory; relative paths follow the process working directory. It is a local setup, not a service installation: systemd, launchd, or the Windows scheduler remains the operator's choice.
+- **Bare host.** The release binary copied anywhere on `PATH`, the configuration in `/etc/network-monitor/config.toml`, the database in `/var/lib/network-monitor/events.db`, supervised by systemd, launchd, or the Windows scheduler. The binary requires `CAP_NET_RAW` or `root`. The binary also carries its manual: `network-monitor manual` prints the embedded user guide, so a host without the repository can read it.
 - **Container.** A multi-stage image builds the static musl binary and copies it onto a minimal base, together with a default configuration that probes the container's loopback so a bare `docker run` starts. The build uses the `release-dev` profile (thin LTO, parallel codegen) and a cached `target` directory, so a source change does not recompile every dependency; `PROFILE=release` produces the published artifact. The process runs as the container user with `--cap-drop ALL --cap-add NET_RAW`, the configuration mounted read-only over the default when real targets are needed, a volume for the database, and certificate roots compiled into the binary for HTTPS targets. No port is published: the page, when the command adds `--listen`, binds the host address directly through host networking. Host networking (`network_mode: host`) is required when a target is bound to a physical interface, because a bridge container only sees its own `eth0`. The engine's own log of the process is bounded by the compose `logging` block (`json-file`, `max-size: 10m`, `max-file: "3"`) or by the equivalent `--log-opt` on a bare `docker run`.
 - **QNAP Container Station.** A project from [docker-compose.yml](../docker-compose.yml) that builds and runs the generic image with restart policy `unless-stopped`, host networking, and the named `network-monitor-data` volume as the database. The configuration is not a file on the NAS: it is the `content` of the project's `monitor-config` config, which compose copies into the container over `/etc/network-monitor/config.toml`, so the whole deployment is one YAML and the image stays reusable. The volume must be a local share, not a network share. Build and deployment — including a Docker context that points at the NAS so the image is built there — are in [DEVELOPER-GUIDE.md](./DEVELOPER-GUIDE.md#container-and-qnap-deployment).
 - **Landing page.** The repository also publishes a static landing page — `site/index.html`, its stylesheet, three screenshots, and the crawl files — assembled by `.github/workflows/pages.yml` from `site/` plus the two icons in `assets/icon/` and served by GitHub Pages at <https://dashie.github.io/network-monitor/>. It is documentation, not a running component: it ships no part of the binary, shares no code with `web`, and its commands are copied from the user guide, so it never becomes a second source of truth for behaviour.

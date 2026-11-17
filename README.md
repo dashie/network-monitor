@@ -22,6 +22,15 @@ The deliverable is a single executable with no runtime dependencies, built from 
 # Build the single, dependency-free binary (Rust 1.75 or newer)
 cargo build --release
 
+# Or scaffold a runnable setup in ./monitor: config, database, and event log, no privileges
+./target/release/network-monitor init ./monitor
+(cd ./monitor && ../target/release/network-monitor check --config network-monitor.toml)
+(cd ./monitor && ../target/release/network-monitor monitor --config network-monitor.toml \
+  --listen 127.0.0.1:8642)
+
+# Read the full manual offline (Markdown); pipe it to a pager or renderer
+./target/release/network-monitor manual | less -R
+
 # Verify the configuration first: one ok/warn/fail line per check, no probe loop, no write
 ./target/release/network-monitor check --config ./network-monitor.toml
 

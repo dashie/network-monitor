@@ -101,6 +101,17 @@ pub enum Command {
         probe: bool,
     },
 
+    /// Create a minimal, runnable setup in a new folder; configuration flags are rejected
+    Init {
+        /// Folder to create; it must not exist or must be empty
+        #[arg(value_name = "FOLDER")]
+        folder: PathBuf,
+    },
+
+    /// Print the full user guide as Markdown
+    #[command(visible_alias = "man")]
+    Manual,
+
     /// Serve the read-only web page over the event database, without probing
     Serve {
         /// Address and port to listen on
@@ -269,6 +280,17 @@ pub enum Format {
 }
 
 impl Cli {
+    /// Whether the invocation carries a configuration flag that `init` and `manual` reject.
+    pub fn uses_configuration(&self) -> bool {
+        self.config.is_some()
+            || self.show_config
+            || self.interval_ms.is_some()
+            || self.timeout_ms.is_some()
+            || self.database.is_some()
+            || self.retention_days.is_some()
+            || !self.targets.is_empty()
+    }
+
     /// Turn the flags into configuration overrides.
     pub fn overrides(&self) -> Result<Overrides, String> {
         let targets = if self.targets.is_empty() {
@@ -355,6 +377,58 @@ mod tests {
                 assert!(!probe);
             }
             other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_the_init_subcommand() {
+        let cli = parse(&["init", "monitor"]);
+        match cli.command {
+            Some(Command::Init { folder }) => assert_eq!(folder, PathBuf::from("monitor")),
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(["network-monitor", "init"]).is_err(),
+            "the folder is required"
+        );
+    }
+
+    #[test]
+    fn parses_the_manual_subcommand_and_its_man_alias() {
+        for name in ["manual", "man"] {
+            let cli = parse(&[name]);
+            assert!(matches!(cli.command, Some(Command::Manual)));
+        }
+        assert!(
+            Cli::try_parse_from(["network-monitor", "manual", "extra"]).is_err(),
+            "the command takes no arguments"
+        );
+    }
+
+    #[test]
+    fn the_help_lists_init_manual_and_the_man_alias() {
+        use clap::CommandFactory;
+
+        let mut command = Cli::command();
+        let help = command.render_help().to_string();
+        assert!(help.contains("init"), "help: {help}");
+        assert!(help.contains("manual"), "help: {help}");
+        assert!(help.contains("man"), "help: {help}");
+    }
+
+    #[test]
+    fn uses_configuration_names_every_configuration_flag() {
+        assert!(!parse(&["manual"]).uses_configuration());
+        for args in [
+            vec!["--config", "x.toml", "manual"],
+            vec!["--show-config", "manual"],
+            vec!["--interval-ms", "1", "manual"],
+            vec!["--timeout-ms", "1", "manual"],
+            vec!["--database", "x.db", "manual"],
+            vec!["--retention-days", "1", "manual"],
+            vec!["--target", "1.1.1.1", "manual"],
+        ] {
+            assert!(parse(&args).uses_configuration(), "args: {args:?}");
         }
     }
 

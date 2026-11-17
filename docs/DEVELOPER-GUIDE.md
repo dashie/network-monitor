@@ -60,6 +60,8 @@ network-monitor/
 │   ├── cli.rs            command-line surface, one flag per configuration key
 │   ├── config.rs         defaults, TOML loading, precedence, validation
 │   ├── check.rs          the dry run: the start checks as one ok/warn/fail report
+│   ├── init.rs           create a minimal, runnable setup in a new folder
+│   ├── manual.rs         print the user guide embedded at build time
 │   ├── promote.rs        candidate backup name and the atomic replace of the main file
 │   ├── snapshot.rs       the active snapshot: path, private atomic write, age
 │   ├── json.rs           the JSON escaping and assembly shared by query and the API
@@ -121,6 +123,8 @@ network-monitor/
 │   ├── snapshot.rs           snapshot after a clean first round, never by a reload
 │   ├── store.rs              schema, concurrent read, retention, labels
 │   ├── cli.rs                exit codes and query output
+│   ├── init.rs               folder scaffold, check acceptance, refusals
+│   ├── manual.rs             embedded guide, alias, no configuration
 │   ├── web.rs                page, faults table, detail page, no writes
 │   ├── simulate.rs           end-to-end: routes, same seed same bytes, nothing written
 │   ├── import.rs             export round trip, plain CSV, stdin, URL, duplicates
@@ -131,6 +135,9 @@ network-monitor/
 ├── .github/              commit and pull request instruction contracts
 └── .vscode/              editor settings that register those contracts
 ```
+
+`docs/USER-GUIDE.md` is embedded with `include_str!` by `src/manual.rs`, so `network-monitor
+manual` prints the guide of the build; there is no second copy to keep in step.
 
 The icon is authored once in `assets/icon/icon.svg`; the PNGs next to it are its renders,
 regenerated with `rsvg-convert -w 1024 -h 1024 assets/icon/icon.svg -o

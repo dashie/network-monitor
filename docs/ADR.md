@@ -47,6 +47,8 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0033 | Deliver notifications through declared channels with a typed message | accepted | 2026-11-16 | A channel is declared once and enabled by name; one typed `Message` rendered per transport; Telegram, webhook and log file; one queue, thread and policy per channel; secrets file-only |
 | ADR-0034 | Verify a configuration without starting, promote a candidate only after it probes, and keep one active snapshot | accepted | 2026-11-17 | `check` is a subcommand, not a flag; promotion runs in the monitor after the first probe round; one timestamped backup per deployment and one `.active` recovery file written once per start |
 | ADR-0035 | Rotate a log file channel by size, and only on a write | accepted | 2026-11-17 | `max_bytes`/`max_files` on a `logfile` channel, default off; the line is never split, a failed rotation is one `WARN`; the diagnostic log stays on stderr and the deployment bounds it |
+| ADR-0036 | Scaffold a local setup with an init verb, not an installer | accepted | 2026-11-17 | A fixed folder template with one unprivileged TCP target, a commented ICMP example, `data/` and `logs/`, and an enabled rotating event log; missing or empty folder only, no configuration flags, nothing outside the folder |
+| ADR-0037 | Embed the user guide and print it as Markdown, without a renderer | accepted | 2026-11-17 | `include_str!` of `docs/USER-GUIDE.md`; `manual` with `man` alias; raw Markdown to stdout; TTY-only hint on stderr; no renderer, pager, subprocess, man page, or new dependency |
 
 ## Records
 
@@ -1751,3 +1753,92 @@ ever.
   journald's host-wide bound.
 - **Rotate at start or in `check`:** rejected — inspecting a configuration must not rename the
   file an operator is reading.
+
+## ADR-0036 — Scaffold a local setup with an init verb, not an installer
+
+**Status:** accepted · **Date:** 2026-11-17
+
+### Context
+
+The first run needs a configuration, a predictable database location, and a log directory. The
+sample configuration is a reference, not a scaffold: it lists several targets, several need
+`root`/`CAP_NET_RAW`, and its database path is a reference. `Config::resolve` resolves
+`database` against the process working directory, and a `logfile` channel creates its file but
+not its directory (`FR-29`). The product is one binary for appliances and containers, where the
+repository may not be present, and the NFR says "no installer".
+
+### Decision
+
+1. Add `init <FOLDER>`, one-shot and with no options of its own. It accepts a missing or empty
+   folder and refuses a file or a non-empty folder, so it never overwrites.
+2. The template is fixed: the defaults, one unprivileged TCP target, a commented ICMP example,
+   `data/` and `logs/`, and an enabled size-rotated `logfile` channel `events` at
+   `logs/events.log`.
+3. `init` validates the template through the ordinary parse/resolve pipeline before touching the
+   folder, writes the configuration last with `create_new`, and writes nothing outside the
+   folder.
+4. `init` is not an installer: no `/etc`, `/var/lib`, user, supervisor, or `systemctl`. A later
+   `install` may reuse the template, but that is a separate decision.
+5. The generated configuration is user-owned; `init` never overwrites or merges it.
+
+### Consequences
+
+- A first run is three commands: `init`, `check`, `monitor`; the folder is the unit of
+  deployment and is run from its own directory.
+- Relative paths are not rewritten; the printed `cd` makes the working directory explicit.
+- `data/` is a convention (`Store::open_rw` would create it), while `logs/` is required by the
+  channel.
+- Existing behaviour and configuration precedence are unchanged; no key is added.
+
+### Alternatives considered
+
+- **Documentation-only or copying the sample:** rejected — the sample is not a clean first run.
+- **A full OS installer:** rejected — a separate decision, and against the no-installer NFR.
+- **`--target`, `--listen`, or `--force`:** rejected — they duplicate the configuration file or
+  weaken the one-shot contract.
+- **A diagnostic log file or a `2>>` recipe:** rejected — rotation belongs to the supervisor and
+  `ADR-0035` keeps diagnostics on stderr.
+- **A generated run script:** rejected — no shell script belongs in the execution path.
+- **Defaulting to `.`:** rejected — the command's purpose is to create a folder, and `.` can be a
+  non-empty repository.
+
+## ADR-0037 — Embed the user guide and print it as Markdown, without a renderer
+
+**Status:** accepted · **Date:** 2026-11-17
+
+### Context
+
+The binary is shipped to appliances and containers where the repository and the website may not
+be present. The user guide is the standalone manual; the binary already embeds HTML, OpenAPI,
+and Swagger UI with `include_str!`. A true mdcat-like renderer would need a parser and renderer
+dependency plus table and wrapping code, and the guide has 136 table rows, 30 code blocks, and
+lines up to 537 characters, so a half-renderer is worse than raw Markdown. A curated short
+manual would duplicate the guide and drift; a native man page would need a second format and an
+installation step.
+
+### Decision
+
+1. `network-monitor manual` prints the exact bytes of
+   `include_str!("../docs/USER-GUIDE.md")` to stdout; `man` is a visible alias.
+2. No renderer, pager, subprocess, native man page, or curated duplicate is added.
+3. When stdout is a terminal, one hint goes to stderr; otherwise stdout is pure Markdown for
+   `less -R` or `mdcat --ansi`.
+4. The command reads no configuration, starts nothing, and treats a closed stdout pipe as a
+   quiet success; any other write error exits non-zero.
+
+### Consequences
+
+- The manual is offline, version-locked to the build, and there is one source of truth.
+- The binary grows by about 54 KB against a 15 MB footprint limit.
+- The raw output is readable but not styled; the operator pipes it to a pager or renderer when
+  they want one.
+- A closed stderr cannot turn a successful manual into a panic.
+
+### Alternatives considered
+
+- **An mdcat-like renderer:** rejected — a parser and renderer dependency plus table and
+  wrapping code, conflicting with the minimal-dependency principle.
+- **A curated short manual:** rejected — it duplicates the guide and drifts.
+- **A native roff man page:** rejected — a second format and an installation step.
+- **Spawning a pager:** rejected — an external process and platform differences.
+- **Printing only when stdout is a terminal:** rejected — it breaks pipelines.

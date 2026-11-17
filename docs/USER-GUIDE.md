@@ -50,6 +50,29 @@ A static Linux binary is produced by
 `cargo build --release --target x86_64-unknown-linux-musl`; the container image in this guide
 carries that same binary, so no shared library has to be present on the appliance.
 
+### From an empty folder
+
+The fastest first run creates a self-contained folder: the configuration, the database
+directory, and the event-log directory. The active target is a TCP check that needs no
+privilege, and the ICMP example is commented until you uncomment it and run with `sudo`.
+
+```bash
+network-monitor init ./monitor
+cd ./monitor
+network-monitor check --config network-monitor.toml
+network-monitor monitor --config network-monitor.toml --listen 127.0.0.1:8642
+```
+
+`init` refuses a folder that is not empty and never overwrites a file. If it stops with an
+error after creating part of the folder, remove the folder and run it again. The folder holds
+`network-monitor.toml`, `data/` for `events.db`, and `logs/` for `events.log`. The relative
+paths resolve against the working directory, so run the commands from the folder. `check`
+creates `logs/events.log` (the `events` `logfile` channel) and leaves the database to the first
+monitor start. The diagnostic log stays on stderr. The generated file contains no secret; a
+Telegram or webhook token added later is read from the file only and should be protected, as the
+notification section states. The binary is the one on `PATH`; in a source checkout, use
+`./target/release/network-monitor`. Open `http://127.0.0.1:8642/` for the page.
+
 ### Container
 
 ```bash
@@ -481,6 +504,8 @@ listed in [Troubleshooting](#troubleshooting), later in this guide.
 |---|---|
 | `monitor [--listen <addr>] [--try <path>] [--fallback-to-active]` | Probe the targets and record transitions; optionally serve the page, promote a candidate, or start from the active snapshot |
 | `check [--listen <addr>] [--probe]` | Verify the configuration without starting the monitor; exit non-zero when it would not start |
+| `init <folder>` | Create a minimal, runnable setup in a new folder: the configuration, the data directory, and the log directory |
+| `manual` (alias `man`) | Print the full user guide as Markdown; pipe it to `less -R` or `mdcat --ansi` |
 | `serve [--listen <addr>]` | Serve the page alone, read-only, without probing (default `127.0.0.1:8642`) |
 | `simulate --listen <addr> [--history 30d] [--seed 0] [--fault-rate 3]` | Serve the page over a generated history, with no probe and no database |
 | `query state [--format table\|json]` | Current state of every target |
@@ -490,6 +515,15 @@ listed in [Troubleshooting](#troubleshooting), later in this guide.
 `query events <target>` accepts the label, the full key, or a bare ICMP address. Diagnostics go
 to stderr as `<timestamp> <LEVEL> [<target>] <message>`; data goes to stdout, so a query can be
 piped.
+
+`manual` writes the guide embedded in the binary to stdout, and `man` is an alias. It reads no
+configuration and never starts a pager or another process; `less` and `mdcat` are optional
+tools you pipe to:
+
+```bash
+network-monitor manual | less -R
+network-monitor manual | mdcat --ansi | less -R
+```
 
 ### Verifying a configuration (`check`)
 
@@ -903,6 +937,10 @@ The **diagnostic log** is not a file of the tool: every line goes to stderr, and
 owns its rotation. The **`logfile` notification channel** writes its own file and is bounded by
 its own `max_bytes` and `max_files`, in every one of the cases below.
 
+A folder created by `init` enables the `events` `logfile` channel at `logs/events.log`; that is
+an example of the `logfile` row, never the diagnostic log. The diagnostic log is still stderr
+and is not a file of the tool.
+
 | How it runs | Where the diagnostics go | Who rotates them |
 |---|---|---|
 | A terminal | stderr, to the terminal | Nothing to rotate |
@@ -1002,6 +1040,9 @@ rotation is one more file to follow and no line disappears from the stream.
 - There is exactly one active snapshot and no history of snapshots, and the deployment backups
   are never pruned by the tool. A candidate is promoted only after every target has probed once
   without a local failure; reachability of a target is not a condition.
+- `init` scaffolds a folder and `manual` prints the embedded guide; neither installs nor
+  supervises a service. The scaffolded event log is a `logfile` channel bounded by
+  `max_bytes`/`max_files`, and the diagnostic log remains stderr, bounded by the supervisor.
 
 Each item is deliberate rather than missing: leaving out IPv6, redirects, DNSSEC, DoT/DoH and
 client certificates keeps one probe cheap and the binary portable, the trust store travels

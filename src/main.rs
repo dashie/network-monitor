@@ -13,7 +13,9 @@ use network_monitor::cli::{Cli, Command, Compression};
 use network_monitor::config::{self, ChannelSettings, Config, ConfigError, Overrides};
 use network_monitor::history::HistorySource;
 use network_monitor::import::{self, ImportError};
+use network_monitor::init;
 use network_monitor::logging::{self, Level};
+use network_monitor::manual;
 use network_monitor::monitor::{self, RunError};
 use network_monitor::probe::interface;
 use network_monitor::probe::{Probe, Prober};
@@ -51,6 +53,10 @@ enum AppError {
     #[error("{0}")]
     Import(#[from] ImportError),
     #[error("{0}")]
+    Init(#[from] init::InitError),
+    #[error("{0}")]
+    Manual(#[from] manual::ManualError),
+    #[error("{0}")]
     Invalid(String),
 }
 
@@ -73,6 +79,27 @@ fn run() -> Result<ExitCode, AppError> {
         let level = Level::parse(name)
             .ok_or_else(|| AppError::Invalid(format!("unknown log level '{name}'")))?;
         logging::set_level(level);
+    }
+
+    if let Some(Command::Init { folder }) = &cli.command {
+        if cli.uses_configuration() {
+            return Err(AppError::Invalid(
+                "init takes only a folder; it does not read a configuration".to_string(),
+            ));
+        }
+        let report = init::run(folder)?;
+        print!("{}", report.render());
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    if let Some(Command::Manual) = &cli.command {
+        if cli.uses_configuration() {
+            return Err(AppError::Invalid(
+                "manual takes no arguments; it does not read a configuration".to_string(),
+            ));
+        }
+        manual::run()?;
+        return Ok(ExitCode::SUCCESS);
     }
 
     let overrides = cli.overrides().map_err(AppError::Invalid)?;
@@ -197,8 +224,11 @@ fn run() -> Result<ExitCode, AppError> {
                     query::run(&settings, &what)?;
                 }
                 Some(Command::Monitor { .. }) => unreachable!("the monitor is handled above"),
+                Some(Command::Init { .. }) | Some(Command::Manual) => {
+                    unreachable!("init and manual are handled before the configuration is loaded")
+                }
                 None => {
-                    println!("error: a subcommand is required (monitor, query); try --help\n");
+                    println!("error: a subcommand is required; run --help for the list\n");
                     return Ok(ExitCode::from(2));
                 }
             }
