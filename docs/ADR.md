@@ -45,6 +45,7 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0031 | Order the lanes by a priority the configuration states | accepted | 2026-11-15 | `priority` on a target, stored in `targets.priority` (schema 3) and written by the monitor on start, reload, and the event that creates the row; page and API order by `priority IS NULL, priority, target` |
 | ADR-0032 | Serve a deterministic simulated history from a dedicated `simulate` verb | accepted | 2026-11-15 | A `History`/`HistorySource` seam the page, the API and the export read through; `Store` and a generator that replays whole UTC days from `(seed, key, day)`; no probe, no database, no state kept between requests; `--listen` required, `--history` 1–3660 days, `--seed` |
 | ADR-0033 | Deliver notifications through declared channels with a typed message | accepted | 2026-11-16 | A channel is declared once and enabled by name; one typed `Message` rendered per transport; Telegram, webhook and log file; one queue, thread and policy per channel; secrets file-only |
+| ADR-0034 | Verify a configuration without starting, promote a candidate only after it probes, and keep one active snapshot | accepted | 2026-11-17 | `check` is a subcommand, not a flag; promotion runs in the monitor after the first probe round; one timestamped backup per deployment and one `.active` recovery file written once per start |
 
 ## Records
 
@@ -1594,3 +1595,83 @@ to, and an operator cannot filter notification diagnostics from process lines.
   mechanism, and a rotation feature would add state and a failure mode for no requirement.
 - **Keeping `[telegram]` as the only Telegram form**: rejected; a second way to declare one
   channel would defeat "declared once", so it is an alias for one release and no more.
+
+## ADR-0034 — Verify a configuration without starting, promote a candidate only after it probes, and keep one active snapshot
+
+**Status:** accepted · **Date:** 2026-11-17
+
+### Context
+
+Deploying a new configuration meant restarting the monitor and learning about its mistakes
+one restart at a time. `--show-config` validates the file and the merge, but a missing target
+list, an interface that does not exist on the host, an unusable database path, a busy listening
+address, an unopenable log file, a revoked Telegram token, and a missing raw-socket privilege
+only surfaced after the process started. The mirror-image gap was the reload path: a broken
+edit is rejected and the process keeps running the previous configuration **from memory**, while
+the file on disk keeps the rejected content, and nothing holds a copy of the configuration that
+was working a minute before.
+
+### Decision
+
+1. **Verification is a subcommand, `check`,** not another mode of `--show-config`. It runs the
+   conditions a start runs in the order a start runs them — target list, interfaces, event
+   database, listening address, channels, and optionally one real probe per target — prints one
+   `ok`/`warn`/`fail` line each on stdout, exits non-zero on a `fail`, opens the database
+   read-only, sends no notification, and never prints a secret. `--show-config` stays a pure
+   printer (FR-12).
+2. **Promotion happens in the running process, not in a `promote` command.** `monitor --try`
+   reads and verifies the candidate once, keeps its bytes, and arms a promotion. When every
+   target has completed its first probe without a local failure, the candidate replaces the main
+   file and the watcher is rebased, so the process never re-reads the candidate and never treats
+   its own write as an operator edit. A first probe that fails locally swaps the supervisor back
+   to the main configuration in place.
+3. **The gate is the first probe round, not the `READY` notification.** `READY` says the
+   workers started; it does not say a raw socket could be opened or an interface bound. The
+   first real outcome of every target is the earliest fact that the configuration works.
+4. **Two files, two lifetimes.** The deployment history is one timestamped sibling
+   `<main>.<UTC>.bak` per promotion; recovery is `<main>.active`, written once per start and
+   never by a reload, so it always means "the last configuration that started and probed" — a
+   fixed point, not a moving target. There is no `.active.bak` and no snapshot rotation.
+5. **The snapshot holds the accepted bytes, not the `--show-config` output**, because that
+   output redacts the tokens and cannot start the process.
+6. **The fallback is opt-in.** `--fallback-to-active` starts from the snapshot when the main
+   file cannot be used and logs one `WARN`; without it the start fails and the error names the
+   snapshot and its age. Starting from an older configuration silently would hide a failed
+   deployment.
+7. **Secrets stay private.** Promotion publishes through a `0600` temporary and a rename; the
+   snapshot is created with mode `0600` on Unix and ignored by Git together with `*.bak`.
+
+### Consequences
+
+- A deployment can be verified while the live monitor runs, promoted without a restart, and
+  rejected without losing the configuration that works.
+- An absent `--try` file is a quiet `INFO` no-op, so the flag can stay in a unit file forever;
+  an identical candidate promotes nothing and produces no backup.
+- The monitor grows one decision at start, one gate after the first probe round, and one file
+  operation isolated in `promote` and `snapshot`.
+- `check` performs outbound traffic (one `getMe`, one webhook connection, and with `--probe` one
+  probe per target) and may create a missing log-file channel's file; it changes nothing else.
+- A batch of accepted hot edits is not in the snapshot until the next restart, which is what
+  the recovery point means and is stated in the user guide.
+- The main configuration file is now writable by the process; before, the monitor only read it.
+
+### Alternatives considered
+
+- **`--check` on `--show-config`:** rejected — it would turn a printer into a prober and a
+  channel client, contradict FR-12, and force every script that prints the configuration to
+  perform network calls.
+- **A separate `promote` command run after the fact:** rejected — it cannot know whether the
+  configuration probed, so it would promote content that never ran, or require a second process
+  to inspect the first.
+- **Gate on the `READY` notification:** rejected — it states intent to probe, not a probe result.
+- **Rewrite the file after each accepted reload:** rejected — the file would become the process's
+  state instead of the operator's, and a rejected edit would be silently overwritten.
+- **Snapshot rotation or a history of snapshots:** rejected — the file is rewritten once per
+  start, so there is exactly one, and a timestamped backup already covers deployments.
+- **Fallback on by default:** rejected — an unattended host would start from an older
+  configuration without anyone learning the deployment failed.
+- **JSON output for `check`:** rejected — one plain line per check is enough to read and to
+  grep, and the read-only JSON API already serves machines.
+- **Retention of `.bak` files:** left out of this decision; a promotion is one per deployment and
+  a backup deleted at a threshold can be the one the operator needs.
+

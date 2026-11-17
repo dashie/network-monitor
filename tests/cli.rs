@@ -591,3 +591,505 @@ fn two_channels_on_one_destination_fail_before_the_monitor_starts() {
         .failure()
         .stderr(predicate::str::contains("both write to"));
 }
+
+#[test]
+fn check_reports_ok_and_warn_lines_and_exits_zero() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("network-monitor.toml"),
+        "database = \"events.db\"\n\n[[targets]]\nip = \"127.0.0.1\"\n",
+    )
+    .unwrap();
+
+    monitor(directory.path())
+        .args(["check", "--config", "network-monitor.toml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ok    targets"))
+        .stdout(predicate::str::contains("warn  database"))
+        .stdout(predicate::str::contains("ok    channel"))
+        .stdout(predicate::str::contains("fail ").not());
+
+    assert!(
+        !directory.path().join("events.db").exists(),
+        "check never creates the event database"
+    );
+}
+
+#[test]
+fn check_names_an_unknown_interface_and_exits_one() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("network-monitor.toml"),
+        "database = \"events.db\"\n\n[[targets]]\nip = \"127.0.0.1\"\ninterface = \"does-not-exist0\"\n",
+    )
+    .unwrap();
+
+    monitor(directory.path())
+        .args(["check", "--config", "network-monitor.toml"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("fail  interface"))
+        .stdout(predicate::str::contains("does-not-exist0"));
+}
+
+#[test]
+fn check_reports_a_bad_listen_address_on_stdout() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("network-monitor.toml"),
+        "database = \"events.db\"\n\n[[targets]]\nip = \"127.0.0.1\"\n",
+    )
+    .unwrap();
+
+    monitor(directory.path())
+        .args([
+            "check",
+            "--config",
+            "network-monitor.toml",
+            "--listen",
+            "not-an-address",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("fail  listen"))
+        .stdout(predicate::str::contains("invalid listen address"));
+}
+
+// --- `monitor --try`: the candidate decision table -------------------------------
+
+use std::net::TcpListener;
+use std::path::Path;
+use std::process::{Child, Command as StdCommand, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use network_monitor::store::{EventFilter, Store};
+
+/// A spawned monitor that never outlives the test, even when an assertion fails.
+struct Running {
+    child: Option<Child>,
+}
+
+impl Running {
+    fn spawn(directory: &Path, args: &[&str], log: &Path) -> Running {
+        let child = StdCommand::new(env!("CARGO_BIN_EXE_network-monitor"))
+            .current_dir(directory)
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(
+                std::fs::File::create(log).expect("the test creates the log file"),
+            ))
+            .spawn()
+            .expect("the binary starts");
+        Running { child: Some(child) }
+    }
+
+    fn stop(mut self) -> ExitStatus {
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(
+                self.child.as_ref().unwrap().id() as libc::pid_t,
+                libc::SIGTERM,
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = self.child.as_mut().unwrap().kill();
+        }
+        let status = self
+            .child
+            .as_mut()
+            .unwrap()
+            .wait()
+            .expect("the monitor exits");
+        self.child = None;
+        status
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn write_main_config(path: &Path, port: u16) {
+    std::fs::write(
+        path,
+        format!(
+            "interval_ms = 50\ntimeout_ms = 500\ndatabase = \"events.db\"\n\
+             retention_days = 0\n\n[[targets]]\nmethod = \"tcp\"\n\
+             host = \"127.0.0.1\"\nport = {port}\nlabel = \"main\"\n"
+        ),
+    )
+    .unwrap();
+}
+
+fn write_candidate(path: &Path, port: u16, extra: &str) {
+    std::fs::write(
+        path,
+        format!(
+            "interval_ms = 50\ntimeout_ms = 500\ndatabase = \"events.db\"\n\
+             retention_days = 0\n\n[[targets]]\nmethod = \"tcp\"\n\
+             host = \"127.0.0.1\"\nport = {port}\nlabel = \"candidate\"\n{extra}"
+        ),
+    )
+    .unwrap();
+}
+
+fn wait_for_events(database: &Path, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(store) = Store::open_ro(database) {
+            if let Ok(events) = store.events(&EventFilter::default()) {
+                if !events.is_empty() {
+                    return;
+                }
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no event in {} within {timeout:?}",
+            database.display()
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn loopback_listener() -> TcpListener {
+    TcpListener::bind("127.0.0.1:0").expect("the test binds a loopback port")
+}
+
+fn log_text(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_default()
+}
+
+fn backup_files(directory: &Path) -> Vec<String> {
+    std::fs::read_dir(directory)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".bak"))
+        .collect()
+}
+
+#[test]
+fn try_without_a_config_is_a_usage_error() {
+    let directory = tempfile::tempdir().unwrap();
+
+    monitor(directory.path())
+        .args(["monitor", "--try", "next.toml"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--try requires --config"));
+}
+
+#[test]
+fn try_naming_the_main_file_is_refused() {
+    let directory = tempfile::tempdir().unwrap();
+    let listener = loopback_listener();
+    let port = listener.local_addr().unwrap().port();
+    write_main_config(&directory.path().join("main.toml"), port);
+
+    monitor(directory.path())
+        .args(["monitor", "--config", "./main.toml", "--try", "main.toml"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--try must name a different file from --config",
+        ));
+}
+
+#[test]
+fn an_absent_candidate_is_a_quiet_no_op() {
+    let directory = tempfile::tempdir().unwrap();
+    let listener = loopback_listener();
+    let port = listener.local_addr().unwrap().port();
+    write_main_config(&directory.path().join("main.toml"), port);
+    let log = directory.path().join("stderr.log");
+
+    let running = Running::spawn(
+        directory.path(),
+        &["monitor", "--config", "main.toml", "--try", "next.toml"],
+        &log,
+    );
+    wait_for_events(&directory.path().join("events.db"), Duration::from_secs(10));
+    let status = running.stop();
+
+    assert!(status.success(), "a quiet no-op exits 0: {status:?}");
+    assert!(
+        log_text(&log).contains("no candidate configuration at next.toml; using main.toml"),
+        "unexpected log: {}",
+        log_text(&log)
+    );
+}
+
+#[test]
+fn an_unreadable_candidate_logs_and_monitors_the_main_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let listener = loopback_listener();
+    let port = listener.local_addr().unwrap().port();
+    write_main_config(&directory.path().join("main.toml"), port);
+    // A directory is unreadable as a file for every user, root included.
+    std::fs::create_dir(directory.path().join("next.toml")).unwrap();
+    let log = directory.path().join("stderr.log");
+
+    let running = Running::spawn(
+        directory.path(),
+        &["monitor", "--config", "main.toml", "--try", "next.toml"],
+        &log,
+    );
+    wait_for_events(&directory.path().join("events.db"), Duration::from_secs(10));
+    let status = running.stop();
+
+    assert!(status.success(), "the monitor keeps running: {status:?}");
+    let text = log_text(&log);
+    assert!(
+        text.contains("cannot read the candidate configuration next.toml"),
+        "unexpected log: {text}"
+    );
+    assert!(text.contains("main.toml stays in effect"), "{text}");
+}
+
+#[test]
+fn a_candidate_that_fails_the_check_is_reported_and_main_keeps_running() {
+    let directory = tempfile::tempdir().unwrap();
+    let listener = loopback_listener();
+    let port = listener.local_addr().unwrap().port();
+    let main = directory.path().join("main.toml");
+    write_main_config(&main, port);
+    let original = std::fs::read(&main).unwrap();
+    write_candidate(
+        &directory.path().join("next.toml"),
+        port,
+        "interface = \"does-not-exist0\"\n",
+    );
+    let log = directory.path().join("stderr.log");
+
+    let running = Running::spawn(
+        directory.path(),
+        &["monitor", "--config", "main.toml", "--try", "next.toml"],
+        &log,
+    );
+    wait_for_events(&directory.path().join("events.db"), Duration::from_secs(10));
+    let status = running.stop();
+
+    assert!(status.success(), "the monitor keeps running: {status:?}");
+    let text = log_text(&log);
+    assert!(
+        text.contains("candidate configuration next.toml: interface:"),
+        "unexpected log: {text}"
+    );
+    assert!(text.contains("main.toml stays in effect"), "{text}");
+    assert_eq!(
+        std::fs::read(&main).unwrap(),
+        original,
+        "a rejected candidate never touches the main file"
+    );
+}
+
+#[test]
+fn an_identical_candidate_promotes_nothing() {
+    let directory = tempfile::tempdir().unwrap();
+    let listener = loopback_listener();
+    let port = listener.local_addr().unwrap().port();
+    let main = directory.path().join("main.toml");
+    write_main_config(&main, port);
+    std::fs::copy(&main, directory.path().join("next.toml")).unwrap();
+    let log = directory.path().join("stderr.log");
+
+    let running = Running::spawn(
+        directory.path(),
+        &["monitor", "--config", "main.toml", "--try", "next.toml"],
+        &log,
+    );
+    wait_for_events(&directory.path().join("events.db"), Duration::from_secs(10));
+    let status = running.stop();
+
+    assert!(status.success(), "the monitor keeps running: {status:?}");
+    assert!(
+        log_text(&log).contains("matches main.toml; nothing to promote"),
+        "unexpected log: {}",
+        log_text(&log)
+    );
+    assert!(
+        backup_files(directory.path()).is_empty(),
+        "no backup for a no-op: {:?}",
+        backup_files(directory.path())
+    );
+}
+
+#[test]
+fn fallback_to_active_starts_from_the_snapshot_when_main_is_broken() {
+    let directory = tempfile::tempdir().unwrap();
+    let listener = loopback_listener();
+    let port = listener.local_addr().unwrap().port();
+    std::fs::write(
+        directory.path().join("network-monitor.toml"),
+        "interval_ms = 30\nbroken = [\n",
+    )
+    .unwrap();
+    write_main_config(&directory.path().join("network-monitor.toml.active"), port);
+    let log = directory.path().join("stderr.log");
+
+    let running = Running::spawn(
+        directory.path(),
+        &[
+            "monitor",
+            "--config",
+            "network-monitor.toml",
+            "--fallback-to-active",
+        ],
+        &log,
+    );
+    wait_for_events(&directory.path().join("events.db"), Duration::from_secs(10));
+    let status = running.stop();
+
+    assert!(
+        status.success(),
+        "the snapshot carries the start: {status:?}"
+    );
+    let text = log_text(&log);
+    assert!(
+        text.contains("starting from the active snapshot"),
+        "unexpected log: {text}"
+    );
+    assert!(text.contains("network-monitor.toml.active"), "{text}");
+}
+
+#[test]
+fn a_broken_main_without_the_flag_names_the_snapshot_and_fails() {
+    let directory = tempfile::tempdir().unwrap();
+    let listener = loopback_listener();
+    let port = listener.local_addr().unwrap().port();
+    std::fs::write(
+        directory.path().join("network-monitor.toml"),
+        "interval_ms = 30\nbroken = [\n",
+    )
+    .unwrap();
+    write_main_config(&directory.path().join("network-monitor.toml.active"), port);
+
+    monitor(directory.path())
+        .args(["monitor", "--config", "network-monitor.toml"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "the last configuration that worked is",
+        ))
+        .stderr(predicate::str::contains("network-monitor.toml.active"));
+}
+
+#[test]
+fn fallback_to_active_uses_the_snapshot_when_main_fails_preflight() {
+    let directory = tempfile::tempdir().unwrap();
+    let listener = loopback_listener();
+    let port = listener.local_addr().unwrap().port();
+    std::fs::write(
+        directory.path().join("main.toml"),
+        format!(
+            "interval_ms = 50\ntimeout_ms = 500\ndatabase = \"events.db\"\n\n\
+             [[targets]]\nmethod = \"tcp\"\nhost = \"127.0.0.1\"\nport = {port}\n\
+             interface = \"does-not-exist0\"\n"
+        ),
+    )
+    .unwrap();
+    write_main_config(&directory.path().join("main.toml.active"), port);
+    let log = directory.path().join("stderr.log");
+
+    let running = Running::spawn(
+        directory.path(),
+        &["monitor", "--config", "main.toml", "--fallback-to-active"],
+        &log,
+    );
+    wait_for_events(&directory.path().join("events.db"), Duration::from_secs(10));
+    let status = running.stop();
+
+    assert!(
+        status.success(),
+        "the snapshot carries the start: {status:?}"
+    );
+    let text = log_text(&log);
+    assert!(
+        text.contains("starting from the active snapshot"),
+        "unexpected log: {text}"
+    );
+    assert!(text.contains("does-not-exist0"), "{text}");
+    assert!(text.contains("main.toml.active"), "{text}");
+}
+
+#[test]
+fn fallback_to_active_uses_the_snapshot_when_main_has_no_targets() {
+    let directory = tempfile::tempdir().unwrap();
+    let listener = loopback_listener();
+    let port = listener.local_addr().unwrap().port();
+    std::fs::write(
+        directory.path().join("main.toml"),
+        "interval_ms = 50\ntimeout_ms = 500\ndatabase = \"events.db\"\n",
+    )
+    .unwrap();
+    write_main_config(&directory.path().join("main.toml.active"), port);
+    let log = directory.path().join("stderr.log");
+
+    let running = Running::spawn(
+        directory.path(),
+        &["monitor", "--config", "main.toml", "--fallback-to-active"],
+        &log,
+    );
+    wait_for_events(&directory.path().join("events.db"), Duration::from_secs(10));
+    let status = running.stop();
+
+    assert!(
+        status.success(),
+        "the snapshot carries the start: {status:?}"
+    );
+    let text = log_text(&log);
+    assert!(
+        text.contains("cannot use main.toml: targets: no targets configured"),
+        "unexpected log: {text}"
+    );
+    assert!(text.contains("starting from the active snapshot"), "{text}");
+}
+
+#[test]
+fn fallback_to_active_finds_a_snapshot_without_a_main_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let listener = loopback_listener();
+    let port = listener.local_addr().unwrap().port();
+    write_main_config(&directory.path().join("network-monitor.toml.active"), port);
+    let log = directory.path().join("stderr.log");
+
+    let running = Running::spawn(directory.path(), &["monitor", "--fallback-to-active"], &log);
+    wait_for_events(&directory.path().join("events.db"), Duration::from_secs(10));
+    let status = running.stop();
+
+    assert!(
+        status.success(),
+        "the snapshot carries the start: {status:?}"
+    );
+    assert!(
+        log_text(&log).contains("starting from the active snapshot"),
+        "unexpected log: {}",
+        log_text(&log)
+    );
+}
+
+#[test]
+fn a_failure_with_only_a_snapshot_names_it_and_its_age() {
+    let directory = tempfile::tempdir().unwrap();
+    let listener = loopback_listener();
+    let port = listener.local_addr().unwrap().port();
+    write_main_config(&directory.path().join("network-monitor.toml.active"), port);
+
+    monitor(directory.path())
+        .arg("monitor")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "the last configuration that worked is",
+        ))
+        .stderr(predicate::str::contains("network-monitor.toml.active"));
+}

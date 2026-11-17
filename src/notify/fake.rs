@@ -19,6 +19,7 @@ pub struct FakeChannel {
     name: String,
     kind: Kind,
     fail_open: bool,
+    fail_verify: bool,
     inner: Arc<Mutex<Inner>>,
 }
 
@@ -27,6 +28,7 @@ struct Inner {
     payloads: usize,
     attempts: usize,
     opened: usize,
+    verified: usize,
     closed: usize,
     bodies: Vec<String>,
     outcomes: VecDeque<Result<(), SendError>>,
@@ -38,6 +40,7 @@ impl FakeChannel {
             name: name.to_string(),
             kind,
             fail_open: false,
+            fail_verify: false,
             inner: Arc::new(Mutex::new(Inner::default())),
         }
     }
@@ -51,6 +54,13 @@ impl FakeChannel {
     pub fn failing_open(name: &str, kind: Kind) -> Self {
         let mut channel = FakeChannel::new(name, kind);
         channel.fail_open = true;
+        channel
+    }
+
+    /// Refuses to verify, so a check failure can be exercised.
+    pub fn failing_verify(name: &str, kind: Kind) -> Self {
+        let mut channel = FakeChannel::new(name, kind);
+        channel.fail_verify = true;
         channel
     }
 
@@ -84,6 +94,10 @@ impl FakeChannel {
         self.lock().opened
     }
 
+    pub fn verified(&self) -> usize {
+        self.lock().verified
+    }
+
     pub fn closed(&self) -> usize {
         self.lock().closed
     }
@@ -109,6 +123,14 @@ impl Channel for FakeChannel {
             return Err("the endpoint is unreachable".to_string());
         }
         self.lock().opened += 1;
+        Ok(())
+    }
+
+    fn verify(&mut self) -> Result<(), String> {
+        self.lock().verified += 1;
+        if self.fail_verify {
+            return Err("the endpoint rejected the token".to_string());
+        }
         Ok(())
     }
 

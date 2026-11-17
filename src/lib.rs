@@ -4,6 +4,7 @@
 //! binary uses. `src/main.rs` is a thin entry point over [`cli`], [`config`],
 //! [`monitor`], [`query`], and [`store`].
 
+pub mod check;
 pub mod cli;
 pub mod config;
 pub mod history;
@@ -13,10 +14,12 @@ pub mod logging;
 pub mod monitor;
 pub mod notify;
 pub mod probe;
+pub mod promote;
 pub mod query;
 pub mod reload;
 pub mod shutdown;
 pub mod sim;
+pub mod snapshot;
 pub mod store;
 pub mod time;
 pub mod tls;

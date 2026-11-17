@@ -7,7 +7,7 @@ decisions and their rationale live in [ADR.md](./ADR.md).
 
 ## 1. Introduction and goals
 
-`network-monitor` is a single-process Rust command-line program. One invocation is either a long-running `monitor` that owns the probing loop and the SQLite writer, or one of the short-lived commands — `serve` and `simulate` that read a history and publish it, `query` and `import` that read or restore the database.
+`network-monitor` is a single-process Rust command-line program. One invocation is either a long-running `monitor` that owns the probing loop and the SQLite writer, or one of the short-lived commands — `check` that verifies a configuration without starting, `serve` and `simulate` that read a history and publish it, `query` and `import` that read or restore the database.
 
 Top quality goals, in order:
 
@@ -84,6 +84,7 @@ Trust boundaries: the database file is written only by the `monitor` process and
 - **Optional push channels off the probe path.** `notify` owns one typed `Message` per fact — a recorded transition, a start, a stop, a reload, a channel start — and each channel renders it in its own form. The configuration declares a channel once and enables it by name; a worker hands the notifier the message and moves on, one thread per declared channel applies the per-target policy (`down` at once, `up` only after a stable `up` window) and delivers with a bounded retry. The monitor knows only the `Notifier` contract, so recording never waits for a send and a failed send never changes a stored event or delays another channel.
 - **One read seam, two sources.** `history` states the questions the page, the API and the export ask — state, timeline, histogram, faults, events, export pages — and `HistorySource` hands out one `History` per request. `store` answers it over SQLite, `sim` answers it over generated days, and `web` names neither: which mode is running is a decision taken once, in `main`, when the source is built.
 - **Determinism instead of memory.** `simulate` keeps nothing. A target's UTC day is a pure function of `(seed, target key, day)`, so the same command replays the same history and a request costs only the days its window covers. Faults, the histogram and the current state are computed by the same pure helpers the SQL path is checked against, so the two sources cannot drift.
+- **Verified deployment before a restart.** `check` runs the conditions a start runs, without a probe loop and without writing the event database; `monitor --try` carries a candidate only after that verification, promotes it once every target has probed once without a local failure, and swaps back to the main configuration when one first probe fails locally; `<main>.active` holds the bytes of the last start that worked. The gate is one first-round tracker shared by the workers, so the promotion happens once and the snapshot is written once.
 - **Read-only page generated server-side.** `web` answers `/` with HTML and SVG built in Rust from the same timeline query the CLI uses, and `/target` with one bar per day and the same days in a table for a single target. One small HTTP/1.1 loop, no framework, no client-side chart library and no client-side chart state: the page reloads itself every 30 s — the `meta` serves a browser without the script, the script drives the countdown otherwise and holds it while a cause is open, stating the hold in a banner across the top of the page — and asks only for the page, its stylesheet, and its script. The same code serves while the monitor runs (`monitor --listen`) and without probing (`serve`), so a page and the recording share one process when both are wanted.
 
 <!-- skill:block:arch-principles section="## 4. Solution strategy" -->
@@ -135,7 +136,10 @@ Rel(cli, hosts, "Sends echo requests", "ICMP")
 | `probe::icmp`, `probe::tcp`, `probe::dns`, `probe::http` | One transport each: an echo request, a TCP connect, a DNS question, an HTTP request | `IcmpProbe`, `TcpProbe`, `DnsProbe`, `HttpProbe` |
 | `probe::failure` | The vocabulary of a failure: the closed set of codes, the details a message may insert, and the template of each code | `Code`, `Details`, `Failure` |
 | `probe::interface` | Validate an interface name and bind a socket to it | `validate`, `bind_socket` per platform |
-| `monitor` | Supervise one interval loop per target, decide whether a transition occurred, reload the configuration file, dispatch transitions to the store | `run(config, prober, store, shutdown, reload)`, `run_with_notifier(…)` |
+| `monitor` | Supervise one interval loop per target, decide whether a transition occurred, reload the configuration file, dispatch transitions to the store, and gate the snapshot and a candidate promotion on the first probe round | `run(config, prober, store, shutdown, reload, start)`, `run_with_notifier(…, start)`, `Start`, `FirstRound` |
+| `check` | Verify the conditions a start checks, without a probe loop and without writing the event database | `run`, `Options`, `Report`, `Line`, `LineLevel` |
+| `promote` | Name a backup, capture the verified candidate bytes, and replace the main configuration atomically | `Candidate`, `commit`, `backup_path`, `PromoteError` |
+| `snapshot` | Name, publish, and describe the active snapshot of the configuration a start used | `Snapshot`, `path_for`, `write`, `describe` |
 | `notify` | Decide which state changes are reported, hold the stable `up` window, route a message by channel name, and deliver it off the probe path | `Notifier`, `Message`, `Event`, `Channel`, `Routing`, `Engine`, `start`, `start_with` |
 | `notify::telegram`, `notify::webhook`, `notify::logfile` | One transport each: a Bot API message, a JSON POST, an appended line | `Telegram`, `Webhook`, `LogFile` |
 | `logging` | Write one diagnostic line, with a logger name, and filter it by level | `Level`, `format_line_at`, `notification` |
@@ -175,9 +179,27 @@ Rel(cli, hosts, "Sends echo requests", "ICMP")
 
 ### `monitor`
 
-- **Input:** the effective configuration, a `Probe` implementation, a `Store`, a `Shutdown` handle, optionally the path to re-read, and optionally the startup `Message` for the channels.
-- **Output:** database writes, log lines, the startup `Message` handed to the notifier once every worker runs, and a process exit status.
-- **Guarantees:** at most one in-flight probe per target; a transition is written at most once per cycle; shutdown on `SIGINT` or `SIGTERM` happens between two cycles, never inside a transaction; a reload is applied only when the new file parses and resolves to at least one target, and the database path in use never changes at runtime.
+- **Input:** the effective configuration, a `Probe` implementation, a `Store`, a `Shutdown` handle, optionally the path to re-read, and a `Start` holding the startup `Message`, the optional candidate to promote, the main configuration to swap back to, and the active snapshot to publish.
+- **Output:** database writes, log lines, the startup `Message` handed to the notifier once every worker runs, the promotion or rejection notification, and a process exit status.
+- **Guarantees:** at most one in-flight probe per target; a transition is written at most once per cycle; shutdown on `SIGINT` or `SIGTERM` happens between two cycles, never inside a transaction; a reload is applied only when the new file parses and resolves to at least one target, and the database path in use never changes at runtime. The first outcome of every target of a start is reported once; the active snapshot is written once when no first probe was a local failure, a candidate is promoted once under the same condition with a rebased watcher, and a candidate whose first round holds a local failure is swapped back in place with no file touched (`INV-15`).
+
+### `check`
+
+- **Input:** the resolved `Config` and `Options { listen, probe, active }`.
+- **Output:** a `Report` of `Line { level, subject, detail }`, rendered as one aligned line per check.
+- **Guarantees:** the pipeline follows the order a start checks in, so the first `fail` is the condition that would have stopped it; the event database is opened read-only; the listener `--listen` names is bound and dropped; every declared channel is built and verified without sending anything; a `down` probe verdict is a warning, never a failure; no secret reaches a line; nothing is written to the event database and no worker starts. The one write it may perform is the file of a `logfile` channel, which a start performs too.
+
+### `promote`
+
+- **Input:** a `Candidate` — the candidate source path, the main path, the verified bytes, and the start stamp.
+- **Output:** `Ok(Some(backup))` after a promotion, `Ok(None)` when the main file already holds the bytes, or a `PromoteError`.
+- **Guarantees:** the candidate path is never re-read; the backup is `<main file name>.<UTC compact stamp>.bak` in the main directory and keeps the previous bytes; the new content is published through a sibling temporary with mode `0600` on Unix and one `rename`; every failure returns without touching the main file.
+
+### `snapshot`
+
+- **Input:** the configuration path, or the bytes a start should publish.
+- **Output:** `<config>.active`, its path and its description (`<path> (<age>)`).
+- **Guarantees:** the file holds the exact start bytes; it is published through a private sibling and one `rename`, so a reader never sees a half-written snapshot; it is never read by the monitor, only copied back by the operator or by `--fallback-to-active`, which reads it through the ordinary parse, resolve, and check pipeline.
 
 ### `notify`
 
@@ -385,13 +407,19 @@ Line-based output on stderr, never stdout: stdout carries only query results, so
 
 The only privileged operation is opening the raw socket; the container keeps only `NET_RAW` and drops everything else. The database is created with mode `0600`. The configuration may contain addresses, interface names, and the secrets of the channels it enables — a Telegram bot token and a webhook token — which are read from the file alone, printed as `<redacted>` by `--show-config`, and kept out of every log line and error message. A webhook token is refused on an `http` URL, a redirect is never followed, and a webhook destination is printed as `scheme://host[:port]`, because the path may itself be a secret. A log file is created with mode `0600` on Unix. Probes are generated by this process, so no input from the network is parsed as a command; an answer is bounded at 8 KiB and only pattern-matched for its result.
 
+`check` performs outbound traffic but changes nothing: one read-only `getMe` per Telegram channel, one connection per webhook, and — only with `--probe` — one probe per target. It posts no message and opens the event database read-only. Promotion and the active snapshot write files that carry the same secrets as the configuration: both are published through temporaries created with mode `0600` on Unix, and `.gitignore` excludes `*.active` and `*.bak`, so a working copy of the configuration cannot be committed by accident. The content of the snapshot is never logged, only its path and its age.
+
 `web` is the only component that listens, and only when `--listen` is given. It answers `GET` and `HEAD` on a fixed set of paths — the timeline, the detail page, the stylesheet, the script, the streamed export, the health check, and the icon — escapes every dynamic value, sets `nosniff` and `no-store`, and never writes. It has **no authentication**: the default bind of `serve` is `127.0.0.1`, the monitor binds nothing unless asked, and exposing the page on a LAN is a deliberate operator decision that must be paired with a firewall rule. The export path is a bulk read of the whole history, so a firewall rule protects the contents of the database as much as the page itself.
 
 ### Configuration
 
 Three layers merged in a fixed order: built-in defaults, TOML file, command line. The result is validated once and printed by `--show-config`. Keys are stable; a removed key is a breaking change recorded in [ADR.md](./ADR.md). The annotated example lives in [README.md](../README.md#quick-start). The `[[notification]]` declarations and the `notify` lists are the documented exception to the command-line layer: they carry secrets and are read from the file only (ADR-0033).
 
-While monitoring runs, the file is polled once per second and a valid change is applied to the interval, timeout, target list, and retention, keeping the command line overrides on top (INV-2). An unreadable, unparseable, or target-less file is rejected with a warning and the running configuration stays active (INV-9). A changed `database` path and a changed notification configuration are reported and take effect only at the next start.
+The same configuration can be verified before a restart: `check` runs the target list, the interfaces, the event database, the optional listening address, the declared channels, and optionally one real probe per target, printing one `ok`/`warn`/`fail` line and exiting non-zero on a `fail`. `monitor --try` starts with a candidate only when that verification passes and its bytes differ from the main file; a candidate that is absent is a quiet no-op, and one that cannot be used is one `ERROR` and one `WARN` with the main file staying in effect. Once every target has completed its first probe without a local failure, the candidate replaces the main file atomically and the previous file is kept as `<main>.<UTC timestamp>.bak`; a first round with a local failure swaps the running process back to the main configuration and leaves both files untouched (INV-15).
+
+While monitoring runs, the file is polled once per second and a valid change is applied to the interval, timeout, target list, and retention, keeping the command line overrides on top (INV-2). An unreadable, unparseable, or target-less file is rejected with a warning that names the active snapshot and its age, and the running configuration stays active (INV-9). A changed `database` path and a changed notification configuration are reported and take effect only at the next start.
+
+`<main>.active` is the recovery point: it holds the exact bytes of the configuration the last start began from, is written once after a clean first probe round, is created with mode `0600` on Unix, and is ignored by Git. No reload, accepted or rejected, and no promotion changes it. Copying it over the main file restores it through the ordinary reload; `monitor --fallback-to-active` starts from it when the main file cannot be used and logs one `WARN` naming it, while without the flag the start fails and the error names the snapshot and its age.
 
 ### Data ownership
 
@@ -456,3 +484,4 @@ enforced or verified.
 - `INV-12`: A notification is never a condition of recording, and a delivery failure never changes a stored event. Enforced by the monitor notifying only after `record_transition` returned, and by the notifier having no access to the store, verified by `tests/monitor_e2e.rs` (one notification per recorded transition, none for a local probe error) and by `tests/notify.rs` (a failed send leaves the sequence intact).
 - `INV-13`: The simulated mode probes nothing, reads and writes no database, and keeps nothing between requests: the same command replays the same history. Enforced by `sim` holding no file handle and no cache and by `probe::simulated_day` never calling the network, verified by `tests/simulate.rs` (a working directory left empty, two processes of the same seed answering the same bytes) and by the `sim` unit tests (a day is reproducible from its tuple and independent of the days before it).
 - `INV-14`: One event reaches a given channel destination at most once. A channel is its output destination — the normalised log filename, the canonical webhook URL, the Telegram `chat_id` — and two channels may not share one; a channel is enabled by name and never declared twice. Enforced by `config::resolve_notifications`, which refuses a duplicate destination, a duplicate name and an unknown name before the first probe, and by `main` reporting an orphan declaration — a channel no list enables — as one `WARN` line, and by one queue per declared channel; verified by the `config` unit tests, by `tests/cli.rs` and by `tests/notify.rs` and `tests/notify_channels.rs`.
+- `INV-15`: Neither the active configuration file nor the active snapshot is replaced or written unless every target of the start has probed once without a local failure, and the snapshot is written once per start — no accepted or rejected reload writes it. Enforced by the `FirstRound` gate the monitor shares with its workers and by `promote::commit` refusing a candidate whose bytes already equal the main file, verified by `tests/snapshot.rs` (a clean first round writes the snapshot, a local failure leaves the previous one alone, a reload changes nothing), by `src/promote.rs` (the backup, the atomic replace and the untouched main on failure) and by `tests/reload.rs` (a promotion is not replayed as a reload).

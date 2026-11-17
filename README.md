@@ -22,6 +22,9 @@ The deliverable is a single executable with no runtime dependencies, built from 
 # Build the single, dependency-free binary (Rust 1.75 or newer)
 cargo build --release
 
+# Verify the configuration first: one ok/warn/fail line per check, no probe loop, no write
+./target/release/network-monitor check --config ./network-monitor.toml
+
 # Run the monitor; raw ICMP sockets need elevated privileges on every platform
 sudo ./target/release/network-monitor monitor --config ./network-monitor.toml
 

@@ -59,6 +59,9 @@ network-monitor/
 │   ├── lib.rs            library surface used by the integration tests
 │   ├── cli.rs            command-line surface, one flag per configuration key
 │   ├── config.rs         defaults, TOML loading, precedence, validation
+│   ├── check.rs          the dry run: the start checks as one ok/warn/fail report
+│   ├── promote.rs        candidate backup name and the atomic replace of the main file
+│   ├── snapshot.rs       the active snapshot: path, private atomic write, age
 │   ├── json.rs           the JSON escaping and assembly shared by query and the API
 │   ├── logging.rs        line-based diagnostics on stderr
 │   ├── reload.rs         configuration file watcher
@@ -114,7 +117,8 @@ network-monitor/
 ├── tests/
 │   ├── config_precedence.rs  every key, file and flag, in both directions
 │   ├── monitor_e2e.rs        end-to-end loop, transitions only, restart continuity
-│   ├── reload.rs             configuration reload, invalid file, database change
+│   ├── reload.rs             configuration reload, invalid file, database change, promotion
+│   ├── snapshot.rs           snapshot after a clean first round, never by a reload
 │   ├── store.rs              schema, concurrent read, retention, labels
 │   ├── cli.rs                exit codes and query output
 │   ├── web.rs                page, faults table, detail page, no writes
@@ -812,9 +816,11 @@ alternatives and the effect on the static build (ADR-0024 is the example).
 1. Add the type to `ChannelSettings` in `config.rs`, its keys to `FileNotification`, its
    validation to `resolve_channel`, and its rendering to `Config::to_toml`. Give it a
    `Destination` — the real sink — so two channels cannot share one (INV-14).
-2. Create `notify/<type>.rs` and implement `Channel`: `name`, `kind`, `open`, `payload`,
-   `send`, `close`. Keep the serialisation inside the module; the trait is the only contract
-   the runner knows.
+2. Create `notify/<type>.rs` and implement `Channel`: `name`, `kind`, `open`, `verify`,
+   `payload`, `send`, `close`. `verify` proves the channel can deliver without delivering
+   anything, and it is what `network-monitor check` runs; keep it cheap and read-only (a
+   `getMe`, a connection that is closed again, a file opened and closed). Keep the
+   serialisation inside the module; the trait is the only contract the runner knows.
 3. Refuse a key that belongs to another type, and refuse a secret on a plaintext URL. Scrub
    every secret from a `SendError` before returning it, and never name a URL path.
 4. Add the arm to `notify::build`; the monitor, the policy and the routing must not change.

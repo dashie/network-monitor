@@ -123,6 +123,17 @@ within one second while the monitor runs and applied without a restart; a file t
 parse is rejected with a warning and the running configuration stays in effect. A changed
 `database` path is reported and used from the next start.
 
+Two files live beside the configuration and are not configuration layers:
+
+- `<main>.<UTC timestamp>.bak` is a **deployment backup**. A promotion of `--try` writes one,
+  and the file holds the configuration that was replaced.
+- `<main>.active` is the **active snapshot**: the exact bytes of the configuration the last
+  start began from. It is written once after the first probe round of a start, never by an
+  edit or a reload, and it is what "the last configuration that worked" means on the host.
+
+Both carry the same secrets as the file they copy; both are created with mode `0600` on Unix,
+and `.gitignore` excludes `*.active` and `*.bak` so a working copy cannot commit them.
+
 ### Global keys
 
 | Key | Default | Meaning |
@@ -458,7 +469,8 @@ listed in [Troubleshooting](#troubleshooting), later in this guide.
 
 | Command | Does |
 |---|---|
-| `monitor [--listen <addr>]` | Probe the targets and record transitions; optionally serve the page |
+| `monitor [--listen <addr>] [--try <path>] [--fallback-to-active]` | Probe the targets and record transitions; optionally serve the page, promote a candidate, or start from the active snapshot |
+| `check [--listen <addr>] [--probe]` | Verify the configuration without starting the monitor; exit non-zero when it would not start |
 | `serve [--listen <addr>]` | Serve the page alone, read-only, without probing (default `127.0.0.1:8642`) |
 | `simulate --listen <addr> [--history 30d] [--seed 0] [--fault-rate 3]` | Serve the page over a generated history, with no probe and no database |
 | `query state [--format table\|json]` | Current state of every target |
@@ -468,6 +480,40 @@ listed in [Troubleshooting](#troubleshooting), later in this guide.
 `query events <target>` accepts the label, the full key, or a bare ICMP address. Diagnostics go
 to stderr as `<timestamp> <LEVEL> [<target>] <message>`; data goes to stdout, so a query can be
 piped.
+
+### Verifying a configuration (`check`)
+
+`check` runs what a start runs, in the order a start runs it, and stops short of probing and
+writing:
+
+```bash
+network-monitor check --config ./network-monitor.toml --listen 0.0.0.0:8642
+```
+
+```
+ok    targets            6 target(s)
+ok    interface          icmp://1.1.1.1 eth0
+warn  database           ./network-monitor.db does not exist yet; the next start creates it
+warn  listen             0.0.0.0:8642 is in use — the running monitor?
+ok    channel            none declared
+warn  active             no snapshot yet
+```
+
+| Option | Meaning |
+|---|---|
+| `--listen <address:port>` | Also verify that this address can be bound. An address in use is a `warn` — the running monitor is the usual cause — and anything else that prevents the bind is a `fail` |
+| `--probe` | Perform one real probe per target. `up` is `ok`, `down` is a `warn` with its cause, and a local probe failure (no `NET_RAW`, missing interface, unresolvable resolver) is a `fail` |
+
+Every line is one of `ok`, `warn`, or `fail`. The command exits `0` when no line is a `fail`
+and `1` otherwise, and `warn` never changes the exit code. It prints the token of a channel as
+`<redacted>`, starts no worker, sends no notification, and opens an existing event database
+read-only. The only thing it may create is the file of a `logfile` channel, exactly as a start
+would; a missing event database is a `warn`, because the next start creates it.
+
+The checks, in order, are: the target list; every target's interface; the event database; the
+`--listen` address when given; every declared notification channel (one read-only Telegram
+`getMe`, one connection per webhook, one open and close per log file); the active snapshot; and,
+only with `--probe`, one real probe per target.
 
 ### Simulated mode
 
@@ -777,6 +823,50 @@ import reads plain `http://` URLs; download an `https` archive with `curl` first
 until a `monitor` or an `import` has upgraded the file. That also means the page runs against a
 snapshot, a backup, or a volume mounted read-only.
 
+### Deploy a new configuration
+
+Verify while the running monitor keeps working, then let the process promote the candidate only
+after it probes:
+
+1. Write the candidate beside the main file, for example `next.toml`.
+2. Verify it: `network-monitor check --config ./next.toml --listen 0.0.0.0:8642`. A `fail` line
+   names the reason; fix it before going on.
+3. Add `--try ./next.toml` to the start script or the unit file and restart, or run the process
+   with it once. The monitor starts with the candidate.
+4. When every target has completed its first probe without a local failure, the candidate is
+   copied over `network-monitor.toml`, the previous file is kept as
+   `network-monitor.toml.<UTC timestamp>.bak`, and one `CONFIG` notification is sent. A first
+   probe that fails locally cancels the promotion: the process logs the rejection, swaps back
+   to the main configuration in place, and leaves both files untouched.
+5. `--try` may stay in the unit file permanently: a missing candidate is a quiet `INFO` no-op,
+   and a candidate identical to the main file promotes nothing and writes no backup.
+
+A promotion never stops the monitor. If the backup or the replace fails (a permission, a full
+disk), the error is logged, `CONFIG rejected` is sent, and the running configuration stays in
+effect.
+
+### Recover a configuration edited by mistake
+
+The process rejects a broken edit and keeps running the previous configuration **from memory**,
+but the file on disk still holds the broken content. The active snapshot is the way back:
+
+```bash
+cp network-monitor.toml.active network-monitor.toml   # the reload applies it within a second
+```
+
+A restart with the broken file still in place fails, and the error names
+`network-monitor.toml.active` and its age. Either copy the snapshot over the file, or start with
+`monitor --fallback-to-active`: the process logs one `WARN`, starts from the snapshot, and keeps
+watching the main file, so fixing it applies through the normal reload. The flag runs the same
+verification `check` runs on the main file (without `--listen` and `--probe`), so it also covers a
+file that parses but would not start — an interface that is absent, a target list that is empty, a
+channel that cannot be verified.
+
+To undo a promotion, copy the `<main>.<timestamp>.bak` file over the main file and restart; the
+reload picks it up without any other change. The snapshot is refreshed at the next start that
+probes cleanly, so accepted hot edits are not in it until then — that is what makes it a fixed
+recovery point.
+
 ### Retention, logs, signals
 
 - `retention_days > 0` deletes older events periodically; `0` keeps everything.
@@ -797,7 +887,11 @@ snapshot, a backup, or a volume mounted read-only.
 | Symptom | Cause and fix |
 |---|---|
 | `interface 'eth1' ... does not exist` | The name differs on this host (`en0`, `eth0`, `lo0`). The process refuses to start rather than probe the wrong interface. |
-| `Operation not permitted` at startup | ICMP needs `root` or `CAP_NET_RAW`. Drop `icmp` targets, or grant the capability. |
+| A `fail` line from `check` | The configuration would not start, and the subject names the condition: `targets` (no target), `interface` (a name that does not exist on this host), `database` (cannot be read, or a schema newer than the binary), `listen` (an address that cannot be bound), `channel` (a channel that cannot open or verify), `probe` (a local failure such as a missing `NET_RAW`). The detail names the key, the file, or the reason. |
+| `Operation not permitted` at startup | ICMP needs `root` or `CAP_NET_RAW`. Drop `icmp` targets, or grant the capability. `check --probe` reports the same condition as a `fail probe` line before the restart. |
+| A candidate is never promoted | The first probe of a target failed locally, so the promotion was cancelled and the main configuration stayed in effect. The log states the target and the reason (`candidate configuration … cannot probe: …`); run `check --probe` on the candidate to see it before the next attempt. |
+| The start fails and names `network-monitor.toml.active` | The main file is broken; the snapshot is the last configuration that started. Copy it back, or add `--fallback-to-active` to start from it and fix the main file afterwards. |
+| `network-monitor.toml.active` is older than my last accepted edit | By design: the snapshot is written once per start, after a clean first probe round. An accepted hot edit is not in it until the next restart, and that is what makes it a recovery point rather than a moving target. |
 | `no targets configured` | Add `[[targets]]` or `--target`; an empty list is refused. |
 | `invalid configuration: targets[0].ip: does not apply to the tcp method` | A key of another method. Each target lists only the keys of its own method. |
 | `duplicate target tcp://1.1.1.1:443` | The same key twice. Two methods or two ports are two targets. |
@@ -827,6 +921,9 @@ snapshot, a backup, or a volume mounted read-only.
 - The trust store is the one compiled into the binary.
 - Notification channels are Telegram, a webhook, and a log file; no mail, MQTT, Slack-specific
   payload or command hook, and no rotation by the tool.
+- There is exactly one active snapshot and no history of snapshots, and the deployment backups
+  are never pruned by the tool. A candidate is promoted only after every target has probed once
+  without a local failure; reachability of a target is not a condition.
 
 Each item is deliberate rather than missing: leaving out IPv6, redirects, DNSSEC, DoT/DoH and
 client certificates keeps one probe cheap and the binary portable, the trust store travels

@@ -70,8 +70,16 @@ fn start_with_probe(config_path: &Path, database: &Path) -> (Running, Arc<FakePr
     let stop = Shutdown::new();
     let running = stop.clone();
 
-    let handle =
-        thread::spawn(move || monitor::run(&settings, prober, store, &running, Some(reload), None));
+    let handle = thread::spawn(move || {
+        monitor::run(
+            &settings,
+            prober,
+            store,
+            &running,
+            Some(reload),
+            monitor::Start::default(),
+        )
+    });
 
     (
         Running {
@@ -98,7 +106,15 @@ fn start_with_notifier(config_path: &Path, database: &Path) -> (Running, Arc<Fak
     let running = stop.clone();
 
     let handle = thread::spawn(move || {
-        monitor::run_with_notifier(&settings, prober, store, &running, Some(reload), sink, None)
+        monitor::run_with_notifier(
+            &settings,
+            prober,
+            store,
+            &running,
+            Some(reload),
+            sink,
+            monitor::Start::default(),
+        )
     });
 
     (
@@ -373,4 +389,107 @@ fn an_applied_reload_is_reported_as_a_message() {
         thread::sleep(Duration::from_millis(50));
     }
     running.stop();
+}
+
+/// A promotion is the process's own write: the watcher rebases, so the next poll is quiet.
+#[test]
+fn a_promotion_is_not_replayed_as_a_reload() {
+    let (directory, config_path, database) = temp_paths();
+    write_config(&config_path, &database, 30, &["127.0.0.1"]);
+    let candidate_path = directory.path().join("next.toml");
+    write_config(&candidate_path, &database, 30, &["127.0.0.1", "127.0.0.2"]);
+    let bytes = std::fs::read(&candidate_path).expect("the test reads the candidate");
+    let candidate = network_monitor::promote::Candidate {
+        source: candidate_path,
+        main: config_path.clone(),
+        bytes: bytes.clone(),
+        stamp: 1_794_096_000_000,
+    };
+
+    let (running, notifier) = start_with_promotion(&config_path, &database, candidate);
+    wait_for_file(&config_path, &bytes, Duration::from_secs(10));
+    // Two watcher polls after the write: a spurious reload would appear here.
+    thread::sleep(Duration::from_millis(2_500));
+
+    assert!(
+        !running.is_finished(),
+        "a promotion never stops the monitor"
+    );
+    running.stop();
+
+    let reloads: Vec<_> = notifier
+        .messages()
+        .into_iter()
+        .filter(|message| message.event_name() == "config_reload")
+        .collect();
+    assert_eq!(
+        reloads.len(),
+        1,
+        "one promotion message and no reload: {:?}",
+        reloads
+            .iter()
+            .map(|message| message.text())
+            .collect::<Vec<_>>()
+    );
+    assert!(reloads[0].text().contains("promoted"));
+}
+
+fn start_with_promotion(
+    config_path: &Path,
+    database: &Path,
+    candidate: network_monitor::promote::Candidate,
+) -> (Running, Arc<FakeNotifier>) {
+    let loaded = config::load(Some(config_path)).unwrap().unwrap();
+    let settings = Config::resolve(Some(loaded.config), Overrides::default()).unwrap();
+    let reload = Reload {
+        path: config_path.to_path_buf(),
+        overrides: Overrides::default(),
+    };
+    let prober: Arc<dyn Probe> = Arc::new(FakeProbe::always(up()));
+    let store = Arc::new(Mutex::new(Store::open_rw(database).unwrap()));
+    let notifier = Arc::new(FakeNotifier::new());
+    let sink: Arc<dyn Notifier> = notifier.clone();
+    let stop = Shutdown::new();
+    let running = stop.clone();
+
+    let handle = thread::spawn(move || {
+        monitor::run_with_notifier(
+            &settings,
+            prober,
+            store,
+            &running,
+            Some(reload),
+            sink,
+            monitor::Start {
+                promotion: Some(candidate),
+                ..Default::default()
+            },
+        )
+    });
+
+    (
+        Running {
+            stop,
+            handle: Some(handle),
+        },
+        notifier,
+    )
+}
+
+fn wait_for_file(path: &Path, expected: &[u8], timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if std::fs::read(path)
+            .map(|bytes| bytes == expected)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{} did not hold the promoted bytes within {timeout:?}",
+            path.display()
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
 }

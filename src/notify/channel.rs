@@ -49,6 +49,11 @@ pub trait Channel: Send {
     /// Prepare the transport; a failure stops the process at startup.
     fn open(&mut self) -> Result<(), String>;
 
+    /// Prove the channel can deliver, without delivering anything.
+    fn verify(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Render the message, or `None` when this channel is not interested in it.
     fn payload(&self, message: &Message) -> Option<Payload>;
 

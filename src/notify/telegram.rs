@@ -83,8 +83,31 @@ impl Telegram {
         }
     }
 
+    /// The request that proves the token works, without posting anything.
+    fn get_me_request(&self) -> String {
+        format!(
+            "GET /bot{}/getMe HTTP/1.1\r\n\
+             Host: {HOST}\r\n\
+             Connection: close\r\n\
+             \r\n",
+            self.token
+        )
+    }
+
     /// One request over TLS, classified by the answer.
     fn exchange(&self, request: &str) -> Result<(), SendError> {
+        let (status, body) = self.read_response(request)?;
+        classify(status, &body)
+    }
+
+    /// Prove the token works: one read-only `getMe`, classified by its answer.
+    fn verify_answer(&self) -> Result<(), SendError> {
+        let (status, body) = self.read_response(&self.get_me_request())?;
+        classify(status, &body).map_err(|error| self.scrub(error))
+    }
+
+    /// Send one request and return the status and the body of the answer.
+    fn read_response(&self, request: &str) -> Result<(u16, String), SendError> {
         let stream = crate::tls::connect(HOST, PORT, TIMEOUT).map_err(|error| SendError {
             retryable: error.retryable,
             reason: error.reason,
@@ -124,7 +147,7 @@ impl Telegram {
         }
 
         let (status, body) = split_response(&response);
-        classify(status, body)
+        Ok((status, body.to_string()))
     }
 }
 
@@ -139,6 +162,10 @@ impl Channel for Telegram {
 
     fn open(&mut self) -> Result<(), String> {
         Ok(())
+    }
+
+    fn verify(&mut self) -> Result<(), String> {
+        self.verify_answer().map_err(|error| error.reason)
     }
 
     fn payload(&self, message: &Message) -> Option<Payload> {
@@ -346,6 +373,44 @@ mod tests {
         let (status, body) = split_response(b"HTTP/1.1 500 Oops\r\n\r\n");
         assert_eq!(status, 500);
         assert_eq!(body, "");
+    }
+
+    #[test]
+    fn the_get_me_request_is_a_read_only_get() {
+        let channel = Telegram::new(&settings());
+        let request = channel.get_me_request();
+
+        assert!(request.starts_with("GET /bot123456:secret-token/getMe HTTP/1.1\r\n"));
+        assert!(request.contains("Host: api.telegram.org\r\n"));
+        assert!(request.contains("Connection: close\r\n"));
+        assert!(!request.contains("chat_id"), "nothing is posted");
+        assert!(!request.contains("sendMessage"), "nothing is posted");
+    }
+
+    #[test]
+    fn the_get_me_answer_is_classified_without_the_token() {
+        assert!(classify(
+            200,
+            r#"{"ok":true,"result":{"id":123456,"is_bot":true,"username":"monitor_bot"}}"#
+        )
+        .is_ok());
+
+        let error = classify(
+            401,
+            r#"{"ok":false,"error_code":401,"description":"Unauthorized"}"#,
+        )
+        .unwrap_err();
+        assert!(!error.retryable);
+        assert!(
+            error.reason.contains("Unauthorized"),
+            "unexpected: {}",
+            error.reason
+        );
+        assert!(
+            !error.reason.contains("secret-token"),
+            "the token leaked: {}",
+            error.reason
+        );
     }
 
     #[test]

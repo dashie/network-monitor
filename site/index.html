@@ -255,6 +255,7 @@
         <p>Rust 1.75 or newer. Raw ICMP sockets need elevated privileges on every platform;
           <code>tcp</code>, <code>dns</code> and <code>http</code> need none.</p>
         <pre><code>cargo build --release
+./target/release/network-monitor check --config ./network-monitor.toml
 sudo ./target/release/network-monitor monitor --config ./network-monitor.toml \
   --listen 0.0.0.0:8642</code></pre>
       </div>

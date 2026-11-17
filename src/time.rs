@@ -28,6 +28,22 @@ pub fn format_rfc3339(ms: i64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
 }
 
+/// Format epoch milliseconds as `YYYYMMDDTHHMMSSZ`, for a file name.
+///
+/// The RFC 3339 form carries `-` and `:`; a backup name does not want them.
+pub fn format_compact_utc(ms: i64) -> String {
+    let seconds = ms.div_euclid(1_000);
+    let days = seconds.div_euclid(86_400);
+    let seconds_of_day = seconds.rem_euclid(86_400);
+
+    let (year, month, day) = civil_from_days(days);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+
+    format!("{year:04}{month:02}{day:02}T{hour:02}{minute:02}{second:02}Z")
+}
+
 /// Parse a `--since` value into an absolute epoch-millisecond cut-off.
 ///
 /// Accepted forms: a duration with a unit suffix (`30s`, `15m`, `24h`, `7d`),
@@ -172,6 +188,12 @@ mod tests {
     #[test]
     fn formats_the_epoch() {
         assert_eq!(format_rfc3339(0), "1970-01-01T00:00:00.000Z");
+    }
+
+    #[test]
+    fn the_compact_form_is_a_file_name() {
+        assert_eq!(format_compact_utc(0), "19700101T000000Z");
+        assert_eq!(format_compact_utc(1_794_096_000_000), "20261108T000000Z");
     }
 
     #[test]

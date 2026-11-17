@@ -47,6 +47,23 @@ impl LogFile {
             LogFormat::Jsonl => message.json(Some(&self.logger)),
         }
     }
+
+    /// Open the file for append, creating it with mode `0600` on Unix.
+    fn open_file(&self) -> Result<File, String> {
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(&self.filename).map_err(|error| {
+            format!(
+                "cannot open {} for append: {error}",
+                self.filename.display()
+            )
+        })
+    }
 }
 
 impl Channel for LogFile {
@@ -59,21 +76,12 @@ impl Channel for LogFile {
     }
 
     fn open(&mut self) -> Result<(), String> {
-        let mut options = OpenOptions::new();
-        options.create(true).append(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let file = options.open(&self.filename).map_err(|error| {
-            format!(
-                "cannot open {} for append: {error}",
-                self.filename.display()
-            )
-        })?;
-        self.file = Some(file);
+        self.file = Some(self.open_file()?);
         Ok(())
+    }
+
+    fn verify(&mut self) -> Result<(), String> {
+        self.open_file().map(|_| ())
     }
 
     fn payload(&self, message: &Message) -> Option<Payload> {
@@ -202,6 +210,33 @@ mod tests {
         assert_eq!(text.lines().count(), 2);
         assert!(text.lines().next().unwrap().contains("DOWN cloudflare-dns"));
         assert!(text.lines().nth(1).unwrap().contains("UP icmp://1.1.1.1"));
+    }
+
+    #[test]
+    fn verifying_opens_the_file_and_leaves_it_empty() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings = settings(&directory, Level::Info, LogFormat::Text);
+        let mut channel = LogFile::new(&settings);
+
+        channel.verify().expect("the file is writable");
+
+        assert!(settings.filename.exists(), "verification opens the file");
+        assert_eq!(
+            std::fs::read_to_string(&settings.filename).unwrap(),
+            "",
+            "and writes nothing into it"
+        );
+    }
+
+    #[test]
+    fn verifying_an_unwritable_parent_reports_the_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut settings = settings(&directory, Level::Info, LogFormat::Text);
+        settings.filename = directory.path().join("missing/audit.log");
+        let mut channel = LogFile::new(&settings);
+
+        let reason = channel.verify().unwrap_err();
+        assert!(reason.contains("missing/audit.log"), "unexpected: {reason}");
     }
 
     #[test]

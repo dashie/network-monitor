@@ -52,3 +52,8 @@ network-monitor.toml
 network-monitor.db
 network-monitor.db-shm
 network-monitor.db-wal
+
+# Configuration backups and the active snapshot: both carry the secrets of the
+# configuration file they copy.
+*.active
+*.bak

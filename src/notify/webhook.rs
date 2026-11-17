@@ -125,6 +125,20 @@ impl Webhook {
             }
         }
     }
+
+    /// Open the connection the scheme needs — the TLS handshake included — and close it
+    /// again without writing a request.
+    fn open_connection(&self) -> Result<(), SendError> {
+        match self.url.scheme {
+            Scheme::Https => crate::tls::connect(&self.url.host, self.url.port, TIMEOUT)
+                .map(|_| ())
+                .map_err(|error| SendError {
+                    retryable: error.retryable,
+                    reason: error.reason,
+                }),
+            Scheme::Http => connect_plain(&self.url.host, self.url.port).map(|_| ()),
+        }
+    }
 }
 
 impl Channel for Webhook {
@@ -138,6 +152,11 @@ impl Channel for Webhook {
 
     fn open(&mut self) -> Result<(), String> {
         Ok(())
+    }
+
+    fn verify(&mut self) -> Result<(), String> {
+        self.open_connection()
+            .map_err(|error| self.scrub(error).reason)
     }
 
     fn payload(&self, message: &Message) -> Option<Payload> {

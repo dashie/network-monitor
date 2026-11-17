@@ -231,6 +231,41 @@ where
     })
 }
 
+/// Prove every declared channel can deliver, without delivering anything.
+///
+/// The channels are built and verified in declaration order and stop at the first
+/// failure, named exactly as a start failure names it. Verification opens a connection
+/// or a file and closes it again; it never sends a message.
+pub fn verify(config: &NotificationConfig) -> Result<(), StartError> {
+    verify_with(config, build)
+}
+
+/// [`verify`] over caller-supplied channels: the seam the tests use.
+pub fn verify_with<F>(config: &NotificationConfig, build: F) -> Result<(), StartError>
+where
+    F: Fn(&ChannelSettings) -> Box<dyn Channel>,
+{
+    let mut channels: Vec<Box<dyn Channel>> = config.channels.iter().map(build).collect();
+
+    for index in 0..channels.len() {
+        if let Err(reason) = channels[index].verify() {
+            let name = channels[index].name().to_string();
+            for opened in &mut channels[..index] {
+                opened.close();
+            }
+            return Err(StartError {
+                channel: name,
+                reason,
+            });
+        }
+    }
+
+    for channel in &mut channels {
+        channel.close();
+    }
+    Ok(())
+}
+
 fn build(settings: &ChannelSettings) -> Box<dyn Channel> {
     match settings {
         ChannelSettings::Telegram(settings) => Box::new(telegram::Telegram::new(settings)),
@@ -363,6 +398,48 @@ mod tests {
             shutdown,
         )
         .expect("both channels start")
+    }
+
+    #[test]
+    fn a_channel_that_cannot_verify_is_named_and_the_earlier_channels_are_closed() {
+        let a = FakeChannel::always_ok("a", Kind::LogFile);
+        let b = FakeChannel::failing_verify("b", Kind::LogFile);
+
+        let error = verify_with(&config(vec!["a", "b"], vec![]), |settings| {
+            match settings.name() {
+                "a" => Box::new(a.clone()),
+                _ => Box::new(b.clone()),
+            }
+        })
+        .unwrap_err();
+
+        assert_eq!(error.channel, "b");
+        assert!(error.to_string().contains("rejected the token"));
+        assert_eq!(a.verified(), 1, "the earlier channel was verified");
+        assert_eq!(a.closed(), 1, "and then closed");
+        assert_eq!(b.closed(), 0, "the failing channel opened nothing to close");
+    }
+
+    #[test]
+    fn verifying_every_channel_sends_nothing_and_closes_them_all() {
+        let a = FakeChannel::always_ok("a", Kind::LogFile);
+        let b = FakeChannel::always_ok("b", Kind::Webhook);
+
+        verify_with(
+            &config(vec!["a"], vec![("icmp://1.1.1.1", vec!["b"])]),
+            |settings| match settings.name() {
+                "a" => Box::new(a.clone()),
+                _ => Box::new(b.clone()),
+            },
+        )
+        .expect("both channels verify");
+
+        assert_eq!(a.verified(), 1);
+        assert_eq!(b.verified(), 1);
+        assert_eq!(a.closed(), 1);
+        assert_eq!(b.closed(), 1);
+        assert!(a.sent().is_empty(), "verification delivers nothing");
+        assert!(b.sent().is_empty(), "verification delivers nothing");
     }
 
     #[test]

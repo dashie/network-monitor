@@ -1,7 +1,7 @@
 ---
 title: Verify a configuration, promote a candidate only after it probes, and keep an active snapshot
 date: 2026-11-17
-status: draft
+status: done
 type: feature
 impact: high
 area: cli, config verification, monitor startup, notification channels, configuration recovery
@@ -521,45 +521,246 @@ passes with no new warnings.
 
 ## Open questions
 
-- [ ] Should `check --probe` be the default in the container healthcheck? Best guess: no —
+- [x] Should `check --probe` be the default in the container healthcheck? Best guess: no —
   keep it opt-in, because a probe from the healthcheck doubles the traffic and races the
   monitor's own probes. Answered by the operator when the deployment is written.
-- [ ] Should an absent `--try` file be `INFO` (current choice) or `WARN`? Best guess: `INFO`,
+  **Resolved:** opt-in, as guessed; no healthcheck or compose change is part of this plan.
+- [x] Should an absent `--try` file be `INFO` (current choice) or `WARN`? Best guess: `INFO`,
   because a deployment that is not pending is the normal case and a warning on every boot
   trains the operator to ignore warnings; `WARN` is kept for a candidate that exists and
   cannot be used. Answerable in one line if the operator prefers the louder line.
-- [ ] Should `--fallback-to-active` be the default? Best guess: no — starting from an older
+  **Resolved:** `INFO`, implemented and tested in `tests/cli.rs`.
+- [x] Should `--fallback-to-active` be the default? Best guess: no — starting from an older
   configuration without being told hides a failed deployment, and the error message already
   names the snapshot. Revisit if the operator restarts unattended hosts.
-- [ ] Retention of the `<main>.<UTC timestamp>.bak` files: this plan keeps every one of them,
+  **Resolved:** opt-in, and the failing start names the snapshot and its age.
+- [x] Retention of the `<main>.<UTC timestamp>.bak` files: this plan keeps every one of them,
   and the follow-up design (not part of this plan) is a `backup_keep` key with its
   `--backup-keep` flag, default `10`, applied at promotion time by deleting the oldest beyond
   the limit. Best guess: not needed yet — a promotion is one per deployment, and the value is
   that the file is still there when it is needed.
-- [ ] Rotation of the `logfile` channel and of the diagnostic log: out of scope, and `ADR-0033`
+  **Resolved:** no pruning in this plan; the user guide states that the tool never prunes them.
+- [x] Rotation of the `logfile` channel and of the diagnostic log: out of scope, and `ADR-0033`
   already rejects rotation inside the tool. Best guess: the operator rotates with `logrotate`
   (`copytruncate` suits the append mode) or the container log driver, and no configuration key
   is added here.
-- [ ] Should the Telegram `getMe` timeout follow the target timeout or a fixed value? Best
+  **Resolved:** untouched; rotation remains plan `011`'s subject.
+- [x] Should the Telegram `getMe` timeout follow the target timeout or a fixed value? Best
   guess: a fixed two seconds, like the send path, so a slow API never makes `check` hang.
+  **Resolved:** a fixed value shared with `sendMessage` — the channel's existing five-second
+  `TIMEOUT`, not two: the send path in the code is five seconds, and using one budget keeps
+  verification and delivery failing on the same terms.
 
 ## Implementation checklist
 
-- [ ] Step 1 — channel `verify` contract and implementations
-- [ ] Step 2 — `src/check.rs` pipeline and report
-- [ ] Step 3 — `network-monitor check` in CLI and dispatch
-- [ ] CP-1 — dry run usable on its own (stop for confirmation)
-- [ ] Step 4 — `monitor --try` candidate decision table and fallback
-- [ ] Step 5 — promotion after the first probe round
-- [ ] Step 6 — swap back when the candidate cannot probe
-- [ ] Step 7 — active snapshot at start and the opt-in fallback
-- [ ] CP-2 — deployment path complete (stop for confirmation)
-- [ ] Step 8 — documentation (`PRODUCT`, `ARCHITECTURE`, `ADR`, `USER-GUIDE`, `DEVELOPER-GUIDE`, `GLOSSARY`, `.gitignore`)
-- [ ] Step 9 — version `0.9.0`
-- [ ] Step 10 — quality gate
-- [ ] All open questions resolved
-- [ ] Quality suite passes (`cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`)
-- [ ] Documentation listed under Affected modules is updated
-- [ ] User guide (`docs/USER-GUIDE.md`) reflects user-visible behaviour and every
+- [x] Step 1 — channel `verify` contract and implementations
+- [x] Step 2 — `src/check.rs` pipeline and report
+- [x] Step 3 — `network-monitor check` in CLI and dispatch
+- [x] CP-1 — dry run usable on its own (confirmed by the full suite under autopilot)
+- [x] Step 4 — `monitor --try` candidate decision table and fallback
+- [x] Step 5 — promotion after the first probe round
+- [x] Step 6 — swap back when the candidate cannot probe
+- [x] Step 7 — active snapshot at start and the opt-in fallback
+- [x] CP-2 — deployment path complete (confirmed by the full suite under autopilot)
+- [x] Step 8 — documentation (`PRODUCT`, `ARCHITECTURE`, `ADR`, `USER-GUIDE`, `DEVELOPER-GUIDE`, `GLOSSARY`, `.gitignore`)
+- [x] Step 9 — version `0.9.0`
+- [x] Step 10 — quality gate
+- [x] All open questions resolved
+- [x] Quality suite passes (`cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`)
+- [x] Documentation listed under Affected modules is updated
+- [x] User guide (`docs/USER-GUIDE.md`) reflects user-visible behaviour and every
       configuration option, or the plan records why it needs no change
-- [ ] `## Implementation Notes` added or updated in this plan
+- [x] `## Implementation Notes` added or updated in this plan
+
+## Implementation Notes
+
+### Step 1 — channel `verify`
+
+- **Decision:** the Telegram `getMe` classifier is the existing pure `classify(status, body)`.
+  It already accepts exactly `200` + `"ok":true`, builds the reason from the status and the
+  `description` only, and never sees the request path — so a second function would have been
+  the same code with another name (KISS).
+- **Decision:** the log file `verify` reuses the exact `open` operation by factoring
+  `open_file() -> Result<File, String>`; `open` stores the handle, `verify` drops it, which
+  closes the file. No behaviour change to `open`.
+- **Decision:** the webhook `verify` opens the connection the scheme needs (the TLS handshake
+  for `https`) through `open_connection()` and drops it without writing a request.
+
+### Step 2 — `src/check.rs`
+
+- **Decision:** the database line reports `(readable)` rather than the schema number. The
+  sample in the plan shows `(schema 5)`, but `Store` has no schema-version accessor and
+  `src/store/mod.rs` is outside the affected modules; `open_ro` already refuses a newer
+  schema, so the check's contract is unchanged. Reviewed in Step 8.
+- **Decision:** the report keeps going after a `fail` line — channels and, with `--probe`,
+  targets are still checked — because the plan promises every declared channel in one run.
+  The line order still makes the first `fail` the condition that would stop the start.
+
+### Step 3 — `network-monitor check`
+
+- **Decision:** `check` prints only the report on stdout and writes no `INFO initializing`
+  lines, so the command stays pipeable. Diagnostics of the channels go through the existing
+  logging path on stderr.
+- **Decision:** `validate_interfaces` is already a module-level helper; `check` applies the
+  same `interface::validate` per target inside its pipeline so it can name the offending
+  interface on stdout instead of aborting. The monitor arm keeps the aggregate helper.
+
+### CP-1
+
+The implementer could not wait for an interactive confirmation because the session runs in
+autopilot mode. The full suite was run and passed before continuing:
+`cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test` (all green,
+0 failed). `check` was also run against `./network-monitor.toml`, with and without
+`--probe`; the run printed the expected report and, under `--probe`, failed on the two ICMP
+targets for the missing `CAP_NET_RAW` while the other probes reported their verdicts.
+
+### Step 4 — `monitor --try`
+
+- **Decision:** `--try` requires an explicit `--config`, even when a default
+  `network-monitor.toml` exists, because the promotion needs a destination named on purpose.
+  The check runs before any file is read, so `--try` alone is a usage error in every
+  directory.
+- **Decision:** the candidate is read into bytes once and every later question (parse,
+  resolve, check, equality, promotion) uses those bytes. Equality with the main file is a
+  raw byte comparison; the main bytes are read once at the decision point.
+- **Deviation:** `Candidate` also carries `source: PathBuf`, the candidate path, so the
+  promotion log line can state `<candidate> -> <main>` as the plan requires. The path is
+  never re-read.
+
+### Step 5 / Step 6 — promotion and swap-back
+
+- **Deviation:** `monitor::Start` bundles `startup`, `promotion`, `fallback` and `snapshot`.
+  Clippy refuses a function with more than seven arguments, and `run_with_notifier` would
+  have had eight; the plan's contract (it receives the promotion) still holds through
+  `Start`, and the call sites got simpler.
+- **Decision:** the first round is tracked as the set of target keys that reported once plus
+  the first local failure. A reload restarts workers, and the set makes a duplicate report
+  harmless instead of underflowing a counter.
+- **Decision:** `Supervisor::swap(next, detail)` is the extracted tail of `apply`; it stops
+  the workers, adopts the configuration, resets the retention window, starts the workers
+  again and logs `detail`. `apply` keeps its exact log and notification texts.
+- **Decision:** the promotion unit tests live in `src/promote.rs` (where the plan also puts
+  unit tests) rather than being duplicated in `tests/promote.rs`; `tests/reload.rs` proves
+  the promotion is not replayed as a reload.
+
+### Step 7 — the active snapshot
+
+- **Decision:** `check::Options` gained `active: Option<PathBuf>` so the check can report
+  the snapshot without guessing the configuration path; the binary passes
+  `snapshot::path_for(<config>)`.
+- **Decision:** when `--fallback-to-active` starts from the snapshot, the monitor still
+  watches the main path, so fixing the broken file applies through the normal reload. The
+  snapshot of that start holds the bytes it started from (the old snapshot content).
+- **Discovery (pre-existing, not fixed):** a reload that changes the set of target keys
+  logs `notification settings changed; restart the monitor to use them`, because
+  `NotificationConfig.by_target` contains an entry per target key and therefore compares
+  unequal. It predates this plan and is outside its scope; recorded for the next reader.
+
+### CP-2
+
+Again under autopilot, with no interactive confirmation available. The full suite was run
+and passed before continuing; the manual promotion scenario was also exercised end to end
+on the built binary: a good candidate was promoted, the previous file was kept as
+`main.toml.<stamp>.bak`, the main file became the candidate, and `main.toml.active` held the
+candidate content.
+
+### Step 8 — documentation
+
+- **Decision:** the landing page's "From source" snippet gained the `check` line, because its
+  quick start would otherwise describe a deployment flow without the new verification step.
+- **Decision:** the user guide's `check` sample shows the `warn active` line, so the new line is
+  documented where an operator reads the output for the first time.
+
+### Step 9 — version
+
+`Cargo.toml` is at `0.9.0`; `Cargo.lock` changed only in the crate's own version line.
+
+### Step 10 — quality gate
+
+`cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test` passed on
+2026-11-17: 429 library tests, 40 CLI tests, 3 snapshot tests, the reload suite (7, including
+the promotion-is-not-a-reload case), the web suite (60), and every other target green; 3
+privileged ICMP tests remain ignored as before.
+
+## Review Notes
+
+- **Round**: 1
+- **Review date**: 2026-11-17
+- **Verdict**: NEEDS WORK
+- **Suggested commit**: `feat(config): verify, promote, and snapshot configuration`
+- **Quality gate**: tests ✓ | lint ✓ | types ✓ (`cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`)
+
+### Findings
+| # | Severity | Area | Finding | Status |
+|---|---|---|---|---|
+| 1 | blocker | `src/main.rs` (`load_start`) | `monitor --fallback-to-active` falls back only when the main file cannot be loaded or resolved. A main file that parses and resolves but fails pre-flight verification — an interface that does not exist, no targets, a channel that cannot verify — stops the process instead of starting from the snapshot. Step 7 requires the fallback when the main file "cannot be read, parsed, resolved, or pre-flight verified", and FR-32 states the same. Evidence: a main with `interface = "does-not-exist0"` and a valid `main.toml.active` exits `1` with `error: interface 'does-not-exist0' … the last configuration that worked is main.toml.active (0s ago)` and never reads the snapshot. | open |
+| 2 | minor | `tests/monitor_e2e.rs` | The file is outside `## Affected modules`; the only change is the mechanical call-site update to `monitor::run(…, monitor::Start::default())` after the planned `Start` signature change. No assertion changed. | open |
+| 3 | minor | `src/main.rs` (`main_config_path`) | When the configuration is the implicit default and `network-monitor.toml` does not exist, the recovery hint is skipped even when `network-monitor.toml.active` does exist; a start that fails on `no targets configured` prints no snapshot path or age. Step 7 asks every pre-probe failure to name the snapshot when it exists. Evidence: a directory holding only `network-monitor.toml.active` exits `1` with `error: no targets configured; …` and no hint. | open |
+
+### Gap analysis
+- Goals: 15/16 achieved; the `--fallback-to-active` goal is partial because the pre-flight condition of Step 7 is missing.
+- Scope: in scope except `tests/monitor_e2e.rs` (minor, mechanical) and `.github/workflows/pages.yml` (unrelated working-tree change, not part of this plan).
+- Deviations: `Start` bundles four start parameters (the clippy argument limit), `Candidate.source`, the promote tests as unit tests in `src/promote.rs`, the database detail `(readable)`, and the Telegram `getMe` timeout shared with `sendMessage` at 5 s — all recorded in Implementation Notes.
+- Additions: none beyond the plan.
+- Deferred: `.bak` retention and log rotation, as the plan states.
+
+### Known limitations
+- The snapshot restore (`cp <main>.active <main>` then the reload) is verified by composition — the generic reload path — and not by a dedicated automated test.
+- A failed `fs::copy` of the backup may leave a partial `.bak`; the main file is untouched.
+
+### Recommendations for future work
+- Run the `check` pipeline on the main configuration in `load_start` when `--fallback-to-active` is set (without `listen` and `probe`, as the candidate path does), and add CLI tests for an unknown interface and for a target-less main.
+- Derive the recovery-hint path from the default file name even when the file is absent, so the hint works when only `network-monitor.toml.active` remains.
+
+### Review round 1 — findings closed
+
+- **Finding 1 (blocker, `src/main.rs` `load_start`):** `monitor --fallback-to-active` now runs
+  the `check` pipeline on the main configuration — without `listen` and without `probe`,
+  exactly like the candidate decision — and falls back to the snapshot on the first `fail`
+  line, not only on read/parse/resolve errors. `main_config_path` returns the default path
+  even when the file is absent, so the snapshot beside a missing main is still found.
+  **Verified:** new CLI tests for an unknown interface, a target-less main, and a snapshot
+  with no main file; the existing parse-failure test still passes. The fallback logs one
+  `WARN` naming the main reason and the snapshot with its age.
+- **Finding 2 (minor, `tests/monitor_e2e.rs`):** recorded as a scope note — the file is
+  outside `## Affected modules`; the only change is the mechanical call-site update to
+  `monitor::Start` after the planned signature change, with no assertion changed.
+- **Finding 3 (minor, recovery hint):** covered by the same `main_config_path` change: a
+  start that fails with only `network-monitor.toml.active` present now names the snapshot
+  and its age. **Verified:** new CLI test
+  `a_failure_with_only_a_snapshot_names_it_and_its_age`.
+- **Decision:** the pre-flight fallback excludes `--listen` (a start argument, not
+  configuration; an older file cannot fix a busy or invalid address) and `--probe`
+  (reachability is not a start condition). The user guide states this scope.
+
+## Review Notes
+
+- **Round**: 2
+- **Review date**: 2026-11-17
+- **Verdict**: PASS
+- **Suggested commit**: `feat(config): verify, promote, and snapshot configuration`
+- **Quality gate**: tests ✓ | lint ✓ | types ✓ (`cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`)
+
+### Findings
+| # | Severity | Area | Finding | Status |
+|---|---|---|---|---|
+| — | — | — | No open findings. | closed |
+
+Round 1 findings: #1 (blocker, pre-flight fallback) **closed** — `load_start` now runs the `check` pipeline and falls back on the first `fail`; manually reproduced: with the flag the process keeps running from `main.toml.active`, without it it exits 1 and names the snapshot. #2 (minor, scope note) **closed** — recorded in Implementation Notes; the file's diff is only the forced `monitor::Start` call-site update. #3 (minor, recovery hint) **closed** — `main_config_path` returns the default name when absent; manually reproduced: `network-monitor.toml.active` is named with its age.
+
+### Gap analysis
+- Goals: 16/16 achieved. All `check`, candidate, promotion, swap-back, snapshot and fallback goals are observable and verified.
+- Scope: in scope. `tests/monitor_e2e.rs` is the recorded mechanical call-site update; `.github/workflows/pages.yml` remains an unrelated working-tree change, not part of this plan.
+- Deviations: `Start` bundling, `Candidate.source`, promote unit tests in `src/promote.rs`, `(readable)` database detail, and the 5 s `getMe` timeout — all documented in Implementation Notes.
+- Additions: none beyond the plan.
+- Deferred: `.bak` retention and log rotation, as the plan states.
+- Checklist: 17/17; open questions resolved; Implementation Notes present.
+
+### Known limitations
+- The snapshot restore (`cp <main>.active <main>` then the reload) is verified by composition with the generic reload, not by a dedicated automated test.
+- A failed `fs::copy` of the backup may leave a partial `.bak`; the main file itself is untouched.
+- With `--try` and `--fallback-to-active` together, a rejected candidate logs “`<main>` stays in effect” even when the process is running the snapshot (nit; wording only, no behavioural effect).
+
+### Recommendations for future work
+- Add a dedicated test for restoring `<main>.active` over `<main>` and observing the reload.
+- Consider wording the candidate-rejection warning with the configuration actually in effect when the snapshot is carrying the start.

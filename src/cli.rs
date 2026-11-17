@@ -79,6 +79,26 @@ pub enum Command {
         /// Also serve the web page on this address and port
         #[arg(long, value_name = "ADDRESS:PORT")]
         listen: Option<String>,
+
+        /// Start with this candidate configuration and promote it once it probes;
+        /// an absent file is a quiet no-op, so the flag can stay in a start script
+        #[arg(long = "try", value_name = "PATH")]
+        candidate: Option<PathBuf>,
+
+        /// Start from the active snapshot when the configuration cannot be used
+        #[arg(long)]
+        fallback_to_active: bool,
+    },
+
+    /// Verify a configuration without starting the monitor
+    Check {
+        /// Also verify this address and port can be bound
+        #[arg(long, value_name = "ADDRESS:PORT")]
+        listen: Option<String>,
+
+        /// Perform one real probe per target
+        #[arg(long)]
+        probe: bool,
     },
 
     /// Serve the read-only web page over the event database, without probing
@@ -290,7 +310,7 @@ mod tests {
     fn parses_the_monitor_subcommand() {
         let cli = parse(&["monitor"]);
         match cli.command {
-            Some(Command::Monitor { listen }) => assert!(listen.is_none()),
+            Some(Command::Monitor { listen, .. }) => assert!(listen.is_none()),
             other => panic!("unexpected command: {other:?}"),
         }
     }
@@ -299,8 +319,40 @@ mod tests {
     fn the_monitor_can_serve_the_web_page() {
         let cli = parse(&["monitor", "--listen", "0.0.0.0:8642"]);
         match cli.command {
-            Some(Command::Monitor { listen }) => {
+            Some(Command::Monitor { listen, .. }) => {
                 assert_eq!(listen.as_deref(), Some("0.0.0.0:8642"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_monitor_takes_a_candidate_configuration() {
+        let cli = parse(&["monitor", "--config", "main.toml", "--try", "next.toml"]);
+        match cli.command {
+            Some(Command::Monitor { candidate, .. }) => {
+                assert_eq!(candidate, Some(PathBuf::from("next.toml")));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_the_check_subcommand() {
+        let cli = parse(&["check", "--listen", "0.0.0.0:8642", "--probe"]);
+        match cli.command {
+            Some(Command::Check { listen, probe }) => {
+                assert_eq!(listen.as_deref(), Some("0.0.0.0:8642"));
+                assert!(probe);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cli = parse(&["check"]);
+        match cli.command {
+            Some(Command::Check { listen, probe }) => {
+                assert!(listen.is_none());
+                assert!(!probe);
             }
             other => panic!("unexpected command: {other:?}"),
         }

@@ -37,6 +37,12 @@ impl Watcher {
         }
     }
 
+    /// Rebase on content the process itself published, so the write is not a reload.
+    pub fn rebase(&mut self, bytes: &[u8]) {
+        self.last = Some(bytes.to_vec());
+        self.failing = false;
+    }
+
     pub fn poll(&mut self) -> Option<Change> {
         match fs::read(&self.path) {
             Ok(bytes) => {
@@ -125,6 +131,18 @@ mod tests {
             watcher.poll(),
             Some(Change::Content(b"interval_ms = 3000\n".to_vec()))
         );
+    }
+
+    #[test]
+    fn a_rebased_watcher_does_not_report_the_published_content() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        write(&path, "interval_ms = 1000\n");
+
+        let mut watcher = Watcher::new(&path);
+        write(&path, "interval_ms = 2000\n");
+        watcher.rebase(b"interval_ms = 2000\n");
+        assert_eq!(watcher.poll(), None);
     }
 
     #[test]

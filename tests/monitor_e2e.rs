@@ -65,7 +65,16 @@ fn the_monitor_records_only_transitions() {
     ]));
     let store = Arc::new(Mutex::new(Store::open_rw(&database).unwrap()));
 
-    let handle = thread::spawn(move || monitor::run(&config, prober, store, &running, None, None));
+    let handle = thread::spawn(move || {
+        monitor::run(
+            &config,
+            prober,
+            store,
+            &running,
+            None,
+            monitor::Start::default(),
+        )
+    });
 
     wait_for_events(&expected, 3, Duration::from_secs(5));
     stop.request();
@@ -97,7 +106,16 @@ fn a_restart_continues_from_the_stored_state() {
     let first = test_config(&database);
     let prober: Arc<dyn Probe> = Arc::new(FakeProbe::always(up()));
     let store = Arc::new(Mutex::new(Store::open_rw(&database).unwrap()));
-    let handle = thread::spawn(move || monitor::run(&first, prober, store, &running, None, None));
+    let handle = thread::spawn(move || {
+        monitor::run(
+            &first,
+            prober,
+            store,
+            &running,
+            None,
+            monitor::Start::default(),
+        )
+    });
     wait_for_events(&expected, 1, Duration::from_secs(5));
     stop.request();
     handle.join().unwrap().unwrap();
@@ -107,7 +125,16 @@ fn a_restart_continues_from_the_stored_state() {
     let second = test_config(&database);
     let prober: Arc<dyn Probe> = Arc::new(FakeProbe::always(down()));
     let store = Arc::new(Mutex::new(Store::open_rw(&database).unwrap()));
-    let handle = thread::spawn(move || monitor::run(&second, prober, store, &running, None, None));
+    let handle = thread::spawn(move || {
+        monitor::run(
+            &second,
+            prober,
+            store,
+            &running,
+            None,
+            monitor::Start::default(),
+        )
+    });
     wait_for_events(&expected, 2, Duration::from_secs(5));
     stop.request();
     handle.join().unwrap().unwrap();
@@ -198,7 +225,15 @@ fn each_recorded_transition_is_notified_once() {
     let sink: Arc<dyn Notifier> = notifier.clone();
 
     let handle = thread::spawn(move || {
-        monitor::run_with_notifier(&config, prober, store, &running, None, sink, None)
+        monitor::run_with_notifier(
+            &config,
+            prober,
+            store,
+            &running,
+            None,
+            sink,
+            monitor::Start::default(),
+        )
     });
 
     wait_for_notifications(&notifier, 3, Duration::from_secs(5));
@@ -263,7 +298,16 @@ fn every_target_uses_its_own_timeout_and_interval() {
     let store = Arc::new(Mutex::new(Store::open_rw(&database).unwrap()));
     let stop = Shutdown::new();
     let running = stop.clone();
-    let handle = thread::spawn(move || monitor::run(&config, prober, store, &running, None, None));
+    let handle = thread::spawn(move || {
+        monitor::run(
+            &config,
+            prober,
+            store,
+            &running,
+            None,
+            monitor::Start::default(),
+        )
+    });
 
     thread::sleep(Duration::from_millis(450));
     stop.request();
@@ -314,7 +358,18 @@ fn the_startup_announcement_reaches_the_channel_once() {
     );
 
     let handle = thread::spawn(move || {
-        monitor::run_with_notifier(&config, prober, store, &running, None, sink, Some(startup))
+        monitor::run_with_notifier(
+            &config,
+            prober,
+            store,
+            &running,
+            None,
+            sink,
+            monitor::Start {
+                startup: Some(startup),
+                ..Default::default()
+            },
+        )
     });
 
     let deadline = Instant::now() + Duration::from_secs(5);
