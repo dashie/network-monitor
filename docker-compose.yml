@@ -44,6 +44,15 @@ services:
     cap_add:
       - NET_RAW
 
+    # The main log is the engine's file, not the tool's: stdout and stderr go to the
+    # json-file driver, whose default keeps every line for ever. Bound it here, where
+    # the deployment owns it; `logfile` channels are bounded by max_bytes/max_files.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
     volumes:
       # Event database. Created on first use and kept across recreations; the
       # history survives `compose down` because the volume is named.

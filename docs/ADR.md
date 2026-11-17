@@ -46,6 +46,7 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0032 | Serve a deterministic simulated history from a dedicated `simulate` verb | accepted | 2026-11-15 | A `History`/`HistorySource` seam the page, the API and the export read through; `Store` and a generator that replays whole UTC days from `(seed, key, day)`; no probe, no database, no state kept between requests; `--listen` required, `--history` 1–3660 days, `--seed` |
 | ADR-0033 | Deliver notifications through declared channels with a typed message | accepted | 2026-11-16 | A channel is declared once and enabled by name; one typed `Message` rendered per transport; Telegram, webhook and log file; one queue, thread and policy per channel; secrets file-only |
 | ADR-0034 | Verify a configuration without starting, promote a candidate only after it probes, and keep one active snapshot | accepted | 2026-11-17 | `check` is a subcommand, not a flag; promotion runs in the monitor after the first probe round; one timestamped backup per deployment and one `.active` recovery file written once per start |
+| ADR-0035 | Rotate a log file channel by size, and only on a write | accepted | 2026-11-17 | `max_bytes`/`max_files` on a `logfile` channel, default off; the line is never split, a failed rotation is one `WARN`; the diagnostic log stays on stderr and the deployment bounds it |
 
 ## Records
 
@@ -1512,6 +1513,10 @@ proportional to the longest window anybody can ask for.
 no list enables starts, receives nothing, and is reported as one `WARN` line. The model, the
 routing and the other refusals are unchanged.
 
+**Amended:** 2026-11-17 — the rotation alternative no longer holds for a `logfile` channel: it
+rotates its own file by size ([ADR-0035](#adr-0035--rotate-a-log-file-channel-by-size-and-only-on-a-write)).
+The diagnostic log still stays on stderr, and the supervisor rotates it.
+
 ### Context
 
 ADR-0027 admitted exactly one transport, Telegram, and welded it to the decision: the policy
@@ -1675,3 +1680,74 @@ was working a minute before.
 - **Retention of `.bak` files:** left out of this decision; a promotion is one per deployment and
   a backup deleted at a threshold can be the one the operator needs.
 
+## ADR-0035 — Rotate a log file channel by size, and only on a write
+
+**Status:** accepted · **Date:** 2026-11-17 · Amends the rotation alternative of [ADR-0033](#adr-0033--deliver-notifications-through-declared-channels-with-a-typed-message)
+
+### Context
+
+ADR-0033 rejected rotation inside the tool on the grounds that a log file was one audit sink
+and the operator rotated it with `logrotate`. That argument does not survive several channels.
+Each `logfile` channel is its own destination with its own file, so a host needs one
+`logrotate` stanza per channel, hand-kept in step with the configuration. A container has no
+`logrotate` at all, so the file grows until the volume is full and the history goes with it.
+`copytruncate` also leaves a window between the copy and the truncation where a line can be
+lost, and `create` leaves the process writing to the renamed inode until it reopens.
+
+The diagnostic log is a different case. The tool has no log file: `src/logging.rs` writes
+every line to stderr, and that is what composes with `journald`, with `docker logs`, and with a
+supervisor. What was missing is that the deployment never bounded that file: the compose
+project declared no `logging` stanza, so the default `json-file` driver kept every line for
+ever.
+
+### Decision
+
+1. **The channel rotates its own file.** A `logfile` declaration gains `max_bytes` (default
+   `0`, which disables rotation and keeps today's behaviour byte for byte) and `max_files`
+   (default `5`, range 1–100). An out-of-range value is a configuration error naming
+   `notification[i].max_bytes` or `.max_files` before the first probe.
+2. **Size is the only trigger.** No clock, no time zone, and no process that has to be awake at
+   midnight.
+3. **A line is never split.** Before writing a line that would take the file past `max_bytes`,
+   the channel renames `<filename>` to `<filename>.1`, shifts the older files up, and deletes
+   what falls past `max_files`. A single line larger than the limit is written whole and the
+   next line rotates. A rotation happens on a write only: never at start, on a reload, or in
+   the `check` verification.
+4. **A failed rotation loses nothing.** A rename the filesystem refuses is one `WARN` on
+   stderr, and the line is still written to the current file; the tool does not retry in a
+   loop.
+5. **The diagnostic log stays on stderr, with no `--log-file` flag.** Its destination must not
+   depend on a configuration that may be the thing that is broken, and a sink the process opens
+   at startup is one more way for it to refuse to start. The deployment bounds it instead: the
+   compose service declares the `json-file` driver with `max-size: 10m` and `max-file: "3"`,
+   a bare `docker run` passes the same `--log-opt`, `StandardOutput=journal` leaves rotation to
+   `journald`, and a shell redirect needs a `logrotate` stanza with `copytruncate`.
+
+### Consequences
+
+- A host needs no `logrotate` stanza for a channel, and a container needs none at all; the
+  configuration states the file and its bound together.
+- `max_bytes = 0` is the default, so enabling rotation is a deliberate decision and an
+  existing deployment keeps one file until the operator asks for otherwise.
+- The channel keeps one piece of private state, the current size. No other component reads it
+  and the `Channel` contract does not change.
+- `<filename>.1` is the most recent rotation and a higher suffix is older, which is what
+  `logrotate` produces by default and what a `tail -F` reader follows.
+- The user guide states the whole map — terminal, systemd, redirect, container — in one place,
+  because the answer depends on how the tool runs, not on the tool.
+
+### Alternatives considered
+
+- **Keep rejecting rotation and require `logrotate` per channel:** rejected — a container has
+  no `logrotate`, and one hand-kept stanza per channel drifts from the configuration.
+- **Time-based rotation:** rejected — it makes behaviour depend on a clock and a time zone, and
+  a process that was down at midnight skips the rotation.
+- **Compression of rotated files:** rejected — it adds a codec and a write path for a file a
+  host keeps for days.
+- **Reuse `max_bytes`/`max_files` for a log file of the tool's own:** rejected — it duplicates
+  every line, diverges from `journalctl` and `docker logs`, reads its settings from a
+  configuration it may have to report on, and adds one more way for the process to refuse to
+  start. The one-place-to-configure argument is answered by shipping the compose stanza and by
+  journald's host-wide bound.
+- **Rotate at start or in `check`:** rejected — inspecting a configuration must not rename the
+  file an operator is reading.

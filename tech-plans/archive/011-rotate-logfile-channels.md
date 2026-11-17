@@ -1,7 +1,7 @@
 ---
 title: Rotate a logfile channel by size, and bound the main log in the deployment
 date: 2026-11-17
-status: draft
+status: done
 type: feature
 impact: medium
 area: notifications, logfile channel, configuration, container deployment
@@ -356,14 +356,144 @@ version.
 
 ## Implementation checklist
 
-- [ ] Step 1 — `max_bytes` and `max_files` in configuration and in `--show-config`
-- [ ] Step 2 — size-based rotation in the `logfile` channel
-- [ ] Step 3 — end-to-end test and documentation (`PRODUCT`, `ADR`, `ARCHITECTURE`, `USER-GUIDE`, `NOTIFICATIONS`, sample configuration)
-- [ ] Step 4 — bound the main log: compose driver, `docker run` flags, systemd unit, redirect + `logrotate`
-- [ ] Step 5 — version bump and quality gate
-- [ ] All open questions resolved
-- [ ] Quality suite passes (`cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`)
-- [ ] Documentation listed under Affected modules is updated
-- [ ] User guide (`docs/USER-GUIDE.md`) reflects user-visible behaviour and every
+- [x] Step 1 — `max_bytes` and `max_files` in configuration and in `--show-config`
+- [x] Step 2 — size-based rotation in the `logfile` channel
+- [x] Step 3 — end-to-end test and documentation (`PRODUCT`, `ADR`, `ARCHITECTURE`, `USER-GUIDE`, `NOTIFICATIONS`, sample configuration)
+- [x] Step 4 — bound the main log: compose driver, `docker run` flags, systemd unit, redirect + `logrotate`
+- [x] Step 5 — version bump and quality gate
+- [x] All open questions resolved
+- [x] Quality suite passes (`cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`)
+- [x] Documentation listed under Affected modules is updated
+- [x] User guide (`docs/USER-GUIDE.md`) reflects user-visible behaviour and every
       configuration option, or the plan records why it needs no change
-- [ ] `## Implementation Notes` added or updated in this plan
+- [x] `## Implementation Notes` added or updated in this plan
+
+## Implementation Notes
+
+- **Date**: 2026-11-17
+- **Lane**: `spec-fast` (implement, review and record in one invocation)
+- **Version**: `0.9.0` → `0.10.0` (`Cargo.toml`; `Cargo.lock` carries only the crate version)
+
+### What changed
+
+| File | Change |
+|---|---|
+| `src/config.rs` | `FileNotification` gains `max_bytes`/`max_files`; `LogFile` carries the resolved values; `resolve_channel` validates them and refuses them on another channel type; `to_toml` prints them only when `max_bytes > 0`; constants for the defaults and ranges |
+| `src/notify/logfile.rs` | Private `size` and `real` state; `open` reads the size and resolves a symbolic link; `send` rotates before a line that would cross the limit and counts the bytes; `rotate` deletes `.max_files`, shifts, renames and reopens; a failed rotation is one `logging::warn` and the line is still written |
+| `src/check.rs` | A `logfile` channel with `max_bytes = 0` is a `warn` under its name, not a failure |
+| `src/notify/mod.rs`, `tests/notify.rs` | Test fixtures carry the two new fields |
+| `tests/notify_channels.rs` | An end-to-end rotating channel keeps `.1`/`.2` while it runs; `--show-config` round-trips the keys through the binary |
+| `docs/PRODUCT.md` | `FR-29` states the keys, ranges, rotation, failure behaviour and the write-only trigger; `FR-30` states the unbounded-file warning |
+| `docs/ADR.md` | `ADR-0035` with its index entry, plus an amendment note on `ADR-0033` |
+| `docs/ARCHITECTURE.md` | `notify` guarantees (rotation is private, never splits or loses a line); deployment and logging paragraphs |
+| `docs/USER-GUIDE.md` | Key table and channel text; the new “Rotate the logs” section with the four run shapes, the systemd unit and the `logrotate` stanza; limits and the `check` warning |
+| `docs/NOTIFICATIONS.md` | Keys, rotation behaviour and the failed-rotation failure mode |
+| `docs/DEVELOPER-GUIDE.md` | `--log-opt` on every deployment recipe; the channel-ownership rule in “Adding a notification channel” |
+| `docs/GLOSSARY.md` | “Rotated log file” |
+| `network-monitor.sample.toml` | A commented bounded `logfile` channel |
+| `docker-compose.yml` | `logging` with the `json-file` driver, `max-size: 10m`, `max-file: "3"` |
+| `NOTES.md` | The same two `--log-opt` flags on the bare `docker run` recipe |
+
+### Decisions and deviations
+
+- **Shift order corrected.** The plan's Step 2 lists the shift before deleting
+  `<filename>.<max_files>`, which would delete the file just shifted to that suffix. The
+  implementation deletes `<filename>.<max_files>` first, then shifts `max_files - 1` down to
+  `1`, then renames the current file to `.1`. The observable contract (`.1` newest, `.max_files`
+  oldest, nothing kept past it) is the one the Goals state and a test covers.
+- **`check` warning implemented.** Open question 2 is answered “yes”: plan `010` has landed, so
+  `check` reports one `warn` for a `logfile` channel with `max_bytes = 0`. It stays a warning,
+  so the exit code is unchanged.
+- **A symbolic link is followed.** `open` stores `canonicalize(filename)`, and the rotations
+  rename that real file, so a configured link keeps pointing at the file being written; a Unix
+  test covers it. Suffixes therefore follow the real name when the link points elsewhere.
+- **The other open questions** are resolved as their best guesses: the default stays `0`, the
+  snippets stay inline in the user guide (no `deploy/` directory), there is no compression and
+  no timestamp suffix.
+- **`docker/config.toml` was not changed.** It declares no notification channel, so there is no
+  example to annotate; the sample configuration carries the commented rotating channel.
+
+### Verification performed
+
+| Command | Result |
+|---|---|
+| `cargo fmt --check` | passed (no output) |
+| `cargo clippy --all-targets -- -D warnings` | passed, no warnings |
+| `cargo test` | passed: 442 lib tests plus every integration suite (44 `cli`, 8 `config_precedence`, 1 `icmp_privileged`, 18 `import`, 6 `monitor_e2e`, 7 `notify`, 5 `notify_channels`, 8 `reload`, 7 `simulate`, 3 `snapshot`, 4 `store`, 60 `web`); 10 ignored (privileged or public-network) |
+| `cargo test --lib notify::logfile` | 17 passed |
+| `cargo test --lib config::` | 46 passed |
+| `cargo test --test notify_channels` | 5 passed |
+| `./target/debug/network-monitor --config network-monitor.sample.toml --show-config` | exit `0` |
+| `docker compose config` | prints the `logging` block with driver `json-file`, `max-size: 10m`, `max-file: "3"` |
+| `grep -n "copytruncate" docs/USER-GUIDE.md` | found the stanza and its reason |
+| `git diff --stat Cargo.lock` | one line, the crate's own version |
+
+### Known limitations
+
+- The failed-rotation test proves the line is written and nothing is renamed; it does not
+  capture stderr to count the single `WARN` line, because the process writes diagnostics to the
+  real stderr.
+- If the final rename succeeds and the reopen then fails (two filesystem failures in one
+  rotation), the line is written through the still-open handle of the renamed file rather than
+  the current one; no line is lost. This path has no test.
+- `max_files` set with `max_bytes = 0` is accepted but has no effect, and `--show-config` omits
+  both keys, as the Goals require; the round trip therefore resets an explicit `max_files` to
+  its default while rotation is off.
+
+## Review Notes
+
+- **Round**: 1
+- **Review date**: 2026-11-17
+- **Verdict**: PASS
+- **Suggested commit**: `feat(notifications): rotate logfile channels by size`
+- **Quality gate**: tests ✓ | lint ✓ | types ✓ (`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo check`, `cargo test` — 613 passed, 0 failed, 10 ignored)
+
+### Verification matrix
+
+| # | Check | Evidence |
+|---|---|---|
+| 1 | Goals achieved | 12/12; each has a unit or integration test or a verified document/configuration evidence row |
+| 2 | Scope | every changed file is in `## Affected modules`; `docker/config.toml` was marked *(maybe)* and left unchanged because it declares no channel |
+| 3 | Quality suite green | 613 passed, 0 failed; clippy and fmt clean |
+| 4 | Tests exercise real code | rotation, shift, oversized line, failure path, mode, symlink and `verify` are tested against real files; the channel runs end-to-end in `tests/notify_channels.rs` |
+| 5 | No existing test weakened | none deleted, skipped or weakened; fixtures gained the two fields |
+| 6 | Checklist, questions, notes | checklist 10/10, both gates pass, open questions resolved in `## Implementation Notes` |
+| 7 | Documentation contracts | `PRODUCT`, `ADR`, `ARCHITECTURE`, `USER-GUIDE`, `NOTIFICATIONS`, `DEVELOPER-GUIDE`, `GLOSSARY`, sample configuration, compose and `NOTES` updated |
+| 8 | No architecture/decision contradiction | `ADR-0033` carries an amendment pointing to `ADR-0035`; no other document claims the file is never rotated |
+| 9 | No scope creep | the `check` warning is the resolution of open question 2, not new scope |
+| 10 | Edge cases and errors | `max_bytes = 0`, exact limit, oversized line, `max_files = 1`, failed rename, missing rotated file, symlink, reopen |
+| 11 | Security | suffixes stay beside the real file, mode `0600` preserved by rename, no new secret path, no new dependency |
+| 12 | Security plan | not a security plan |
+| 13 | User guide | accurate and standalone: every option has its default and range, both snippets are inline, the four run shapes are covered |
+
+### Findings
+
+| # | Severity | Area | Finding | Status |
+|---|---|---|---|---|
+| 1 | minor | `docs/ADR.md` | `ADR-0033` still stated that rotation inside the tool was rejected, contradicting the new `ADR-0035` | fixed in review: an amendment note points at `ADR-0035` |
+| 2 | minor | `docs/PRODUCT.md` | `FR-29` named the keys but not the accepted ranges the code enforces | fixed in review: the ranges of `max_bytes` and `max_files` are stated |
+| 3 | nit | `tech-plans/011-rotate-logfile-channels.md` | the Step 2 shift order (rename then delete `.max_files`) would delete the newest rotation; the implementation deletes first | recorded in `## Implementation Notes` |
+
+### Gap analysis
+
+- Goals: 12/12 achieved.
+- Scope: in scope; no out-of-scope files.
+- Deviations: shift order corrected; open question 2 implemented as a `check` warning; a symlink
+  resolves to its target for rotation. All recorded in `## Implementation Notes`.
+- Additions: the `check` warning (open question 2) and its tests.
+- Deferred: none.
+
+### Known limitations
+
+- The single `WARN` of a failed rotation is not counted by a test; the test proves the line is
+  written and nothing is renamed.
+- A reopen failure after a successful rename writes the line through the renamed handle; no
+  line is lost and the path is untested.
+- `--show-config` resets an explicit `max_files` to the default while `max_bytes = 0`, as the
+  Goals require the keys to be omitted when rotation is off.
+
+### Recommendations for future work
+
+- Capture stderr in a test if the `WARN` count ever becomes part of the contract.
+- Add a `deploy/` directory if host installs become a supported shape; the user guide already
+  carries both snippets, so nothing is lost today.

@@ -32,12 +32,17 @@ docker -c qubo build -t network-monitor:dev .
 docker -c qubo run -d --name network-monitor \
   --cap-drop ALL --cap-add NET_RAW --network host \
   --restart unless-stopped \
+  --log-opt max-size=10m --log-opt max-file=3 \
   -v network-monitor-data:/var/lib/network-monitor \
   network-monitor:dev \
   monitor --target 1.1.1.1,interface=eth1 --target 192.168.1.1 \
   --database /var/lib/network-monitor/events.db \
   --listen 0.0.0.0:8642
 ```
+
+`--log-opt max-size=10m --log-opt max-file=3` bounds the engine's copy of stdout and
+stderr, which the `json-file` driver otherwise keeps for ever. The tool writes no log file
+of its own; a `logfile` channel is bounded by its own `max_bytes` and `max_files`.
 
 `-p 8642:8642` is useless next to `--network host`: Docker ignores it and warns. To
 republish the port, drop `--network host` — but then `interface = "eth1"` no longer

@@ -346,6 +346,8 @@ mod tests {
             level: Level::Info,
             format: LogFormat::Text,
             stabilize: Duration::from_millis(50),
+            max_bytes: 0,
+            max_files: 5,
         })
     }
 

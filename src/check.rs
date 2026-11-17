@@ -9,7 +9,7 @@
 use std::io::ErrorKind;
 use std::path::PathBuf;
 
-use crate::config::Config;
+use crate::config::{ChannelSettings, Config};
 use crate::notify;
 use crate::probe::{interface, Probe, Prober, Verdict};
 use crate::snapshot;
@@ -204,10 +204,25 @@ fn check_channels(config: &Config, lines: &mut Vec<Line>) {
         return;
     }
     match notify::verify(&config.notify) {
-        Ok(()) => lines.push(Line::ok(
-            "channel",
-            format!("{declared} channel(s) verified"),
-        )),
+        Ok(()) => {
+            lines.push(Line::ok(
+                "channel",
+                format!("{declared} channel(s) verified"),
+            ));
+            for channel in &config.notify.channels {
+                if let ChannelSettings::LogFile(settings) = channel {
+                    if settings.max_bytes == 0 {
+                        lines.push(Line::warn(
+                            format!("channel {}", settings.name),
+                            format!(
+                                "{} is appended without rotation; set max_bytes to bound it",
+                                settings.filename.display()
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
         Err(error) => lines.push(Line::fail(
             format!("channel {}", error.channel),
             error.reason,
@@ -282,6 +297,62 @@ mod tests {
             .iter()
             .find(|line| line.subject == subject)
             .unwrap_or_else(|| panic!("no line for subject {subject}: {report:?}"))
+    }
+
+    #[test]
+    fn a_logfile_without_rotation_is_a_warning_and_a_bounded_one_is_not() {
+        let directory = tempfile::tempdir().unwrap();
+        let unbounded = Config::resolve(
+            Some(FileConfig {
+                database: Some(directory.path().join("events.db").display().to_string()),
+                notification: Some(vec![FileNotification {
+                    name: Some("audit".to_string()),
+                    kind: Some("logfile".to_string()),
+                    filename: Some(directory.path().join("audit.log").display().to_string()),
+                    ..FileNotification::default()
+                }]),
+                targets: Some(vec![icmp_target("127.0.0.1")]),
+                ..FileConfig::default()
+            }),
+            Overrides::default(),
+        )
+        .expect("a valid configuration");
+
+        let unbounded_report = report(&unbounded, Options::default());
+        let line = find(&unbounded_report, "channel audit");
+        assert_eq!(line.level, LineLevel::Warn, "{line:?}");
+        assert!(line.detail.contains("max_bytes"), "{line:?}");
+        assert!(
+            !unbounded_report.failed(),
+            "a warning never fails the check"
+        );
+
+        let bounded = Config::resolve(
+            Some(FileConfig {
+                database: Some(directory.path().join("events.db").display().to_string()),
+                notification: Some(vec![FileNotification {
+                    name: Some("audit".to_string()),
+                    kind: Some("logfile".to_string()),
+                    filename: Some(directory.path().join("bounded.log").display().to_string()),
+                    max_bytes: Some(4096),
+                    ..FileNotification::default()
+                }]),
+                targets: Some(vec![icmp_target("127.0.0.1")]),
+                ..FileConfig::default()
+            }),
+            Overrides::default(),
+        )
+        .expect("a valid configuration");
+
+        let bounded_report = report(&bounded, Options::default());
+        assert!(
+            bounded_report
+                .lines
+                .iter()
+                .all(|line| !line.subject.starts_with("channel audit")),
+            "a bounded file is not warned about: {bounded_report:?}"
+        );
+        assert!(!bounded_report.failed());
     }
 
     #[test]

@@ -23,6 +23,8 @@ fn settings(stabilize: Duration) -> ChannelSettings {
         level: Level::Info,
         format: LogFormat::Text,
         stabilize,
+        max_bytes: 0,
+        max_files: 5,
     })
 }
 

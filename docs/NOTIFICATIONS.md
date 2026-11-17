@@ -14,7 +14,7 @@ Three channel types exist: Telegram, a webhook, and a log file. A channel is dec
 |---|---|---|
 | `telegram` | `name`, `bot_token`, `chat_id` | `stabilize_seconds` |
 | `webhook` | `name`, `url` | `token` (requires `https`), `stabilize_seconds` |
-| `logfile` | `name`, `filename` | `logger`, `level`, `format`, `stabilize_seconds` |
+| `logfile` | `name`, `filename` | `logger`, `level`, `format`, `max_bytes`, `max_files`, `stabilize_seconds` |
 
 ## 1. Declare the channel and enable it
 
@@ -135,15 +135,27 @@ filename = "/var/log/network-monitor/audit.log"
 logger = "notification"
 level = "info"
 format = "jsonl"
+max_bytes = 10485760          # rotate at 10 MiB; 0 (the default) never rotates
+max_files = 5                 # keep audit.log.1 … audit.log.5
 ```
 
 The directory must exist: the tool creates the file, never the directory. The file is
-appended to with mode `0600` on Unix and is never rotated by the tool — use `logrotate` or
-the platform's mechanism.
+appended to with mode `0600` on Unix.
+
+With `max_bytes = 0` the file grows for ever. With `max_bytes > 0` the channel rotates it on
+a write: before a line that would take the file past the limit, `<filename>` becomes
+`<filename>.1`, the older rotated files shift up, and what falls past `max_files` is deleted.
+The line is written whole, so no event is split between two files. A single line larger than
+the limit is written whole and the next line rotates. Rotation never happens at start, on a
+reload, or in `check`.
+
+A rotation the filesystem refuses (a read-only directory, a rename denied) is one `WARN` on
+stderr and the line is still written to the current file: a channel stays silent about an
+event only when its `level` hides it.
 
 ```bash
 sudo install -d -m 750 -o network-monitor /var/log/network-monitor
-tail -f /var/log/network-monitor/audit.log
+tail -F /var/log/network-monitor/audit.log
 ```
 
 `format = "text"` writes the diagnostic line; `format = "jsonl"` writes one compact JSON
@@ -201,6 +213,7 @@ binary. There is no proxy setting and no way to disable certificate verification
 |---|---|---|
 | `cannot open … for append` at startup | The file or its directory is not writable | no; the process does not start |
 | `cannot write …` on a line | The filesystem is full or the file was removed | no; one `WARN` line, other channels unaffected |
+| `cannot rotate …` on a line | The rename was refused (read-only directory, permissions); the line is still written to the current file | no; one `WARN` line, the file keeps growing |
 | No line for an event | The event is below the channel's `level` | not a failure |
 
 After the fifth failed attempt the message is dropped and the log states `notification

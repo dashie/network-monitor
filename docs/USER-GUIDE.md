@@ -334,6 +334,8 @@ error name only `scheme://host[:port]`.
 | `logger` | `notification` | The logger name on every line, or the `logger` member in JSONL; the same characters as a `name` |
 | `level` | `info` | The most verbose level written: `error`, `warn`, `info`, `debug` |
 | `format` | `text` | `text` (the diagnostic line) or `jsonl` (one JSON document per line) |
+| `max_bytes` | `0` | Rotate when the file would grow past this many bytes; `0` never rotates; otherwise `1024`–`1073741824` |
+| `max_files` | `5` | How many rotated files are kept, `<filename>.1` (newest) to `<filename>.<max_files>` (oldest); `1`–`100` |
 
 ```toml
 [[notification]]
@@ -343,6 +345,8 @@ filename = "/var/log/network-monitor/audit.log"
 logger = "notification"
 level = "info"
 format = "jsonl"
+max_bytes = 10485760          # 10 MiB, then rotate
+max_files = 5
 ```
 
 A `text` line is exactly a diagnostic line, so the same file can be read by the same tools:
@@ -352,8 +356,14 @@ A `text` line is exactly a diagnostic line, so the same file can be read by the 
 ```
 
 A `jsonl` line is the webhook document plus `"logger":"notification"`, one compact document per
-line. The file is appended to and never rotated by the tool: rotate it with `logrotate` or the
-platform's mechanism, and create its directory yourself.
+line. With `max_bytes = 0` (the default) the file is appended for ever. With `max_bytes > 0`
+the channel rotates it on a write: before a line that would take the file past the limit, it
+renames `<filename>` to `<filename>.1`, shifts the older rotated files up, deletes what falls
+past `max_files`, and writes the line whole. A single line larger than the limit is written
+whole and the next line rotates. A rename the filesystem refuses is one `WARN` on stderr and
+the line is still written, so an event is never lost to housekeeping. Rotation happens only on
+a write: a start, a reload, and `check` never rename or truncate the file. "Rotate the logs"
+below covers the diagnostic stream as well.
 
 #### Enabling a channel
 
@@ -505,7 +515,9 @@ warn  active             no snapshot yet
 | `--probe` | Perform one real probe per target. `up` is `ok`, `down` is a `warn` with its cause, and a local probe failure (no `NET_RAW`, missing interface, unresolvable resolver) is a `fail` |
 
 Every line is one of `ok`, `warn`, or `fail`. The command exits `0` when no line is a `fail`
-and `1` otherwise, and `warn` never changes the exit code. It prints the token of a channel as
+and `1` otherwise, and `warn` never changes the exit code. A `logfile` channel with
+`max_bytes = 0` is one `warn` under its own name: it is legal and deliberate, but the file grows
+without a bound. It prints the token of a channel as
 `<redacted>`, starts no worker, sends no notification, and opens an existing event database
 read-only. The only thing it may create is the file of a `logfile` channel, exactly as a start
 would; a missing event database is a `warn`, because the next start creates it.
@@ -882,6 +894,70 @@ recovery point.
   `web interface ready on http://<address>/` with the address it listens on.
 - `SIGINT`/`SIGTERM` stop the process between two probe cycles, with no partial write.
 
+### Rotate the logs
+
+There are two kinds of log, and they are bounded by different layers.
+
+The **diagnostic log** is not a file of the tool: every line goes to stderr, and there is no
+`--log-file` flag. Whatever file exists is the one the supervisor created, so the supervisor
+owns its rotation. The **`logfile` notification channel** writes its own file and is bounded by
+its own `max_bytes` and `max_files`, in every one of the cases below.
+
+| How it runs | Where the diagnostics go | Who rotates them |
+|---|---|---|
+| A terminal | stderr, to the terminal | Nothing to rotate |
+| `systemd` | the journal (`StandardOutput=journal`, the default) | `journald` |
+| `systemd` with `append:` | `/var/log/network-monitor/monitor.log` | `logrotate` |
+| A shell redirect, `2>>` | the file the shell opened | `logrotate`, with `copytruncate` |
+| A container | the engine's log driver (`docker logs`) | the driver's `max-size`/`max-file` |
+
+A unit that leaves rotation to the journal, and the host-wide bounds it uses:
+
+```ini
+# /etc/systemd/system/network-monitor.service
+[Service]
+ExecStart=/usr/local/bin/network-monitor monitor --config /etc/network-monitor/config.toml
+# stderr goes to the journal, which owns rotation:
+#   /etc/systemd/journald.conf
+#   SystemMaxUse=500M
+#   SystemMaxFileSize=50M
+#   MaxRetentionSec=30day
+StandardOutput=journal
+StandardError=journal
+```
+
+Only if the unit appends to a file (`StandardOutput=append:/var/log/network-monitor/monitor.log`)
+or the command is started with `2>> /var/log/network-monitor/monitor.log` does `logrotate` own
+the file:
+
+```text
+# /etc/logrotate.d/network-monitor  — only for `StandardOutput=append:` or a shell redirect
+/var/log/network-monitor/monitor.log {
+    size 10M
+    rotate 3
+    compress
+    copytruncate   # the process keeps the descriptor it was given: `create` would
+                   # leave it writing to the renamed inode
+    missingok
+    notifempty
+}
+```
+
+`copytruncate` is required because the process never reopens stderr. There is a short window
+between the copy and the truncation in which a line can be lost; a `logfile` channel does not
+have that window, which is why it rotates itself.
+
+In a container the engine keeps the output of stdout and stderr, so bound the driver. The
+compose project does it for you; a bare `docker run` needs the same two options:
+
+```bash
+docker run --log-opt max-size=10m --log-opt max-file=3 … network-monitor:dev monitor …
+```
+
+A reader that follows the current file (`tail -F /var/log/network-monitor/audit.log`) is
+handed the file at its new name, then the new file when the channel recreates it, so a
+rotation is one more file to follow and no line disappears from the stream.
+
 ## Troubleshooting
 
 | Symptom | Cause and fix |
@@ -920,7 +996,9 @@ recovery point.
 - The page has no authentication and no write path.
 - The trust store is the one compiled into the binary.
 - Notification channels are Telegram, a webhook, and a log file; no mail, MQTT, Slack-specific
-  payload or command hook, and no rotation by the tool.
+  payload or command hook. A log file channel rotates by size (`max_bytes`/`max_files`), with no
+  time-based trigger and no compression, and the diagnostic log has no file of its own: rotation
+  of the stderr stream belongs to `journald`, the container engine, or `logrotate`.
 - There is exactly one active snapshot and no history of snapshots, and the deployment backups
   are never pruned by the tool. A candidate is promoted only after every target has probed once
   without a local failure; reachability of a target is not a condition.

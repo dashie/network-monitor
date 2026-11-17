@@ -357,6 +357,7 @@ docker context ls                                   # qubo -> tcp://qubo:2376
 docker -c qubo build -t network-monitor:dev .
 docker -c qubo run -d --name network-monitor \
   --cap-drop ALL --cap-add NET_RAW --network host \
+  --log-opt max-size=10m --log-opt max-file=3 \
   -v network-monitor-data:/var/lib/network-monitor \
   network-monitor:dev \
   monitor --target 1.1.1.1,interface=eth1 --target 192.168.1.1 \
@@ -507,6 +508,7 @@ docker -c qubo run -d --name network-monitor \
   --restart unless-stopped \
   --cap-drop ALL --cap-add NET_RAW \
   --network host \
+  --log-opt max-size=10m --log-opt max-file=3 \
   -v /share/Container/network-monitor/config.toml:/etc/network-monitor/config.toml:ro \
   -v network-monitor-data:/var/lib/network-monitor \
   network-monitor:dev \
@@ -534,6 +536,7 @@ deployment:
 ```bash
 docker -c qubo run -d --name network-monitor \
   --cap-drop ALL --cap-add NET_RAW --network host \
+  --log-opt max-size=10m --log-opt max-file=3 \
   -v network-monitor-data:/var/lib/network-monitor \
   network-monitor:dev \
   monitor --target 1.1.1.1,interface=eth1 --target 192.168.1.1 \
@@ -590,6 +593,7 @@ docker -c qubo run -d --name network-monitor \
   --restart unless-stopped \
   --network host \
   --cap-drop ALL --cap-add NET_RAW \
+  --log-opt max-size=10m --log-opt max-file=3 \
   -v /share/Container/network-monitor/config.toml:/etc/network-monitor/config.toml:ro \
   -v network-monitor-data:/var/lib/network-monitor \
   network-monitor:dev \
@@ -823,12 +827,15 @@ alternatives and the effect on the static build (ADR-0024 is the example).
    serialisation inside the module; the trait is the only contract the runner knows.
 3. Refuse a key that belongs to another type, and refuse a secret on a plaintext URL. Scrub
    every secret from a `SendError` before returning it, and never name a URL path.
-4. Add the arm to `notify::build`; the monitor, the policy and the routing must not change.
-5. Document it: the keys in [USER-GUIDE.md](./USER-GUIDE.md#notifications), an FR in
+4. A channel that writes to a file owns that file's rotation: keep the current size as private
+   state, rotate on a write only, and never lose a line to a failed rename. See
+   `notify/logfile.rs` and [ADR-0035](./ADR.md).
+5. Add the arm to `notify::build`; the monitor, the policy and the routing must not change.
+6. Document it: the keys in [USER-GUIDE.md](./USER-GUIDE.md#notifications), an FR in
    [PRODUCT.md](./PRODUCT.md), the terms in [GLOSSARY.md](./GLOSSARY.md), the component in
    [ARCHITECTURE.md](./ARCHITECTURE.md), and the procedure in
    [NOTIFICATIONS.md](./NOTIFICATIONS.md).
-6. Test the transport without the internet: a listener bound to `127.0.0.1:0` or a temporary
+7. Test the transport without the internet: a listener bound to `127.0.0.1:0` or a temporary
    directory, plus `notify::fake::FakeChannel` for the delivery rules.
 
 ### Changing the schema

@@ -6,7 +6,10 @@ use std::net::TcpListener;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use network_monitor::config::{ChannelSettings, LogFile, LogFormat, NotificationConfig, Webhook};
+use assert_cmd::Command;
+use network_monitor::config::{
+    parse, ChannelSettings, Config, LogFile, LogFormat, NotificationConfig, Overrides, Webhook,
+};
 use network_monitor::logging::Level;
 use network_monitor::notify::message::{Cause, TargetRef};
 use network_monitor::notify::{start, Message};
@@ -21,6 +24,10 @@ fn down(key: &str) -> Message {
         Cause::new("ICMP.NO_REPLY", "no reply within 2000 ms"),
         1_764_000_000_000,
     )
+}
+
+fn up(key: &str) -> Message {
+    Message::target_up(TargetRef::new(key, None), 1_764_000_000_000)
 }
 
 fn config(channels: Vec<ChannelSettings>, names: &[&str], target: &str) -> NotificationConfig {
@@ -101,6 +108,8 @@ fn a_log_file_receives_one_json_line_per_event() {
         level: Level::Info,
         format: LogFormat::Jsonl,
         stabilize: Duration::ZERO,
+        max_bytes: 0,
+        max_files: 5,
     });
     let shutdown = Shutdown::new();
     let handle = start(&config(vec![logfile], &["audit"], KEY), &shutdown).unwrap();
@@ -139,6 +148,8 @@ fn a_target_scoped_log_file_receives_only_its_target() {
         level: Level::Info,
         format: LogFormat::Text,
         stabilize: Duration::ZERO,
+        max_bytes: 0,
+        max_files: 5,
     });
     let mut config = config(vec![logfile], &["router"], KEY);
     config.global.clear();
@@ -167,4 +178,91 @@ fn a_target_scoped_log_file_receives_only_its_target() {
         "the enabled target line",
     );
     handle.shutdown(None);
+}
+
+#[test]
+fn a_rotating_log_file_keeps_max_files_while_the_monitor_runs() {
+    let directory = tempfile::tempdir().unwrap();
+    let filename = directory.path().join("audit.log");
+    let logfile = ChannelSettings::LogFile(LogFile {
+        name: "audit".to_string(),
+        filename: filename.clone(),
+        logger: "notification".to_string(),
+        level: Level::Info,
+        format: LogFormat::Text,
+        stabilize: Duration::ZERO,
+        max_bytes: 200,
+        max_files: 2,
+    });
+    let shutdown = Shutdown::new();
+    let handle = start(&config(vec![logfile], &["audit"], KEY), &shutdown).unwrap();
+
+    // The channel started line plus alternating transitions fill the file twice.
+    for _ in 0..6 {
+        handle.notifier.send(down(KEY));
+        handle.notifier.send(up(KEY));
+    }
+    let second = directory.path().join("audit.log.2");
+    wait_for(|| second.exists(), "the second rotation");
+    handle.shutdown(None);
+
+    assert!(filename.exists(), "the current file is always there");
+    assert!(directory.path().join("audit.log.1").exists());
+    assert!(second.exists());
+    assert!(
+        !directory.path().join("audit.log.3").exists(),
+        "nothing is kept past max_files"
+    );
+    for path in [filename, directory.path().join("audit.log.1"), second] {
+        let length = std::fs::metadata(&path).unwrap().len();
+        assert!(length <= 200, "{} holds {length} bytes", path.display());
+    }
+}
+
+#[test]
+fn show_config_round_trips_the_rotation_keys() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("network-monitor.toml");
+    std::fs::write(
+        &path,
+        concat!(
+            "interval_ms = 5000\n",
+            "[[notification]]\n",
+            "name = \"audit\"\n",
+            "type = \"logfile\"\n",
+            "filename = \"/tmp/audit.log\"\n",
+            "max_bytes = 4096\n",
+            "max_files = 3\n",
+            "[[targets]]\n",
+            "ip = \"1.1.1.1\"\n",
+        ),
+    )
+    .unwrap();
+
+    let output = Command::cargo_bin("network-monitor")
+        .unwrap()
+        .args(["--config", path.to_str().unwrap(), "--show-config"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("max_bytes = 4096"), "{text}");
+    assert!(text.contains("max_files = 3"), "{text}");
+
+    let again = Config::resolve(
+        Some(parse(&text, &directory.path().join("shown.toml")).unwrap()),
+        Overrides::default(),
+    )
+    .unwrap();
+    match again.notify.channel("audit").unwrap() {
+        ChannelSettings::LogFile(settings) => {
+            assert_eq!(settings.max_bytes, 4096);
+            assert_eq!(settings.max_files, 3);
+        }
+        other => panic!("not a log file: {other:?}"),
+    }
 }

@@ -28,6 +28,16 @@ pub const DEFAULT_DATABASE: &str = "network-monitor.db";
 pub const DEFAULT_RETENTION_DAYS: u64 = 0;
 pub const DEFAULT_STABILIZE_SECONDS: u64 = 60;
 
+/// The default of a `logfile` channel: append for ever, as before rotation existed.
+pub const DEFAULT_MAX_BYTES: u64 = 0;
+/// How many rotated files a rotating `logfile` channel keeps by default.
+pub const DEFAULT_MAX_FILES: u64 = 5;
+/// The bounds of a size that enables rotation: below 1 KiB is useless, above 1 GiB is
+/// a file no monitor should hold.
+pub const MAX_BYTES_RANGE: std::ops::RangeInclusive<u64> = 1024..=1_073_741_824;
+/// The bounds of the number of rotated files kept.
+pub const MAX_FILES_RANGE: std::ops::RangeInclusive<u64> = 1..=100;
+
 /// What every rendering of the bot token shows instead of the secret.
 pub const REDACTED_TOKEN: &str = "<redacted>";
 
@@ -83,6 +93,10 @@ pub struct FileNotification {
     pub logger: Option<String>,
     pub level: Option<String>,
     pub format: Option<String>,
+    /// Rotate the file once it would grow past this many bytes; `0` never rotates.
+    pub max_bytes: Option<u64>,
+    /// How many rotated files are kept, `<filename>.1` … `<filename>.<max_files>`.
+    pub max_files: Option<u64>,
 }
 
 /// One `[[targets]]` entry of the configuration file.
@@ -575,6 +589,9 @@ pub struct LogFile {
     pub level: Level,
     pub format: LogFormat,
     pub stabilize: Duration,
+    /// `0` disables rotation.
+    pub max_bytes: u64,
+    pub max_files: u64,
 }
 
 /// How a log file renders one event.
@@ -837,6 +854,10 @@ impl Config {
             level: Option<String>,
             #[serde(skip_serializing_if = "Option::is_none")]
             format: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            max_bytes: Option<u64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            max_files: Option<u64>,
         }
 
         #[derive(Serialize, Default)]
@@ -951,6 +972,10 @@ impl Config {
                     logger: Some(settings.logger.clone()),
                     level: Some(settings.level.label().to_ascii_lowercase()),
                     format: Some(settings.format.as_str().to_string()),
+                    // A channel that does not rotate keeps printing exactly what it
+                    // printed before the keys existed.
+                    max_bytes: (settings.max_bytes > 0).then_some(settings.max_bytes),
+                    max_files: (settings.max_bytes > 0).then_some(settings.max_files),
                     ..SerializableNotification::default()
                 },
             })
@@ -1306,7 +1331,18 @@ fn resolve_channel(file: &FileNotification, index: usize) -> Result<ChannelSetti
             }))
         }
         "logfile" => {
-            reject_foreign(file, index, &["filename", "logger", "level", "format"])?;
+            reject_foreign(
+                file,
+                index,
+                &[
+                    "filename",
+                    "logger",
+                    "level",
+                    "format",
+                    "max_bytes",
+                    "max_files",
+                ],
+            )?;
             let filename = required(file.filename.as_deref(), &key("filename"))?;
             let filename = normalise_path(Path::new(filename));
             let logger = clean(file.logger.clone()).unwrap_or_else(|| "notification".to_string());
@@ -1326,6 +1362,17 @@ fn resolve_channel(file: &FileNotification, index: usize) -> Result<ChannelSetti
                 Some(text) => LogFormat::parse(&text)
                     .ok_or_else(|| invalid(key("format"), "must be text or jsonl"))?,
             };
+            let max_bytes = file.max_bytes.unwrap_or(DEFAULT_MAX_BYTES);
+            if max_bytes != 0 && !MAX_BYTES_RANGE.contains(&max_bytes) {
+                return Err(invalid(
+                    key("max_bytes"),
+                    "must be 0, or between 1024 and 1073741824",
+                ));
+            }
+            let max_files = file.max_files.unwrap_or(DEFAULT_MAX_FILES);
+            if !MAX_FILES_RANGE.contains(&max_files) {
+                return Err(invalid(key("max_files"), "must be between 1 and 100"));
+            }
             Ok(ChannelSettings::LogFile(LogFile {
                 name,
                 filename,
@@ -1333,6 +1380,8 @@ fn resolve_channel(file: &FileNotification, index: usize) -> Result<ChannelSetti
                 level,
                 format,
                 stabilize,
+                max_bytes,
+                max_files,
             }))
         }
         other => Err(invalid(
@@ -1357,6 +1406,8 @@ fn reject_foreign(
         ("logger", file.logger.is_some()),
         ("level", file.level.is_some()),
         ("format", file.format.is_some()),
+        ("max_bytes", file.max_bytes.is_some()),
+        ("max_files", file.max_files.is_some()),
     ] {
         if present && !allowed.contains(&name) {
             return Err(invalid(
@@ -2059,9 +2110,128 @@ mod tests {
                 assert_eq!(logfile.logger, "audit-log");
                 assert_eq!(logfile.level, Level::Debug);
                 assert_eq!(logfile.format, LogFormat::Jsonl);
+                assert_eq!(logfile.max_bytes, DEFAULT_MAX_BYTES);
+                assert_eq!(logfile.max_files, DEFAULT_MAX_FILES);
             }
             other => panic!("not a log file: {other:?}"),
         }
+    }
+
+    fn logfile_with(
+        name: &str,
+        max_bytes: Option<u64>,
+        max_files: Option<u64>,
+    ) -> FileNotification {
+        FileNotification {
+            max_bytes,
+            max_files,
+            ..logfile(name, "/tmp/a.log", None)
+        }
+    }
+
+    fn resolve_logfile(declaration: FileNotification) -> Result<Config, ConfigError> {
+        Config::resolve(
+            Some(FileConfig {
+                notification: Some(vec![declaration]),
+                targets: Some(vec![icmp("1.1.1.1")]),
+                ..FileConfig::default()
+            }),
+            overrides(),
+        )
+    }
+
+    fn max_bytes_of(config: &Config) -> u64 {
+        match config.notify.channel("audit").unwrap() {
+            ChannelSettings::LogFile(logfile) => logfile.max_bytes,
+            other => panic!("not a log file: {other:?}"),
+        }
+    }
+
+    fn max_files_of(config: &Config) -> u64 {
+        match config.notify.channel("audit").unwrap() {
+            ChannelSettings::LogFile(logfile) => logfile.max_files,
+            other => panic!("not a log file: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_rotation_keys_accept_zero_and_both_bounds() {
+        let off = resolve_logfile(logfile_with("audit", Some(0), Some(1))).unwrap();
+        assert_eq!(max_bytes_of(&off), 0);
+        assert_eq!(max_files_of(&off), 1);
+
+        for bytes in [1024, 1_073_741_824] {
+            let config = resolve_logfile(logfile_with("audit", Some(bytes), Some(100))).unwrap();
+            assert_eq!(max_bytes_of(&config), bytes);
+            assert_eq!(max_files_of(&config), 100);
+        }
+    }
+
+    #[test]
+    fn an_out_of_range_rotation_key_is_refused_with_its_name() {
+        for bytes in [1, 1023, 1_073_741_825] {
+            let error = resolve_logfile(logfile_with("audit", Some(bytes), None)).unwrap_err();
+            assert!(
+                error.to_string().contains("notification[0].max_bytes"),
+                "{bytes}: {error}"
+            );
+        }
+
+        for files in [0, 101] {
+            let error =
+                resolve_logfile(logfile_with("audit", Some(4096), Some(files))).unwrap_err();
+            assert!(
+                error.to_string().contains("notification[0].max_files"),
+                "{files}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_rotation_keys_belong_to_the_log_file_only() {
+        let error = Config::resolve(
+            Some(FileConfig {
+                notification: Some(vec![FileNotification {
+                    max_bytes: Some(4096),
+                    ..declaration("audit", "webhook")
+                }]),
+                targets: Some(vec![icmp("1.1.1.1")]),
+                ..FileConfig::default()
+            }),
+            overrides(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("notification[0].max_bytes: does not apply to this channel type"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn show_config_prints_the_rotation_keys_only_when_it_rotates() {
+        let off = resolve(Some(FileConfig {
+            notification: Some(vec![logfile("audit", "/tmp/a.log", None)]),
+            targets: Some(vec![icmp("1.1.1.1")]),
+            ..FileConfig::default()
+        }));
+        let text = off.to_toml();
+        assert!(!text.contains("max_bytes"), "{text}");
+        assert!(!text.contains("max_files"), "{text}");
+
+        let on = resolve(Some(FileConfig {
+            notification: Some(vec![logfile_with("audit", Some(4096), Some(3))]),
+            targets: Some(vec![icmp("1.1.1.1")]),
+            ..FileConfig::default()
+        }));
+        let text = on.to_toml();
+        assert!(text.contains("max_bytes = 4096"), "{text}");
+        assert!(text.contains("max_files = 3"), "{text}");
+
+        let again = resolve(Some(parse(&text, Path::new("roundtrip.toml")).unwrap()));
+        assert_eq!(max_bytes_of(&again), 4096);
+        assert_eq!(max_files_of(&again), 3);
     }
 
     fn webhook(name: &str, url: &str, token: Option<&str>) -> FileNotification {
