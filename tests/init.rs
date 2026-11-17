@@ -5,7 +5,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn monitor(directory: &std::path::Path) -> Command {
-    let mut command = Command::cargo_bin("network-monitor").unwrap();
+    let mut command = Command::cargo_bin("uptime-monitor").unwrap();
     command.current_dir(directory);
     command
 }
@@ -20,17 +20,20 @@ fn init_creates_a_folder_that_check_accepts() {
         .arg(&folder)
         .assert()
         .success()
-        .stdout(predicate::str::contains("network-monitor.toml"))
+        .stdout(predicate::str::contains("uptime-monitor.toml"))
+        .stdout(predicate::str::contains(
+            "uptime-monitor check --config uptime-monitor.toml",
+        ))
         .stdout(predicate::str::contains("data/"))
         .stdout(predicate::str::contains("logs/"));
 
-    assert!(folder.join("network-monitor.toml").is_file());
+    assert!(folder.join("uptime-monitor.toml").is_file());
     assert!(folder.join("data").is_dir());
     assert!(folder.join("logs").is_dir());
     assert!(!folder.join("data/events.db").exists());
 
     monitor(&folder)
-        .args(["check", "--config", "network-monitor.toml"])
+        .args(["check", "--config", "uptime-monitor.toml"])
         .assert()
         .success()
         .stdout(predicate::str::contains("1 target(s)"))
@@ -55,7 +58,7 @@ fn init_refuses_a_non_empty_folder() {
         .stderr(predicate::str::contains("is not empty"))
         .stderr(predicate::str::contains("choose a new or empty folder"));
 
-    assert!(!folder.join("network-monitor.toml").exists());
+    assert!(!folder.join("uptime-monitor.toml").exists());
     assert_eq!(
         std::fs::read_to_string(folder.join("keep.txt")).unwrap(),
         "keep"
@@ -86,7 +89,7 @@ fn init_refuses_a_second_run() {
         .arg(&folder)
         .assert()
         .success();
-    let first = std::fs::read(folder.join("network-monitor.toml")).unwrap();
+    let first = std::fs::read(folder.join("uptime-monitor.toml")).unwrap();
 
     monitor(root.path())
         .arg("init")
@@ -96,7 +99,7 @@ fn init_refuses_a_second_run() {
         .stderr(predicate::str::contains("is not empty"));
 
     assert_eq!(
-        std::fs::read(folder.join("network-monitor.toml")).unwrap(),
+        std::fs::read(folder.join("uptime-monitor.toml")).unwrap(),
         first
     );
 }
@@ -104,7 +107,7 @@ fn init_refuses_a_second_run() {
 #[test]
 fn init_does_not_read_the_default_configuration() {
     let root = tempfile::tempdir().unwrap();
-    let invalid = root.path().join("network-monitor.toml");
+    let invalid = root.path().join("uptime-monitor.toml");
     std::fs::write(&invalid, "not = [valid").unwrap();
     let folder = root.path().join("fresh");
 
@@ -155,7 +158,7 @@ fn init_accepts_an_empty_existing_folder() {
         .assert()
         .success();
 
-    assert!(folder.join("network-monitor.toml").is_file());
+    assert!(folder.join("uptime-monitor.toml").is_file());
 }
 
 #[test]
@@ -169,7 +172,7 @@ fn init_accepts_a_path_with_spaces() {
         .assert()
         .success();
 
-    assert!(folder.join("network-monitor.toml").is_file());
+    assert!(folder.join("uptime-monitor.toml").is_file());
 }
 
 #[test]
@@ -182,7 +185,7 @@ fn the_scaffolded_folder_is_checked_from_another_directory() {
         .assert()
         .success();
 
-    let config = folder.join("network-monitor.toml");
+    let config = folder.join("uptime-monitor.toml");
     monitor(root.path())
         .args(["check", "--config", config.to_str().unwrap()])
         .assert()

@@ -26,7 +26,7 @@ reload.
 
 The first mount that holds the file answers, so `/assets/target.jpg` still comes from the
 page and `/assets/icon.svg` falls through to the icon directory. Standard library only, one
-file, no build step — like `export2nm.py` next to it.
+file, no build step — like `convert_heartbeats.py` next to it.
 """
 
 import argparse

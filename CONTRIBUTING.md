@@ -1,6 +1,6 @@
-# Contributing to network-monitor
+# Contributing to uptime-monitor
 
-`network-monitor` is small, operational software: its value is that its behaviour is predictable, its storage is tiny, and it runs unchanged on a laptop, in a container, and on a NAS. Contributions are judged on those properties first.
+`uptime-monitor` is small, operational software: its value is that its behaviour is predictable, its storage is tiny, and it runs unchanged on a laptop, in a container, and on a NAS. Contributions are judged on those properties first.
 
 Every text artefact — code, comments, identifiers, documentation, commit messages, issues — is written in English.
 

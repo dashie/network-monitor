@@ -1,6 +1,6 @@
 [package]
-name = "network-monitor"
-version = "0.12.0"
+name = "uptime-monitor"
+version = "0.13.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Event-based reachability monitor with ICMP, TCP, DNS, and HTTP checks and an embedded SQLite history"
@@ -8,11 +8,11 @@ license = "MIT"
 publish = false
 
 [[bin]]
-name = "network-monitor"
+name = "uptime-monitor"
 path = "src/main.rs"
 
 [lib]
-name = "network_monitor"
+name = "uptime_monitor"
 path = "src/lib.rs"
 
 [dependencies]

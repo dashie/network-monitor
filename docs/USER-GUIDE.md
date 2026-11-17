@@ -1,6 +1,6 @@
-# User Guide — network-monitor
+# User Guide — uptime-monitor
 
-The manual for the person who installs, configures, and operates `network-monitor`: what a
+The manual for the person who installs, configures, and operates `uptime-monitor`: what a
 target is, how to write the configuration for the four check methods, how to run the tool and
 read its page, how to back up and upgrade, and what to do when something does not work. Every
 term is used in one precise sense, and every rule this guide relies on is restated where it is
@@ -21,7 +21,7 @@ needed, so the manual can be read and distributed on its own.
 
 ## What the tool does
 
-`network-monitor` probes each target on an interval and records in SQLite only when the answer
+`uptime-monitor` probes each target on an interval and records in SQLite only when the answer
 changes, so history grows with incidents, not probes. A target is one check — ICMP, TCP, DNS,
 or HTTP — with its own key; it is `unknown`, `up`, or `down`, and a local failure changes nothing.
 
@@ -43,7 +43,7 @@ consulted.
 
 ```bash
 cargo build --release
-sudo ./target/release/network-monitor monitor --config ./network-monitor.toml
+sudo ./target/release/uptime-monitor monitor --config ./uptime-monitor.toml
 ```
 
 A static Linux binary is produced by
@@ -57,32 +57,32 @@ directory, and the event-log directory. The active target is a TCP check that ne
 privilege, and the ICMP example is commented until you uncomment it and run with `sudo`.
 
 ```bash
-network-monitor init ./monitor
+uptime-monitor init ./monitor
 cd ./monitor
-network-monitor check --config network-monitor.toml
-network-monitor monitor --config network-monitor.toml --listen 127.0.0.1:8642
+uptime-monitor check --config uptime-monitor.toml
+uptime-monitor monitor --config uptime-monitor.toml --listen 127.0.0.1:8642
 ```
 
 `init` refuses a folder that is not empty and never overwrites a file. If it stops with an
 error after creating part of the folder, remove the folder and run it again. The folder holds
-`network-monitor.toml`, `data/` for `events.db`, and `logs/` for `events.log`. The relative
+`uptime-monitor.toml`, `data/` for `events.db`, and `logs/` for `events.log`. The relative
 paths resolve against the configuration file, so the folder can be run from any working
 directory; the `cd` is only a convenience. `check`
 creates `logs/events.log` (the `events` `logfile` channel) and leaves the database to the first
 monitor start. The diagnostic log stays on stderr. The generated file contains no secret; a
 Telegram or webhook token added later is read from the file only and should be protected, as the
 notification section states. The binary is the one on `PATH`; in a source checkout, use
-`./target/release/network-monitor`. Open `http://127.0.0.1:8642/` for the page.
+`./target/release/uptime-monitor`. Open `http://127.0.0.1:8642/` for the page.
 
 ### Container
 
 ```bash
-docker run -d --name network-monitor \
+docker run -d --name uptime-monitor \
   --cap-drop ALL --cap-add NET_RAW --network host \
-  -v network-monitor-data:/var/lib/network-monitor \
-  -v "$PWD/network-monitor.toml:/etc/network-monitor/config.toml:ro" \
-  network-monitor:dev \
-  monitor --config /etc/network-monitor/config.toml \
+  -v uptime-monitor-data:/var/lib/uptime-monitor \
+  -v "$PWD/uptime-monitor.toml:/etc/uptime-monitor/config.toml:ro" \
+  uptime-monitor:dev \
+  monitor --config /etc/uptime-monitor/config.toml \
   --listen 0.0.0.0:8642
 ```
 
@@ -92,17 +92,17 @@ docker run -d --name network-monitor \
   and what makes the page reachable on the host address without publishing a port. Host
   networking is Linux only.
 - The configuration may also be baked into the image, with
-  `docker build --build-arg CONFIG=<file> -t network-monitor:dev .`, or carried by a compose
+  `docker build --build-arg CONFIG=<file> -t uptime-monitor:dev .`, or carried by a compose
   project in the `content` of a `configs` entry. Container Station on a QNAP launches the same
   image, so the flags above — host networking, the volume, the capabilities — are all it needs.
 
 ## Quick start
 
 ```toml
-# network-monitor.toml
+# uptime-monitor.toml
 interval_ms = 5000
 timeout_ms = 2000
-database = "/var/lib/network-monitor/events.db"
+database = "/var/lib/uptime-monitor/events.db"
 
 [[targets]]
 method = "icmp"
@@ -130,8 +130,8 @@ label = "example-health"
 ```
 
 ```bash
-sudo network-monitor monitor --config ./network-monitor.toml --listen 0.0.0.0:8642
-network-monitor query state --config ./network-monitor.toml     # another shell
+sudo uptime-monitor monitor --config ./uptime-monitor.toml --listen 0.0.0.0:8642
+uptime-monitor query state --config ./uptime-monitor.toml     # another shell
 ```
 
 Open `http://<host>:8642/` for the page. Every option above can also be given on the command
@@ -142,7 +142,7 @@ line, and `--show-config` prints the result of merging the two.
 ### Layers
 
 `command line > file > built-in default`. `--config <path>` must exist; without the option
-`./network-monitor.toml` is read when present and skipped otherwise. A changed file is re-read
+`./uptime-monitor.toml` is read when present and skipped otherwise. A changed file is re-read
 within one second while the monitor runs and applied without a restart; a file that does not
 parse is rejected with a warning and the running configuration stays in effect. A changed
 `database` path or `listen` address is reported and used from the next start.
@@ -169,7 +169,7 @@ and `.gitignore` excludes `*.active` and `*.bak` so a working copy cannot commit
 |---|---|---|
 | `interval_ms` | `5000` | Pause after a probe, per target |
 | `timeout_ms` | `2000` | Maximum wait for an answer, per probe |
-| `database` | `./network-monitor.db` | SQLite file; a relative path is relative to this file. Keep it on a local filesystem. Ignored by `simulate`, which reads and writes no database |
+| `database` | `./uptime-monitor.db` | SQLite file; a relative path is relative to this file. Keep it on a local filesystem. Ignored by `simulate`, which reads and writes no database |
 | `listen` | none | `ADDRESS:PORT`, the page address `monitor` binds when `--listen` is absent; `--listen` wins. Without either, no page is served. `serve` and `simulate` ignore this key |
 | `retention_days` | `0` | Delete events older than this; `0` keeps everything |
 | `notify` | empty | Channel names enabled for global events and as the default for every target; see [Notifications](#notifications) |
@@ -325,7 +325,7 @@ Setting it up, from an empty Telegram account:
 [[notification]]
 name = "hook"
 type = "webhook"
-url = "https://automation.example.test/hooks/network-monitor"
+url = "https://automation.example.test/hooks/uptime-monitor"
 token = "replace-me"
 ```
 
@@ -371,7 +371,7 @@ error name only `scheme://host[:port]`.
 [[notification]]
 name = "audit"
 type = "logfile"
-filename = "/var/log/network-monitor/audit.log"
+filename = "/var/log/uptime-monitor/audit.log"
 logger = "notification"
 level = "info"
 format = "jsonl"
@@ -458,8 +458,8 @@ Cause: ICMP.NO_REPLY — no reply within 2000 ms
 The startup message states one fact per line and closes with the instant:
 
 ```text
-READY network-monitor
-Config: /etc/network-monitor/network-monitor-qubo.toml
+READY uptime-monitor
+Config: /etc/uptime-monitor/uptime-monitor-qubo.toml
 Targets: 2
 - icmp://192.168.1.1
 - tcp://1.1.1.1:443
@@ -532,8 +532,8 @@ configuration and never starts a pager or another process; `less` and `mdcat` ar
 tools you pipe to:
 
 ```bash
-network-monitor manual | less -R
-network-monitor manual | mdcat --ansi | less -R
+uptime-monitor manual | less -R
+uptime-monitor manual | mdcat --ansi | less -R
 ```
 
 ### Verifying a configuration (`check`)
@@ -542,13 +542,13 @@ network-monitor manual | mdcat --ansi | less -R
 writing:
 
 ```bash
-network-monitor check --config ./network-monitor.toml --listen 0.0.0.0:8642
+uptime-monitor check --config ./uptime-monitor.toml --listen 0.0.0.0:8642
 ```
 
 ```
 ok    targets            6 target(s)
 ok    interface          icmp://1.1.1.1 eth0
-warn  database           ./network-monitor.db does not exist yet; the next start creates it
+warn  database           ./uptime-monitor.db does not exist yet; the next start creates it
 warn  listen             0.0.0.0:8642 is in use — the running monitor?
 ok    channel            none declared
 warn  active             no snapshot yet
@@ -582,7 +582,7 @@ runs no probe, opens no database, and writes no file. `--listen` remains require
 file's `listen` key is ignored.
 
 ```bash
-network-monitor simulate --listen 127.0.0.1:8660 --history 30d --seed 0
+uptime-monitor simulate --listen 127.0.0.1:8660 --history 30d --seed 0
 ```
 
 | Option | Default | Meaning |
@@ -847,15 +847,15 @@ preflight, so a dashboard on another origin reads the same public history.
 ### Back up and restore
 
 ```bash
-sqlite3 network-monitor.db ".backup 'backup.db'"      # while it runs
-network-monitor query events --format json > dump.json
+sqlite3 uptime-monitor.db ".backup 'backup.db'"      # while it runs
+uptime-monitor query events --format json > dump.json
 curl -sO http://nas:8642/export/faults.csv.gz   # snapshot from the page
 ```
 
 Restoring: stop the process, put the database back, start it. Restoring from the CSV:
 
 ```bash
-network-monitor import faults-20261109.csv.gz --database ./events.db
+uptime-monitor import faults-20261109.csv.gz --database ./events.db
 ```
 
 Import merges by default; `--replace-window` replaces what the archive covers and keeps the
@@ -883,6 +883,28 @@ import reads plain `http://` URLs; download an `https` archive with `curl` first
    that must stay where it is absolute. The same `--show-config` states the resolved `listen`
    address, a new key that `monitor` uses when `--listen` is absent.
 
+6. **From 0.12 to 0.13** the tool is renamed `uptime-monitor`. The schema is unchanged and no
+   event is migrated: stop the process and rename the files, or keep explicit paths.
+
+   ```bash
+   mv network-monitor.toml uptime-monitor.toml
+   mv network-monitor.db uptime-monitor.db    # stop the process first; move -wal and -shm too
+   ```
+
+   Rename the unit file and its `ExecStart` path. For a container deployment, rename the image,
+   container, configuration mount (`/etc/uptime-monitor/config.toml`), data directory
+   (`/var/lib/uptime-monitor`), and named volume, then copy the old volume once before starting
+   the new definition:
+
+   ```bash
+   docker volume create uptime-monitor-data
+   docker run --rm -v network-monitor-data:/from:ro \
+     -v uptime-monitor-data:/to alpine cp -a /from/. /to/
+   ```
+
+   Keep the old volume until the history is verified. A configuration or database path stated
+   explicitly keeps working under any name; only the defaults change.
+
 `serve` and `query` never write, so they open a 0.2 database as it is: its rows state no cause
 until a `monitor` or an `import` has upgraded the file. That also means the page runs against a
 snapshot, a backup, or a volume mounted read-only.
@@ -898,13 +920,13 @@ after it probes:
    absolute paths in a candidate that lives in another directory. A candidate that states a
    different `listen` address binds that address while it runs, and the promoted file keeps it
    for the next start.
-2. Verify it: `network-monitor check --config ./next.toml --listen 0.0.0.0:8642`. A `fail` line
+2. Verify it: `uptime-monitor check --config ./next.toml --listen 0.0.0.0:8642`. A `fail` line
    names the reason; fix it before going on.
 3. Add `--try ./next.toml` to the start script or the unit file and restart, or run the process
    with it once. The monitor starts with the candidate.
 4. When every target has completed its first probe without a local failure, the candidate is
-   copied over `network-monitor.toml`, the previous file is kept as
-   `network-monitor.toml.<UTC timestamp>.bak`, and one `CONFIG` notification is sent. A first
+   copied over `uptime-monitor.toml`, the previous file is kept as
+   `uptime-monitor.toml.<UTC timestamp>.bak`, and one `CONFIG` notification is sent. A first
    probe that fails locally cancels the promotion: the process logs the rejection, swaps back
    to the main configuration in place, and leaves both files untouched.
 5. `--try` may stay in the unit file permanently: a missing candidate is a quiet `INFO` no-op,
@@ -920,11 +942,11 @@ The process rejects a broken edit and keeps running the previous configuration *
 but the file on disk still holds the broken content. The active snapshot is the way back:
 
 ```bash
-cp network-monitor.toml.active network-monitor.toml   # the reload applies it within a second
+cp uptime-monitor.toml.active uptime-monitor.toml   # the reload applies it within a second
 ```
 
 A restart with the broken file still in place fails, and the error names
-`network-monitor.toml.active` and its age. Either copy the snapshot over the file, or start with
+`uptime-monitor.toml.active` and its age. Either copy the snapshot over the file, or start with
 `monitor --fallback-to-active`: the process logs one `WARN`, starts from the snapshot, and keeps
 watching the main file, so fixing it applies through the normal reload. The flag runs the same
 verification `check` runs on the main file (without `--listen` and `--probe`), so it also covers a
@@ -968,16 +990,16 @@ and is not a file of the tool.
 |---|---|---|
 | A terminal | stderr, to the terminal | Nothing to rotate |
 | `systemd` | the journal (`StandardOutput=journal`, the default) | `journald` |
-| `systemd` with `append:` | `/var/log/network-monitor/monitor.log` | `logrotate` |
+| `systemd` with `append:` | `/var/log/uptime-monitor/monitor.log` | `logrotate` |
 | A shell redirect, `2>>` | the file the shell opened | `logrotate`, with `copytruncate` |
 | A container | the engine's log driver (`docker logs`) | the driver's `max-size`/`max-file` |
 
 A unit that leaves rotation to the journal, and the host-wide bounds it uses:
 
 ```ini
-# /etc/systemd/system/network-monitor.service
+# /etc/systemd/system/uptime-monitor.service
 [Service]
-ExecStart=/usr/local/bin/network-monitor monitor --config /etc/network-monitor/config.toml
+ExecStart=/usr/local/bin/uptime-monitor monitor --config /etc/uptime-monitor/config.toml
 # stderr goes to the journal, which owns rotation:
 #   /etc/systemd/journald.conf
 #   SystemMaxUse=500M
@@ -987,13 +1009,13 @@ StandardOutput=journal
 StandardError=journal
 ```
 
-Only if the unit appends to a file (`StandardOutput=append:/var/log/network-monitor/monitor.log`)
-or the command is started with `2>> /var/log/network-monitor/monitor.log` does `logrotate` own
+Only if the unit appends to a file (`StandardOutput=append:/var/log/uptime-monitor/monitor.log`)
+or the command is started with `2>> /var/log/uptime-monitor/monitor.log` does `logrotate` own
 the file:
 
 ```text
-# /etc/logrotate.d/network-monitor  — only for `StandardOutput=append:` or a shell redirect
-/var/log/network-monitor/monitor.log {
+# /etc/logrotate.d/uptime-monitor  — only for `StandardOutput=append:` or a shell redirect
+/var/log/uptime-monitor/monitor.log {
     size 10M
     rotate 3
     compress
@@ -1012,10 +1034,10 @@ In a container the engine keeps the output of stdout and stderr, so bound the dr
 compose project does it for you; a bare `docker run` needs the same two options:
 
 ```bash
-docker run --log-opt max-size=10m --log-opt max-file=3 … network-monitor:dev monitor …
+docker run --log-opt max-size=10m --log-opt max-file=3 … uptime-monitor:dev monitor …
 ```
 
-A reader that follows the current file (`tail -F /var/log/network-monitor/audit.log`) is
+A reader that follows the current file (`tail -F /var/log/uptime-monitor/audit.log`) is
 handed the file at its new name, then the new file when the channel recreates it, so a
 rotation is one more file to follow and no line disappears from the stream.
 
@@ -1029,14 +1051,14 @@ rotation is one more file to follow and no line disappears from the stream.
 | A `fail` line from `check` | The configuration would not start, and the subject names the condition: `targets` (no target), `interface` (a name that does not exist on this host), `database` (cannot be read, or a schema newer than the binary), `listen` (an address that cannot be bound), `channel` (a channel that cannot open or verify), `probe` (a local failure such as a missing `NET_RAW`). The detail names the key, the file, or the reason. |
 | `Operation not permitted` at startup | ICMP needs `root` or `CAP_NET_RAW`. Drop `icmp` targets, or grant the capability. `check --probe` reports the same condition as a `fail probe` line before the restart. |
 | A candidate is never promoted | The first probe of a target failed locally, so the promotion was cancelled and the main configuration stayed in effect. The log states the target and the reason (`candidate configuration … cannot probe: …`); run `check --probe` on the candidate to see it before the next attempt. |
-| The start fails and names `network-monitor.toml.active` | The main file is broken; the snapshot is the last configuration that started. Copy it back, or add `--fallback-to-active` to start from it and fix the main file afterwards. |
-| `network-monitor.toml.active` is older than my last accepted edit | By design: the snapshot is written once per start, after a clean first probe round. An accepted hot edit is not in it until the next restart, and that is what makes it a recovery point rather than a moving target. |
+| The start fails and names `uptime-monitor.toml.active` | The main file is broken; the snapshot is the last configuration that started. Copy it back, or add `--fallback-to-active` to start from it and fix the main file afterwards. |
+| `uptime-monitor.toml.active` is older than my last accepted edit | By design: the snapshot is written once per start, after a clean first probe round. An accepted hot edit is not in it until the next restart, and that is what makes it a recovery point rather than a moving target. |
 | `no targets configured` | Add `[[targets]]` or `--target`; an empty list is refused. |
 | `invalid configuration: targets[0].ip: does not apply to the tcp method` | A key of another method. Each target lists only the keys of its own method. |
 | `duplicate target tcp://1.1.1.1:443` | The same key twice. Two methods or two ports are two targets. |
 | `the event database ... does not exist` on the page | `serve` reads a database that must exist; start `monitor` once, or point `--database` at the right file. |
 | `Is a directory` on start | A bind mount whose source file did not exist: create the file before `docker compose up`. |
-| `database error: attempt to write a readonly database` | The database on the volume belongs to another user — typically one copied in from another machine — and `cap_drop: ALL` also drops `CAP_DAC_OVERRIDE`, so root inside the container cannot write it: `docker run --rm -v network-monitor-data:/data alpine chown -R 0:0 /data`. |
+| `database error: attempt to write a readonly database` | The database on the volume belongs to another user — typically one copied in from another machine — and `cap_drop: ALL` also drops `CAP_DAC_OVERRIDE`, so root inside the container cannot write it: `docker run --rm -v uptime-monitor-data:/data alpine chown -R 0:0 /data`. |
 | A `dns` target without `resolver` flaps | The system resolver is unreachable and the platform reports it as a missing name. Use `dns://name@server`. |
 | An `http` target is always `down` while `curl` works | The status is outside `expect_status` (a 3xx below the default? a 401?), or a TLS-inspecting proxy is at work and its root is not in the binary. |
 | The page shows two lanes for one host | The database carries both a bare address and its `icmp://` key (an older binary wrote after the rewrite). Import a backup or merge the rows. |

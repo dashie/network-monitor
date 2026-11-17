@@ -5,15 +5,15 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use network_monitor::config::{Config, FileConfig, FileTarget, Overrides};
-use network_monitor::monitor;
-use network_monitor::notify::fake::FakeNotifier;
-use network_monitor::notify::Notifier;
-use network_monitor::notify::{Event, Message};
-use network_monitor::probe::fake::{down, up, FakeProbe};
-use network_monitor::probe::{Code, Details, Endpoint, Probe, ProbeError};
-use network_monitor::shutdown::Shutdown;
-use network_monitor::store::{EventFilter, Store, TargetState};
+use uptime_monitor::config::{Config, FileConfig, FileTarget, Overrides};
+use uptime_monitor::monitor;
+use uptime_monitor::notify::fake::FakeNotifier;
+use uptime_monitor::notify::Notifier;
+use uptime_monitor::notify::{Event, Message};
+use uptime_monitor::probe::fake::{down, up, FakeProbe};
+use uptime_monitor::probe::{Code, Details, Endpoint, Probe, ProbeError};
+use uptime_monitor::shutdown::Shutdown;
+use uptime_monitor::store::{EventFilter, Store, TargetState};
 
 /// The endpoint and the timeout a direct fake call uses.
 fn loopback() -> Endpoint {
@@ -351,7 +351,7 @@ fn the_startup_announcement_reaches_the_channel_once() {
     let notifier = Arc::new(FakeNotifier::new());
     let sink: Arc<dyn Notifier> = notifier.clone();
     let startup = Message::startup(
-        Some("/etc/network-monitor.toml".to_string()),
+        Some("/etc/uptime-monitor.toml".to_string()),
         vec!["icmp://127.0.0.1".to_string()],
         None,
         0,
@@ -392,13 +392,13 @@ fn the_startup_announcement_reaches_the_channel_once() {
         .filter(|message| message.event_name() == "startup")
         .collect();
     assert_eq!(startup.len(), 1, "one startup message per start");
-    assert!(startup[0].text().starts_with("READY network-monitor\n"));
+    assert!(startup[0].text().starts_with("READY uptime-monitor\n"));
     assert!(startup[0]
         .text()
-        .contains("Config: /etc/network-monitor.toml"));
+        .contains("Config: /etc/uptime-monitor.toml"));
 }
 
-fn target_of(message: &Message) -> &network_monitor::notify::TargetRef {
+fn target_of(message: &Message) -> &uptime_monitor::notify::TargetRef {
     match &message.event {
         Event::TargetUp { target } | Event::TargetDown { target, .. } => target,
         other => panic!("not a target event: {other:?}"),

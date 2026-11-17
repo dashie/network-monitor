@@ -44,14 +44,14 @@ tmp/*
 !.gitkeep
 
 # Local configuration file, not to be committed
-# Create a copy from network-monitor.sample.toml to create a local
+# Create a copy from uptime-monitor.sample.toml to create a local
 # configuration file if needed
-network-monitor.toml
+uptime-monitor.toml
 
 # Event database and its write-ahead log, wherever a local run leaves them
-network-monitor.db
-network-monitor.db-shm
-network-monitor.db-wal
+uptime-monitor.db
+uptime-monitor.db-shm
+uptime-monitor.db-wal
 
 # Configuration backups and the active snapshot: both carry the secrets of the
 # configuration file they copy.

@@ -1,8 +1,8 @@
-# network-monitor configuration.
+# uptime-monitor configuration.
 #
 # Every key below can also be given on the command line, where it wins over this
 # file (FR-2). The effective configuration after the merge is printed by
-# `network-monitor --show-config`.
+# `uptime-monitor --show-config`.
 
 # Notification channels (FR-25): declare a channel once with a unique `name`, then
 # enable it by name. The root `notify` list enables channels for global events and as
@@ -23,13 +23,13 @@
 # [[notification]]
 # name = "hook"
 # type = "webhook"
-# url = "https://automation.example.test/hooks/network-monitor"
+# url = "https://automation.example.test/hooks/uptime-monitor"
 # token = "replace-me"          # optional, and only with an https URL
 #
 # [[notification]]
 # name = "audit"
 # type = "logfile"
-# filename = "/var/log/network-monitor/audit.log"
+# filename = "/var/log/uptime-monitor/audit.log"
 # logger = "notification"
 # level = "info"
 # format = "jsonl"              # or "text"
@@ -50,7 +50,7 @@ timeout_ms = 2000
 
 # SQLite event database. A relative path is relative to this file, not to the working
 # directory. Keep it on a local filesystem: WAL is not supported on network shares.
-database = "./tmp/network-monitor.db"
+database = "./tmp/uptime-monitor.db"
 
 # Delete events older than this many days. 0 keeps every event.
 retention_days = 0

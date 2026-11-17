@@ -451,7 +451,7 @@ pub enum StoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error("the event database {path} does not exist; start the monitor first")]
     Missing { path: PathBuf },
-    #[error("the event database {path} was not initialized by network-monitor")]
+    #[error("the event database {path} was not initialized by uptime-monitor")]
     Uninitialized { path: PathBuf },
     #[error(
         "the event database uses schema version {found}, newer than the supported version \

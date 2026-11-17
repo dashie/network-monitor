@@ -450,7 +450,7 @@ fn fetch(url: &str) -> Result<HttpBody, ImportError> {
     write!(
         request,
         "GET {path} HTTP/1.1\r\nHost: {authority}\r\nAccept-Encoding: identity\r\n\
-         User-Agent: network-monitor\r\nConnection: close\r\n\r\n"
+         User-Agent: uptime-monitor\r\nConnection: close\r\n\r\n"
     )?;
 
     let mut reader = BufReader::new(stream);

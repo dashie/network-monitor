@@ -216,7 +216,7 @@ impl Message {
                 targets,
                 web,
             } => {
-                let mut text = String::from("READY network-monitor\n");
+                let mut text = String::from("READY uptime-monitor\n");
                 text.push_str(&format!(
                     "Config: {}\n",
                     config.as_deref().unwrap_or("none")
@@ -229,7 +229,7 @@ impl Message {
                 text.push_str(&instant);
                 text
             }
-            Event::Shutdown => format!("STOPPED network-monitor\n{instant}"),
+            Event::Shutdown => format!("STOPPED uptime-monitor\n{instant}"),
             Event::ConfigReload { applied, detail } => {
                 if *applied {
                     format!("CONFIG applied from {detail}\n{instant}")
@@ -262,12 +262,12 @@ impl Message {
                 targets,
                 web,
             } => format!(
-                "READY network-monitor config={} targets={} web={}",
+                "READY uptime-monitor config={} targets={} web={}",
                 config.as_deref().unwrap_or("none"),
                 targets.len(),
                 web.as_deref().unwrap_or("none")
             ),
-            Event::Shutdown => "STOPPED network-monitor".to_string(),
+            Event::Shutdown => "STOPPED uptime-monitor".to_string(),
             Event::ConfigReload { applied, detail } => {
                 if *applied {
                     format!("CONFIG applied from {detail}")
@@ -384,7 +384,7 @@ mod tests {
 
     fn startup() -> Message {
         Message::startup(
-            Some("/etc/network-monitor.toml".to_string()),
+            Some("/etc/uptime-monitor.toml".to_string()),
             vec![
                 "icmp://192.168.1.1".to_string(),
                 "tcp://1.1.1.1:443".to_string(),
@@ -400,7 +400,7 @@ mod tests {
             up(),
             startup(),
             Message::shutdown(AT_MS),
-            Message::config_reload(true, "/etc/network-monitor.toml", AT_MS),
+            Message::config_reload(true, "/etc/uptime-monitor.toml", AT_MS),
             Message::config_reload(false, "invalid configuration: interval_ms", AT_MS),
             Message::channel_started("audit", Kind::LogFile, AT_MS),
         ]
@@ -425,8 +425,8 @@ mod tests {
     fn the_startup_block_states_one_fact_per_line() {
         assert_eq!(
             startup().text(),
-            "READY network-monitor\n\
-             Config: /etc/network-monitor.toml\n\
+            "READY uptime-monitor\n\
+             Config: /etc/uptime-monitor.toml\n\
              Targets: 2\n\
              - icmp://192.168.1.1\n\
              - tcp://1.1.1.1:443\n\
@@ -439,11 +439,11 @@ mod tests {
     fn every_global_event_has_a_text() {
         assert_eq!(
             Message::shutdown(AT_MS).text(),
-            "STOPPED network-monitor\n2025-11-24T16:00:00.000Z"
+            "STOPPED uptime-monitor\n2025-11-24T16:00:00.000Z"
         );
         assert_eq!(
-            Message::config_reload(true, "/etc/network-monitor.toml", AT_MS).text(),
-            "CONFIG applied from /etc/network-monitor.toml\n2025-11-24T16:00:00.000Z"
+            Message::config_reload(true, "/etc/uptime-monitor.toml", AT_MS).text(),
+            "CONFIG applied from /etc/uptime-monitor.toml\n2025-11-24T16:00:00.000Z"
         );
         assert_eq!(
             Message::config_reload(false, "no targets configured", AT_MS).text(),
@@ -537,7 +537,7 @@ mod tests {
             startup().json(None),
             "{\"schema\":1,\"event\":\"startup\",\
              \"occurred_at\":\"2025-11-24T16:00:00.000Z\",\
-             \"startup\":{\"config\":\"/etc/network-monitor.toml\",\
+             \"startup\":{\"config\":\"/etc/uptime-monitor.toml\",\
              \"targets\":[\"icmp://192.168.1.1\",\"tcp://1.1.1.1:443\"],\
              \"web\":\"http://0.0.0.0:8642/\"}}"
         );

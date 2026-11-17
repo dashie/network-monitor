@@ -63,7 +63,7 @@ impl Sim {
             arguments.push("--target".to_string());
             arguments.push(target.to_string());
         }
-        let child = Command::new(assert_cmd::cargo::cargo_bin("network-monitor"))
+        let child = Command::new(assert_cmd::cargo::cargo_bin("uptime-monitor"))
             .args(&arguments)
             .current_dir(directory.path())
             .stdin(Stdio::null())

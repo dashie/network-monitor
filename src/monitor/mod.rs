@@ -755,14 +755,14 @@ mod tests {
     fn the_startup_message_names_the_file_the_targets_and_the_page() {
         let text = startup_event(
             &config(),
-            Some(Path::new("/etc/network-monitor.toml")),
+            Some(Path::new("/etc/uptime-monitor.toml")),
             Some("0.0.0.0:8642"),
         )
         .text();
 
         assert!(
             text.starts_with(
-                "READY network-monitor\nConfig: /etc/network-monitor.toml\nTargets: 2\n"
+                "READY uptime-monitor\nConfig: /etc/uptime-monitor.toml\nTargets: 2\n"
             ),
             "unexpected: {text}"
         );
@@ -814,7 +814,7 @@ mod tests {
         use crate::probe::{Code, Details, ProbeError};
 
         let directory = tempfile::tempdir().unwrap();
-        let main_path = directory.path().join("network-monitor.toml");
+        let main_path = directory.path().join("uptime-monitor.toml");
         std::fs::write(&main_path, b"interval_ms = 50\n").unwrap();
         let original = std::fs::read(&main_path).unwrap();
         let database = directory.path().join("events.db");

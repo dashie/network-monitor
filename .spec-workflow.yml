@@ -20,7 +20,7 @@ docs:
 
 version:
   file: Cargo.toml
-  field: version
+  field: package.version
   bump: plan
 
 git:

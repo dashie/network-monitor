@@ -1,4 +1,4 @@
-# Architecture Decision Records — network-monitor
+# Architecture Decision Records — uptime-monitor
 
 An architecture decision record (ADR) captures a decision together with the context
 that made it necessary and the consequences it creates. Records are append-only: a
@@ -7,6 +7,10 @@ when a decision is costly to reverse, affects more than one component, or constr
 future work.
 
 Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
+
+This file is append-only. Records written before ADR-0040 use the name the tool had
+when they were written (`network-monitor`); the current name is `uptime-monitor`,
+decided in ADR-0040.
 
 ## Index
 
@@ -51,6 +55,7 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0037 | Embed the user guide and print it as Markdown, without a renderer | accepted | 2026-11-17 | `include_str!` of `docs/USER-GUIDE.md`; `manual` with `man` alias; raw Markdown to stdout; TTY-only hint on stderr; no renderer, pager, subprocess, man page, or new dependency |
 | ADR-0038 | Resolve a configuration file's relative paths against the file | accepted | 2026-11-17 | File paths use the file's directory, flag paths use the working directory, absolute paths are unchanged; rebasing happens once in `config::parse_at` |
 | ADR-0039 | Let the configuration file state the listen address | accepted | 2026-11-17 | Top-level `listen`; `monitor` binds it when the flag is absent, `check` verifies it, `serve`/`simulate` ignore it; a changed value needs a restart |
+| ADR-0040 | Rename the tool to uptime-monitor | accepted | 2026-11-17 | `uptime-monitor` names the tool, the binary, the crate, the config and database defaults, and the deployment; a hard cut with no alias and no storage change |
 
 ## Records
 
@@ -1942,3 +1947,64 @@ page-only commands with their own flag and, for `serve`, their own default.
 - **Extend the key to `serve` and `simulate`:** rejected for this change — `serve` has a
   documented default and `simulate` deliberately requires an explicit address (ADR-0032).
 - **An environment variable:** rejected — there is no environment-variable layer (BR-3).
+
+## ADR-0040 — Rename the tool to uptime-monitor
+
+**Status:** accepted · **Date:** 2026-11-17
+
+### Context
+
+`network-monitor` describes one transport among the four the tool probes: ICMP, TCP, DNS, and
+HTTP. The tool's value is not the network layer it uses but the record of when a target stops
+and starts answering, and the name appears in the binary, the Cargo package, the configuration
+file, the database default, the container image, the unit file, and the public URL. Every new
+page and runbook had to explain that a "network monitor" also checks HTTP status codes and DNS
+answers. The project is alpha and has one operator's deployment, so the rename is cheapest now.
+
+### Decision
+
+1. `uptime-monitor` is the name of the tool, the executable, the Cargo package, and the public
+   identity. The library crate is `uptime_monitor`, the default configuration file is
+   `uptime-monitor.toml`, and the default database is `uptime-monitor.db`.
+2. The rename is a hard cut: no second binary name, no alias symlink, no fallback to the old
+   file names, and no environment-variable shim. An existing installation renames the files or
+   keeps stating its paths explicitly; the user guide documents both.
+3. The schema, the storage format, the REST routes, the configuration keys, and every behaviour
+   are unchanged. An existing database is readable under any file name, and the binary migrates
+   no file at startup.
+4. The deployment names change together: the image and container `uptime-monitor`, the
+   configuration mount `/etc/uptime-monitor/config.toml`, the data directory
+   `/var/lib/uptime-monitor`, and the volume `uptime-monitor-data`. A deployment that carries
+   the old name copies the old volume once, keeps it until the history is verified, and then
+   removes it.
+5. The landing page and its crawl files state the new name and the new URL. Renaming the Gitea
+   repository, the GitHub mirror, and the local checkout is an operator step, not part of the
+   binary's behaviour.
+6. Earlier records in this file and the plans in `tech-plans/archive/` keep the name they were
+   written with; this record is the current naming authority.
+
+### Consequences
+
+- For a 0.12 user the binary name, the default configuration and database names, the unit file,
+  the image, the container, the mount, the data directory, and the volume all change at once.
+  The upgrade steps make this explicit and no event is lost, because the schema is untouched.
+- The old name survives only where it is a historical record (ADR-0001 to ADR-0039, archived
+  plans) or a migration instruction; it is not a supported interface.
+- The name is generic: other products use "uptime" for availability percentages. The tagline
+  stays "Reachability monitoring" and the page states that the tool records transitions, which
+  is the differentiator the name alone does not carry.
+- Links that search for the product now use "uptime" rather than "network", which matches what
+  an operator types when looking for this capability.
+
+### Alternatives considered
+
+- **Keep `network-monitor`:** rejected — it names one of the four methods and forces the same
+  correction in every new document.
+- **Keep a `network-monitor` alias binary and fall back to the old file names:** rejected — it
+  creates two permanent vocabularies, doubles the surface every test and document must cover,
+  and hides the change instead of stating it.
+- **Rename the old files automatically on first start:** rejected — a startup that silently
+  renames an operator's configuration and database is a surprising write, is hard to undo, and
+  contradicts the explicit `init` and configuration-promotion model.
+- **`uptime-log`, `reachwatch`, `blip`:** considered; `uptime-monitor` is the clearest to a new
+  user, and the tagline carries the precision the name lacks.

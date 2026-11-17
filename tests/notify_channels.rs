@@ -7,14 +7,14 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
-use network_monitor::config::{
+use uptime_monitor::config::{
     parse, ChannelSettings, Config, LogFile, LogFormat, NotificationConfig, Overrides, Webhook,
 };
-use network_monitor::logging::Level;
-use network_monitor::notify::message::{Cause, TargetRef};
-use network_monitor::notify::{start, Message};
-use network_monitor::probe::http::parse_url;
-use network_monitor::shutdown::Shutdown;
+use uptime_monitor::logging::Level;
+use uptime_monitor::notify::message::{Cause, TargetRef};
+use uptime_monitor::notify::{start, Message};
+use uptime_monitor::probe::http::parse_url;
+use uptime_monitor::shutdown::Shutdown;
 
 const KEY: &str = "icmp://1.1.1.1";
 
@@ -222,7 +222,7 @@ fn a_rotating_log_file_keeps_max_files_while_the_monitor_runs() {
 #[test]
 fn show_config_round_trips_the_rotation_keys() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("network-monitor.toml");
+    let path = directory.path().join("uptime-monitor.toml");
     std::fs::write(
         &path,
         concat!(
@@ -239,7 +239,7 @@ fn show_config_round_trips_the_rotation_keys() {
     )
     .unwrap();
 
-    let output = Command::cargo_bin("network-monitor")
+    let output = Command::cargo_bin("uptime-monitor")
         .unwrap()
         .args(["--config", path.to_str().unwrap(), "--show-config"])
         .output()

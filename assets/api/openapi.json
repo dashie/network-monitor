@@ -1,7 +1,7 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "network-monitor — read-only API",
+    "title": "uptime-monitor — read-only API",
     "summary": "The reachability history the page shows, as JSON",
     "description": "Read-only and unauthenticated, served on the socket the page already binds: it never writes and it never needs a credential. Every success is an object whose `data` holds an array and whose `meta` echoes the request; every failure is an object with a stable `code` and a fixed `message`. The data routes stream: `Transfer-Encoding: chunked`, no `Content-Length`, gzip on the fly when the client accepts it. A breaking change means a new `/api/vN` prefix.",
     "version": "1.0.0"

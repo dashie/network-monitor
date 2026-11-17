@@ -374,7 +374,7 @@ fn request(target: &str, host: &str, port: u16, scheme: Scheme) -> String {
     format!(
         "GET {target} HTTP/1.1\r\n\
          Host: {authority}\r\n\
-         User-Agent: network-monitor/{}\r\n\
+         User-Agent: uptime-monitor/{}\r\n\
          Accept: */*\r\n\
          Connection: close\r\n\r\n",
         env!("CARGO_PKG_VERSION")
@@ -637,7 +637,7 @@ mod exchange_tests {
             "unexpected request: {request}"
         );
         assert!(request.contains("Connection: close"));
-        assert!(request.contains("User-Agent: network-monitor/"));
+        assert!(request.contains("User-Agent: uptime-monitor/"));
     }
 
     #[test]
@@ -737,7 +737,7 @@ mod exchange_tests {
     fn a_name_that_does_not_resolve_states_its_code() {
         let error = HttpProbe::new()
             .probe(
-                &http("network-monitor.invalid", 80, "/"),
+                &http("uptime-monitor.invalid", 80, "/"),
                 None,
                 Duration::from_secs(1),
             )

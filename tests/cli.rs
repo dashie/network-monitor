@@ -4,7 +4,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn monitor(directory: &std::path::Path) -> Command {
-    let mut command = Command::cargo_bin("network-monitor").unwrap();
+    let mut command = Command::cargo_bin("uptime-monitor").unwrap();
     command.current_dir(directory);
     command
 }
@@ -19,9 +19,7 @@ fn show_config_prints_the_effective_configuration_without_a_file() {
         .success()
         .stdout(predicate::str::contains("interval_ms = 5000"))
         .stdout(predicate::str::contains("timeout_ms = 2000"))
-        .stdout(predicate::str::contains(
-            "database = \"network-monitor.db\"",
-        ))
+        .stdout(predicate::str::contains("database = \"uptime-monitor.db\""))
         .stdout(predicate::str::contains("retention_days = 0"));
 }
 
@@ -95,7 +93,7 @@ fn query_on_a_missing_database_fails() {
 fn a_configuration_file_is_read_from_the_default_path() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
-        directory.path().join("network-monitor.toml"),
+        directory.path().join("uptime-monitor.toml"),
         "interval_ms = 15000\ntimeout_ms = 3000\ndatabase = \"from-default.toml.db\"\n\n[[targets]]\nip = \"9.9.9.9\"\n",
     )
     .unwrap();
@@ -115,7 +113,7 @@ fn a_file_path_is_resolved_beside_the_configuration_file() {
     let conf = root.path().join("conf");
     std::fs::create_dir(&conf).unwrap();
     std::fs::write(
-        conf.join("network-monitor.toml"),
+        conf.join("uptime-monitor.toml"),
         concat!(
             "notify = [\"audit\"]\n",
             "database = \"events.db\"\n\n",
@@ -130,7 +128,7 @@ fn a_file_path_is_resolved_beside_the_configuration_file() {
     .unwrap();
 
     monitor(root.path())
-        .args(["--config", "conf/network-monitor.toml", "--show-config"])
+        .args(["--config", "conf/uptime-monitor.toml", "--show-config"])
         .assert()
         .success()
         .stdout(predicate::str::contains(format!(
@@ -149,7 +147,7 @@ fn check_creates_the_log_beside_the_configuration_file() {
     let conf = root.path().join("conf");
     std::fs::create_dir_all(conf.join("logs")).unwrap();
     std::fs::write(
-        conf.join("network-monitor.toml"),
+        conf.join("uptime-monitor.toml"),
         concat!(
             "notify = [\"audit\"]\n",
             "database = \"events.db\"\n\n",
@@ -164,7 +162,7 @@ fn check_creates_the_log_beside_the_configuration_file() {
     .unwrap();
 
     monitor(root.path())
-        .args(["check", "--config", "conf/network-monitor.toml"])
+        .args(["check", "--config", "conf/uptime-monitor.toml"])
         .assert()
         .success()
         .stdout(predicate::str::contains("ok    channel"));
@@ -184,7 +182,7 @@ fn check_creates_the_log_beside_the_configuration_file() {
 fn an_unknown_key_in_the_file_fails() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
-        directory.path().join("network-monitor.toml"),
+        directory.path().join("uptime-monitor.toml"),
         "interval_ms = 1000\nunknown_key = true\n",
     )
     .unwrap();
@@ -264,7 +262,7 @@ fn the_startup_log_states_the_defaults_and_every_target() {
 fn the_startup_log_names_the_configuration_file() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
-        directory.path().join("network-monitor.toml"),
+        directory.path().join("uptime-monitor.toml"),
         "[[targets]]\nip = \"9.9.9.9\"\n",
     )
     .unwrap();
@@ -280,7 +278,7 @@ fn the_startup_log_names_the_configuration_file() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "INFO  monitor reading configuration from network-monitor.toml",
+            "INFO  monitor reading configuration from uptime-monitor.toml",
         ));
 }
 
@@ -288,7 +286,7 @@ fn the_startup_log_names_the_configuration_file() {
 fn the_startup_log_names_the_configured_chat() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
-        directory.path().join("network-monitor.toml"),
+        directory.path().join("uptime-monitor.toml"),
         "[[targets]]\nip = \"9.9.9.9\"\n\n[telegram]\nbot_token = \"123456:abc-def\"\nchat_id = \"-100200\"\n",
     )
     .unwrap();
@@ -473,7 +471,7 @@ fn the_startup_log_states_the_simulation_and_that_no_database_is_used() {
 fn a_channel_is_declared_once_and_printed_redacted() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
-        directory.path().join("network-monitor.toml"),
+        directory.path().join("uptime-monitor.toml"),
         concat!(
             "notify = [\"telegram\"]\n\n",
             "[[notification]]\n",
@@ -519,7 +517,7 @@ fn a_channel_is_declared_once_and_printed_redacted() {
 fn show_config_prints_a_webhook_without_its_token() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
-        directory.path().join("network-monitor.toml"),
+        directory.path().join("uptime-monitor.toml"),
         concat!(
             "notify = [\"hook\"]\n\n",
             "[[notification]]\n",
@@ -548,7 +546,7 @@ fn show_config_prints_a_webhook_without_its_token() {
 fn the_startup_log_names_a_webhook_by_host_only() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
-        directory.path().join("network-monitor.toml"),
+        directory.path().join("uptime-monitor.toml"),
         concat!(
             "notify = [\"hook\"]\n\n",
             "[[notification]]\n",
@@ -581,7 +579,7 @@ fn the_startup_log_names_a_webhook_by_host_only() {
 fn an_unknown_notify_name_fails_before_the_monitor_starts() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
-        directory.path().join("network-monitor.toml"),
+        directory.path().join("uptime-monitor.toml"),
         concat!(
             "notify = [\"missing\"]\n\n",
             "[[notification]]\n",
@@ -607,7 +605,7 @@ fn an_unknown_notify_name_fails_before_the_monitor_starts() {
 fn a_channel_that_nothing_enables_is_only_a_warning() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
-        directory.path().join("network-monitor.toml"),
+        directory.path().join("uptime-monitor.toml"),
         concat!(
             "[[notification]]\n",
             "name = \"audit\"\n",
@@ -639,7 +637,7 @@ fn a_channel_that_nothing_enables_is_only_a_warning() {
 fn two_channels_on_one_destination_fail_before_the_monitor_starts() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
-        directory.path().join("network-monitor.toml"),
+        directory.path().join("uptime-monitor.toml"),
         concat!(
             "notify = [\"one\", \"two\"]\n\n",
             "[[notification]]\n",
@@ -667,13 +665,13 @@ fn two_channels_on_one_destination_fail_before_the_monitor_starts() {
 fn check_reports_ok_and_warn_lines_and_exits_zero() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
-        directory.path().join("network-monitor.toml"),
+        directory.path().join("uptime-monitor.toml"),
         "database = \"events.db\"\n\n[[targets]]\nip = \"127.0.0.1\"\n",
     )
     .unwrap();
 
     monitor(directory.path())
-        .args(["check", "--config", "network-monitor.toml"])
+        .args(["check", "--config", "uptime-monitor.toml"])
         .assert()
         .success()
         .stdout(predicate::str::contains("ok    targets"))
@@ -691,13 +689,13 @@ fn check_reports_ok_and_warn_lines_and_exits_zero() {
 fn check_names_an_unknown_interface_and_exits_one() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
-        directory.path().join("network-monitor.toml"),
+        directory.path().join("uptime-monitor.toml"),
         "database = \"events.db\"\n\n[[targets]]\nip = \"127.0.0.1\"\ninterface = \"does-not-exist0\"\n",
     )
     .unwrap();
 
     monitor(directory.path())
-        .args(["check", "--config", "network-monitor.toml"])
+        .args(["check", "--config", "uptime-monitor.toml"])
         .assert()
         .failure()
         .stdout(predicate::str::contains("fail  interface"))
@@ -708,7 +706,7 @@ fn check_names_an_unknown_interface_and_exits_one() {
 fn check_reports_a_bad_listen_address_on_stdout() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
-        directory.path().join("network-monitor.toml"),
+        directory.path().join("uptime-monitor.toml"),
         "database = \"events.db\"\n\n[[targets]]\nip = \"127.0.0.1\"\n",
     )
     .unwrap();
@@ -717,7 +715,7 @@ fn check_reports_a_bad_listen_address_on_stdout() {
         .args([
             "check",
             "--config",
-            "network-monitor.toml",
+            "uptime-monitor.toml",
             "--listen",
             "not-an-address",
         ])
@@ -731,13 +729,13 @@ fn check_reports_a_bad_listen_address_on_stdout() {
 fn the_configured_listen_address_is_checked() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
-        directory.path().join("network-monitor.toml"),
+        directory.path().join("uptime-monitor.toml"),
         "listen = \"127.0.0.1:0\"\ndatabase = \"events.db\"\n\n[[targets]]\nip = \"127.0.0.1\"\n",
     )
     .unwrap();
 
     monitor(directory.path())
-        .args(["check", "--config", "network-monitor.toml"])
+        .args(["check", "--config", "uptime-monitor.toml"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -749,7 +747,7 @@ fn the_configured_listen_address_is_checked() {
 fn the_monitor_listen_flag_overrides_the_configured_address() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
-        directory.path().join("network-monitor.toml"),
+        directory.path().join("uptime-monitor.toml"),
         "listen = \"127.0.0.1:1\"\ndatabase = \"events.db\"\n\n[[targets]]\nip = \"127.0.0.1\"\n",
     )
     .unwrap();
@@ -758,7 +756,7 @@ fn the_monitor_listen_flag_overrides_the_configured_address() {
         .args([
             "check",
             "--config",
-            "network-monitor.toml",
+            "uptime-monitor.toml",
             "--listen",
             "127.0.0.1:0",
         ])
@@ -786,7 +784,7 @@ fn show_config_prints_the_merged_listen_address() {
         .stdout(predicate::str::contains("listen = \"127.0.0.1:8642\""));
 
     std::fs::write(
-        directory.path().join("network-monitor.toml"),
+        directory.path().join("uptime-monitor.toml"),
         "listen = \"127.0.0.1:8643\"\n\n[[targets]]\nip = \"1.1.1.1\"\n",
     )
     .unwrap();
@@ -806,7 +804,7 @@ use std::process::{Child, Command as StdCommand, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use network_monitor::store::{EventFilter, Store};
+use uptime_monitor::store::{EventFilter, Store};
 
 /// A spawned monitor that never outlives the test, even when an assertion fails.
 struct Running {
@@ -815,7 +813,7 @@ struct Running {
 
 impl Running {
     fn spawn(directory: &Path, args: &[&str], log: &Path) -> Running {
-        let child = StdCommand::new(env!("CARGO_BIN_EXE_network-monitor"))
+        let child = StdCommand::new(env!("CARGO_BIN_EXE_uptime-monitor"))
             .current_dir(directory)
             .args(args)
             .stdout(Stdio::null())
@@ -913,7 +911,7 @@ fn the_monitor_serves_the_page_on_the_configured_address() {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     std::fs::write(
-        directory.path().join("network-monitor.toml"),
+        directory.path().join("uptime-monitor.toml"),
         format!(
             "interval_ms = 100\ntimeout_ms = 200\ndatabase = \"events.db\"\n\
              listen = \"127.0.0.1:{port}\"\n\n[[targets]]\nmethod = \"tcp\"\n\
@@ -961,7 +959,7 @@ fn a_changed_listen_address_needs_a_restart() {
     drop(second);
     assert_ne!(first_port, second_port);
 
-    let config = directory.path().join("network-monitor.toml");
+    let config = directory.path().join("uptime-monitor.toml");
     write_listen_config(&config, first_port);
     let log = directory.path().join("monitor.log");
     let running = Running::spawn(directory.path(), &["monitor"], &log);
@@ -1179,11 +1177,11 @@ fn fallback_to_active_starts_from_the_snapshot_when_main_is_broken() {
     let listener = loopback_listener();
     let port = listener.local_addr().unwrap().port();
     std::fs::write(
-        directory.path().join("network-monitor.toml"),
+        directory.path().join("uptime-monitor.toml"),
         "interval_ms = 30\nbroken = [\n",
     )
     .unwrap();
-    write_main_config(&directory.path().join("network-monitor.toml.active"), port);
+    write_main_config(&directory.path().join("uptime-monitor.toml.active"), port);
     let log = directory.path().join("stderr.log");
 
     let running = Running::spawn(
@@ -1191,7 +1189,7 @@ fn fallback_to_active_starts_from_the_snapshot_when_main_is_broken() {
         &[
             "monitor",
             "--config",
-            "network-monitor.toml",
+            "uptime-monitor.toml",
             "--fallback-to-active",
         ],
         &log,
@@ -1208,7 +1206,7 @@ fn fallback_to_active_starts_from_the_snapshot_when_main_is_broken() {
         text.contains("starting from the active snapshot"),
         "unexpected log: {text}"
     );
-    assert!(text.contains("network-monitor.toml.active"), "{text}");
+    assert!(text.contains("uptime-monitor.toml.active"), "{text}");
 }
 
 #[test]
@@ -1217,20 +1215,20 @@ fn a_broken_main_without_the_flag_names_the_snapshot_and_fails() {
     let listener = loopback_listener();
     let port = listener.local_addr().unwrap().port();
     std::fs::write(
-        directory.path().join("network-monitor.toml"),
+        directory.path().join("uptime-monitor.toml"),
         "interval_ms = 30\nbroken = [\n",
     )
     .unwrap();
-    write_main_config(&directory.path().join("network-monitor.toml.active"), port);
+    write_main_config(&directory.path().join("uptime-monitor.toml.active"), port);
 
     monitor(directory.path())
-        .args(["monitor", "--config", "network-monitor.toml"])
+        .args(["monitor", "--config", "uptime-monitor.toml"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
             "the last configuration that worked is",
         ))
-        .stderr(predicate::str::contains("network-monitor.toml.active"));
+        .stderr(predicate::str::contains("uptime-monitor.toml.active"));
 }
 
 #[test]
@@ -1309,7 +1307,7 @@ fn fallback_to_active_finds_a_snapshot_without_a_main_file() {
     let directory = tempfile::tempdir().unwrap();
     let listener = loopback_listener();
     let port = listener.local_addr().unwrap().port();
-    write_main_config(&directory.path().join("network-monitor.toml.active"), port);
+    write_main_config(&directory.path().join("uptime-monitor.toml.active"), port);
     let log = directory.path().join("stderr.log");
 
     let running = Running::spawn(directory.path(), &["monitor", "--fallback-to-active"], &log);
@@ -1332,7 +1330,7 @@ fn a_failure_with_only_a_snapshot_names_it_and_its_age() {
     let directory = tempfile::tempdir().unwrap();
     let listener = loopback_listener();
     let port = listener.local_addr().unwrap().port();
-    write_main_config(&directory.path().join("network-monitor.toml.active"), port);
+    write_main_config(&directory.path().join("uptime-monitor.toml.active"), port);
 
     monitor(directory.path())
         .arg("monitor")
@@ -1341,5 +1339,22 @@ fn a_failure_with_only_a_snapshot_names_it_and_its_age() {
         .stderr(predicate::str::contains(
             "the last configuration that worked is",
         ))
-        .stderr(predicate::str::contains("network-monitor.toml.active"));
+        .stderr(predicate::str::contains("uptime-monitor.toml.active"));
+}
+
+#[test]
+fn the_binary_reports_its_name() {
+    Command::cargo_bin("uptime-monitor")
+        .unwrap()
+        .arg("--version")
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("uptime-monitor "));
+
+    Command::cargo_bin("uptime-monitor")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Usage: uptime-monitor"));
 }

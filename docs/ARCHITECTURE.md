@@ -1,4 +1,4 @@
-# Architecture — network-monitor
+# Architecture — uptime-monitor
 
 This document follows [arc42](https://arc42.org) and uses C4 diagrams, written in
 [PlantUML](https://plantuml.com) (`@startuml` blocks in `plantuml` fences, rendered with
@@ -7,7 +7,7 @@ decisions and their rationale live in [ADR.md](./ADR.md).
 
 ## 1. Introduction and goals
 
-`network-monitor` is a single-process Rust command-line program. One invocation is either a long-running `monitor` that owns the probing loop and the SQLite writer, or one of the short-lived commands — `init` that scaffolds a folder, `check` that verifies a configuration without starting, `manual` that prints the embedded guide, `serve` and `simulate` that read a history and publish it, `query` and `import` that read or restore the database.
+`uptime-monitor` is a single-process Rust command-line program. One invocation is either a long-running `monitor` that owns the probing loop and the SQLite writer, or one of the short-lived commands — `init` that scaffolds a folder, `check` that verifies a configuration without starting, `manual` that prints the embedded guide, `serve` and `simulate` that read a history and publish it, `query` and `import` that read or restore the database.
 
 Top quality goals, in order:
 
@@ -35,10 +35,10 @@ Top quality goals, in order:
 @startuml
 !include <C4/C4_Context>
 
-title System context — network-monitor
+title System context — uptime-monitor
 
 Person(operator, "Operator", "Writes the TOML configuration, starts the monitor, reads the history")
-System(monitor, "network-monitor", "Probes targets with ICMP echo requests and records state transitions")
+System(monitor, "uptime-monitor", "Probes targets with ICMP echo requests and records state transitions")
 
 System_Ext(hosts, "Monitored hosts", "IP endpoints that answer, or do not answer, ICMP echo requests")
 System_Ext(os, "Operating system", "Provides raw ICMP sockets, the routing table, and interface binding")
@@ -111,11 +111,11 @@ Fixed principles that constrain every design decision and every change:
 @startuml
 !include <C4/C4_Container>
 
-title Containers — network-monitor
+title Containers — uptime-monitor
 
 Person(operator, "Operator", "Configures and queries the monitor")
 
-Container(cli, "network-monitor executable", "Rust, static binary", "Parses configuration, probes targets, writes transitions, renders queries")
+Container(cli, "uptime-monitor executable", "Rust, static binary", "Parses configuration, probes targets, writes transitions, renders queries")
 ContainerDb(db, "Event database", "SQLite, WAL", "Append-only transition events and the current state of each target")
 
 System_Ext(os, "Operating system", "Raw ICMP sockets and interface binding")
@@ -194,7 +194,7 @@ Rel(cli, hosts, "Sends echo requests", "ICMP")
 ### `init`
 
 - **Input:** one folder path; no configuration.
-- **Output:** the folder with `network-monitor.toml`, `data/`, and `logs/`, or an `InitError`.
+- **Output:** the folder with `uptime-monitor.toml`, `data/`, and `logs/`, or an `InitError`.
 - **Guarantees:** the folder must not exist or must be empty; the template is parsed and resolved before the folder is touched; the configuration is written last with `create_new`; nothing outside the folder is written; no probe, database, socket, or configuration is read; the template's active target is TCP and the ICMP example is a comment.
 
 ### `manual`
@@ -377,7 +377,7 @@ participant "probe (ICMP)" as Pr
 participant "store (SQLite)" as St
 participant "query" as Q
 
-Op -> Mon : monitor --config network-monitor.toml
+Op -> Mon : monitor --config uptime-monitor.toml
 Mon -> St : open database, migrate, load current state
 loop every interval_ms, per target
     Mon -> Pr : probe(target, interface)
@@ -400,12 +400,12 @@ Takeaway: the write path is one transaction per transition, and the read path ne
 
 ## 7. Deployment view
 
-- **Local development.** `cargo run -- monitor --config ./network-monitor.toml`, database at `./network-monitor.db`, raw sockets through `sudo` on macOS and Linux or an elevated shell on Windows.
-- **Scaffolded folder.** `network-monitor init <folder>` creates a self-contained folder — `network-monitor.toml`, `data/`, and `logs/` — and prints the commands that check and start it. The folder can be run from any working directory: the paths it states resolve against the configuration file (BR-11). It is a local setup, not a service installation: systemd, launchd, or the Windows scheduler remains the operator's choice.
-- **Bare host.** The release binary copied anywhere on `PATH`, the configuration in `/etc/network-monitor/config.toml`, the database in `/var/lib/network-monitor/events.db`, supervised by systemd, launchd, or the Windows scheduler. The binary requires `CAP_NET_RAW` or `root`. The binary also carries its manual: `network-monitor manual` prints the embedded user guide, so a host without the repository can read it.
+- **Local development.** `cargo run -- monitor --config ./uptime-monitor.toml`, database at `./uptime-monitor.db`, raw sockets through `sudo` on macOS and Linux or an elevated shell on Windows.
+- **Scaffolded folder.** `uptime-monitor init <folder>` creates a self-contained folder — `uptime-monitor.toml`, `data/`, and `logs/` — and prints the commands that check and start it. The folder can be run from any working directory: the paths it states resolve against the configuration file (BR-11). It is a local setup, not a service installation: systemd, launchd, or the Windows scheduler remains the operator's choice.
+- **Bare host.** The release binary copied anywhere on `PATH`, the configuration in `/etc/uptime-monitor/config.toml`, the database in `/var/lib/uptime-monitor/events.db`, supervised by systemd, launchd, or the Windows scheduler. The binary requires `CAP_NET_RAW` or `root`. The binary also carries its manual: `uptime-monitor manual` prints the embedded user guide, so a host without the repository can read it.
 - **Container.** A multi-stage image builds the static musl binary and copies it onto a minimal base, together with a default configuration that probes the container's loopback so a bare `docker run` starts. The build uses the `release-dev` profile (thin LTO, parallel codegen) and a cached `target` directory, so a source change does not recompile every dependency; `PROFILE=release` produces the published artifact. The process runs as the container user with `--cap-drop ALL --cap-add NET_RAW`, the configuration mounted read-only over the default when real targets are needed, a volume for the database, and certificate roots compiled into the binary for HTTPS targets. No port is published: the page, when a listen address is configured, binds the host address directly through host networking. Host networking (`network_mode: host`) is required when a target is bound to a physical interface, because a bridge container only sees its own `eth0`. The engine's own log of the process is bounded by the compose `logging` block (`json-file`, `max-size: 10m`, `max-file: "3"`) or by the equivalent `--log-opt` on a bare `docker run`.
-- **QNAP Container Station.** A project from [docker-compose.yml](../docker-compose.yml) that builds and runs the generic image with restart policy `unless-stopped`, host networking, and the named `network-monitor-data` volume as the database. The configuration is not a file on the NAS: it is the `content` of the project's `monitor-config` config, which compose copies into the container over `/etc/network-monitor/config.toml`, so the whole deployment is one YAML and the image stays reusable. The volume must be a local share, not a network share. Build and deployment — including a Docker context that points at the NAS so the image is built there — are in [DEVELOPER-GUIDE.md](./DEVELOPER-GUIDE.md#container-and-qnap-deployment).
-- **Landing page.** The repository also publishes a static landing page — `site/index.html`, its stylesheet, three screenshots, and the crawl files — assembled by `.github/workflows/pages.yml` from `site/` plus the two icons in `assets/icon/` and served by GitHub Pages at <https://dashie.github.io/network-monitor/>. It is documentation, not a running component: it ships no part of the binary, shares no code with `web`, and its commands are copied from the user guide, so it never becomes a second source of truth for behaviour.
+- **QNAP Container Station.** A project from [docker-compose.yml](../docker-compose.yml) that builds and runs the generic image with restart policy `unless-stopped`, host networking, and the named `uptime-monitor-data` volume as the database. The configuration is not a file on the NAS: it is the `content` of the project's `monitor-config` config, which compose copies into the container over `/etc/uptime-monitor/config.toml`, so the whole deployment is one YAML and the image stays reusable. The volume must be a local share, not a network share. Build and deployment — including a Docker context that points at the NAS so the image is built there — are in [DEVELOPER-GUIDE.md](./DEVELOPER-GUIDE.md#container-and-qnap-deployment).
+- **Landing page.** The repository also publishes a static landing page — `site/index.html`, its stylesheet, three screenshots, and the crawl files — assembled by `.github/workflows/pages.yml` from `site/` plus the two icons in `assets/icon/` and served by GitHub Pages at <https://dashie.github.io/uptime-monitor/>. It is documentation, not a running component: it ships no part of the binary, shares no code with `web`, and its commands are copied from the user guide, so it never becomes a second source of truth for behaviour.
 - **Configuration sources.** The TOML file, then the command line. In the container the file arrives as a compose config object mounted over the default path, and the compose `command` passes the mounted path with `--config`; `--listen`, when present, overrides the file's `listen` key. There is no environment-variable layer.
 - **Upgrades.** Replace the binary or image and restart. The schema is migrated by the first writable open, `monitor` or `import`; a rollback to an older binary against a newer schema is refused, so the database must be backed up before a downgrade. `import` restores the fault history into a fresh database after a redeploy: it does not know the labels and the interfaces, which the next probe of the monitor writes back from the configuration.
 - **Web page.** The same process that probes can serve the page: `monitor --config … --database … --listen 0.0.0.0:8642`. With host networking the listener needs no published port and shares the volume it is already writing. `serve --listen … --database …` remains the option for a viewer that must not have `NET_RAW`; it reads the same volume and can run on another host.

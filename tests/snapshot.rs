@@ -5,16 +5,16 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use network_monitor::config::{self, Config, Overrides};
-use network_monitor::monitor::{self, Reload, Start};
-use network_monitor::notify::fake::FakeNotifier;
-use network_monitor::notify::{Event, Notifier};
-use network_monitor::probe::fake::{up, FakeProbe};
-use network_monitor::probe::{Code, Details, Probe, ProbeError};
-use network_monitor::promote::Candidate;
-use network_monitor::shutdown::Shutdown;
-use network_monitor::snapshot::{self, Snapshot};
-use network_monitor::store::Store;
+use uptime_monitor::config::{self, Config, Overrides};
+use uptime_monitor::monitor::{self, Reload, Start};
+use uptime_monitor::notify::fake::FakeNotifier;
+use uptime_monitor::notify::{Event, Notifier};
+use uptime_monitor::probe::fake::{up, FakeProbe};
+use uptime_monitor::probe::{Code, Details, Probe, ProbeError};
+use uptime_monitor::promote::Candidate;
+use uptime_monitor::shutdown::Shutdown;
+use uptime_monitor::snapshot::{self, Snapshot};
+use uptime_monitor::store::Store;
 
 struct Running {
     stop: Shutdown,
@@ -35,7 +35,7 @@ impl Running {
 
 fn temp_paths() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let directory = tempfile::tempdir().unwrap();
-    let main = directory.path().join("network-monitor.toml");
+    let main = directory.path().join("uptime-monitor.toml");
     let database = directory.path().join("events.db");
     (directory, main, database)
 }
@@ -223,7 +223,7 @@ fn a_local_failure_writes_nothing_and_keeps_the_old_snapshot() {
         "a failed first round leaves the previous snapshot alone"
     );
     assert!(!main
-        .with_file_name("network-monitor.toml.20261108T000000Z.bak")
+        .with_file_name("uptime-monitor.toml.20261108T000000Z.bak")
         .exists());
 }
 

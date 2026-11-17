@@ -13,10 +13,10 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
-use network_monitor::probe::dns::DnsProbe;
-use network_monitor::probe::http::HttpProbe;
-use network_monitor::probe::tcp::TcpProbe;
-use network_monitor::probe::{Endpoint, Probe, RecordType, Scheme, StatusMatch, Verdict};
+use uptime_monitor::probe::dns::DnsProbe;
+use uptime_monitor::probe::http::HttpProbe;
+use uptime_monitor::probe::tcp::TcpProbe;
+use uptime_monitor::probe::{Endpoint, Probe, RecordType, Scheme, StatusMatch, Verdict};
 
 fn timeout() -> Duration {
     Duration::from_secs(5)
@@ -97,7 +97,7 @@ fn a_name_that_does_not_exist_is_down_without_a_verdict_error() {
     let server = Ipv4Addr::new(1, 1, 1, 1);
     let verdict = DnsProbe::new()
         .probe(
-            &dns("network-monitor.invalid", Some(server)),
+            &dns("uptime-monitor.invalid", Some(server)),
             None,
             timeout(),
         )

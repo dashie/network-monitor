@@ -132,7 +132,7 @@ mod tests {
 
     fn setup() -> (tempfile::TempDir, PathBuf, Candidate) {
         let directory = tempfile::tempdir().unwrap();
-        let main = directory.path().join("network-monitor.toml");
+        let main = directory.path().join("uptime-monitor.toml");
         fs::write(&main, b"interval_ms = 1000\n").unwrap();
         let candidate = Candidate {
             source: directory.path().join("next.toml"),
@@ -151,7 +151,7 @@ mod tests {
 
         assert_eq!(
             backup.file_name().unwrap().to_string_lossy(),
-            "network-monitor.toml.20261108T000000Z.bak"
+            "uptime-monitor.toml.20261108T000000Z.bak"
         );
         assert_eq!(fs::read(&backup).unwrap(), b"interval_ms = 1000\n");
         assert_eq!(fs::read(&main).unwrap(), b"interval_ms = 2000\n");

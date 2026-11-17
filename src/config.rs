@@ -21,10 +21,10 @@ use crate::notify::message::Kind;
 use crate::probe::http::{parse_url, UrlParts};
 use crate::probe::{Endpoint, Method, RecordType, Scheme, StatusMatch};
 
-pub const DEFAULT_CONFIG_FILE: &str = "network-monitor.toml";
+pub const DEFAULT_CONFIG_FILE: &str = "uptime-monitor.toml";
 pub const DEFAULT_INTERVAL_MS: u64 = 5_000;
 pub const DEFAULT_TIMEOUT_MS: u64 = 2_000;
-pub const DEFAULT_DATABASE: &str = "network-monitor.db";
+pub const DEFAULT_DATABASE: &str = "uptime-monitor.db";
 pub const DEFAULT_RETENTION_DAYS: u64 = 0;
 pub const DEFAULT_STABILIZE_SECONDS: u64 = 60;
 
@@ -702,7 +702,7 @@ pub struct Loaded {
 
 /// Load the configuration file.
 ///
-/// An explicit path must exist. Without an explicit path, `network-monitor.toml` is
+/// An explicit path must exist. Without an explicit path, `uptime-monitor.toml` is
 /// read when present and skipped otherwise, so a fully command-line invocation works
 /// without a file.
 pub fn load(explicit: Option<&Path>) -> Result<Option<Loaded>, ConfigError> {
@@ -1863,7 +1863,7 @@ mod tests {
 
     #[test]
     fn a_relative_path_is_resolved_against_the_file_that_states_it() {
-        let path = Path::new("/etc/network-monitor/config.toml");
+        let path = Path::new("/etc/uptime-monitor/config.toml");
         let file = parse_at(
             concat!(
                 "database = \"events.db\"\n\n",
@@ -1878,26 +1878,26 @@ mod tests {
 
         assert_eq!(
             file.database.as_deref(),
-            Some("/etc/network-monitor/events.db")
+            Some("/etc/uptime-monitor/events.db")
         );
         let channel = &file.notification.unwrap()[0];
         assert_eq!(
             channel.filename.as_deref(),
-            Some("/etc/network-monitor/logs/audit.log")
+            Some("/etc/uptime-monitor/logs/audit.log")
         );
     }
 
     #[test]
     fn an_absolute_path_in_the_file_is_only_folded() {
         let file = parse_at(
-            "database = \"/var/lib/./network-monitor/../network-monitor/events.db\"\n",
-            Path::new("/etc/network-monitor/config.toml"),
+            "database = \"/var/lib/./uptime-monitor/../uptime-monitor/events.db\"\n",
+            Path::new("/etc/uptime-monitor/config.toml"),
         )
         .unwrap();
 
         assert_eq!(
             file.database.as_deref(),
-            Some("/var/lib/network-monitor/events.db")
+            Some("/var/lib/uptime-monitor/events.db")
         );
     }
 
@@ -1905,7 +1905,7 @@ mod tests {
     fn a_file_without_a_parent_keeps_the_working_directory_as_its_base() {
         let file = parse_at(
             "database = \"events.db\"\n",
-            Path::new("network-monitor.toml"),
+            Path::new("uptime-monitor.toml"),
         )
         .unwrap();
 

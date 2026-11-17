@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Convert a monitoring heartbeat export into the `network-monitor import` format.
+"""Convert a monitoring heartbeat export into the `uptime-monitor import` format.
 
 # What it does
 
-`network-monitor import` reads the CSV the web page offers for download: one row per
+`uptime-monitor import` reads the CSV the web page offers for download: one row per
 state change with the columns
 
     target,label,interface,state,occurred_at,rtt_us
@@ -13,17 +13,17 @@ Another monitoring tool exports its heartbeats in another shape:
     id,monitor_name,status,time,message,ping
 
 This script rewrites the second into the first, so an existing history can be loaded into
-a `network-monitor` database with the command it already has. It is a migration aid that
+a `uptime-monitor` database with the command it already has. It is a migration aid that
 runs once per export and stays outside the binary; nothing in `src/` depends on it.
 
 # When to use it
 
-* Moving an existing installation of another monitor to `network-monitor` and keeping the
+* Moving an existing installation of another monitor to `uptime-monitor` and keeping the
   history.
 * Merging such a history into a database that already records transitions. The importer
   drops an event that repeats the state before it, so re-running the same file is safe.
 
-When the history comes from `network-monitor` itself, do not use this script: the page
+When the history comes from `uptime-monitor` itself, do not use this script: the page
 offers the file in the right format already.
 
 `export-example.csv`, next to this file, is the small export the runbook converts, and
@@ -48,7 +48,7 @@ written as `...T...Z`.
 The source `ping` becomes `rtt_us`: milliseconds to microseconds, rounded; empty when the
 source recorded none.
 
-`monitor_name` is not imported — the source names a monitor, `network-monitor` tracks an
+`monitor_name` is not imported — the source names a monitor, `uptime-monitor` tracks an
 address. `label` comes from `--label ADDRESS=LABEL` and is empty otherwise. `interface`
 is always empty: the source does not record which interface it probed.
 
@@ -100,14 +100,14 @@ carry an offset, on purpose — a wrong offset corrupts every row silently.
 * The report goes to standard error and the CSV to standard output (or `--output`), so
   the command composes with a pipe:
 
-      python3 scripts/utils/export2nm.py export.csv -o /tmp/events.csv
-      cat /tmp/events.csv | docker run --rm -i ... network-monitor import -
+      python3 scripts/utils/convert_heartbeats.py export.csv -o /tmp/events.csv
+      cat /tmp/events.csv | docker run --rm -i ... uptime-monitor import -
 
 * Tests: `python3 -m unittest discover -s scripts/utils -p 'test_*.py'`.
 
 # Example: the migration this script was written for
 
-    python3 scripts/utils/export2nm.py ~/Downloads/export.csv \\
+    python3 scripts/utils/convert_heartbeats.py ~/Downloads/export.csv \\
         --initial "DNS ping=1.1.1.1" --initial "Gateway ping=192.168.1.1" \\
         --alias 8.8.8.8=1.1.1.1 \\
         --label 1.1.1.1=cloudflare-dns --label 192.168.1.1=gateway \\
@@ -125,13 +125,13 @@ from typing import Dict, List, Optional, Tuple
 
 HEADER = "target,label,interface,state,occurred_at,rtt_us"
 
-#: The status codes of the source that map onto a state `network-monitor` knows.
+#: The status codes of the source that map onto a state `uptime-monitor` knows.
 STATES = {"1": "up", "0": "down"}
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Convert a monitoring heartbeat export into the network-monitor "
+        description="Convert a monitoring heartbeat export into the uptime-monitor "
         "import format.",
         epilog="The module documentation states the mapping and the caveats.",
     )

@@ -1,12 +1,12 @@
-# network-monitor
+# uptime-monitor
 
 Event-based reachability monitor with ICMP, TCP, DNS, and HTTP checks, per-interface probes, TOML configuration, and an embedded SQLite history.
 
-Website: <https://dashie.github.io/network-monitor/> · Licence: MIT — see [LICENSE](./LICENSE).
+Website: <https://dashie.github.io/uptime-monitor/> · Licence: MIT — see [LICENSE](./LICENSE).
 
 ## Overview
 
-`network-monitor` answers one narrow question continuously and cheaply: is this target reachable right now, from this interface?
+`uptime-monitor` answers one narrow question continuously and cheaply: is this target reachable right now, from this interface?
 
 A target is a method plus what it checks: an ICMP echo request to an address, a TCP connection to a port, a DNS record that must resolve, or an HTTP status that must fall inside an expectation. ICMP and TCP probes can be bound to a named interface, exactly like `ping -I eth1 1.1.1.1`; when no interface is configured the operating system routing table decides, so the probe leaves through the default interface.
 
@@ -23,32 +23,32 @@ The deliverable is a single executable with no runtime dependencies, built from 
 cargo build --release
 
 # Or scaffold a runnable setup in ./monitor: config, database, and event log, no privileges
-./target/release/network-monitor init ./monitor
-(cd ./monitor && ../target/release/network-monitor check --config network-monitor.toml)
-(cd ./monitor && ../target/release/network-monitor monitor --config network-monitor.toml \
+./target/release/uptime-monitor init ./monitor
+(cd ./monitor && ../target/release/uptime-monitor check --config uptime-monitor.toml)
+(cd ./monitor && ../target/release/uptime-monitor monitor --config uptime-monitor.toml \
   --listen 127.0.0.1:8642)
 
 # Read the full manual offline (Markdown); pipe it to a pager or renderer
-./target/release/network-monitor manual | less -R
+./target/release/uptime-monitor manual | less -R
 
 # Verify the configuration first: one ok/warn/fail line per check, no probe loop, no write
-./target/release/network-monitor check --config ./network-monitor.toml
+./target/release/uptime-monitor check --config ./uptime-monitor.toml
 
 # Run the monitor; raw ICMP sockets need elevated privileges on every platform
-sudo ./target/release/network-monitor monitor --config ./network-monitor.toml
+sudo ./target/release/uptime-monitor monitor --config ./uptime-monitor.toml
 
 # Same command, with the page on port 8642: one process records and shows
-sudo ./target/release/network-monitor monitor --config ./network-monitor.toml \
+sudo ./target/release/uptime-monitor monitor --config ./uptime-monitor.toml \
   --listen 0.0.0.0:8642
 
 # Read the recorded transitions from a second shell while the monitor runs
-./target/release/network-monitor query events --config ./network-monitor.toml
+./target/release/uptime-monitor query events --config ./uptime-monitor.toml
 
 # Serve the page alone, without probing or NET_RAW
-./target/release/network-monitor serve --database ./network-monitor.db --listen 127.0.0.1:8642
+./target/release/uptime-monitor serve --database ./uptime-monitor.db --listen 127.0.0.1:8642
 
 # Look at that page with no network and no database: a generated history, the same for the same seed
-./target/release/network-monitor simulate --listen 127.0.0.1:8660 --history 30d --seed 0
+./target/release/uptime-monitor simulate --listen 127.0.0.1:8660 --history 30d --seed 0
 
 # Read the same history as JSON from that server: read-only, no credential, no second port
 curl -s http://127.0.0.1:8642/api/v1/faults?limit=10
@@ -58,8 +58,8 @@ curl -s http://127.0.0.1:8642/api/v1/faults?limit=10
 
 # Restore the history from the file that page downloaded; back up the database first
 # (docs/DEVELOPER-GUIDE.md#back-up-before-you-import)
-./target/release/network-monitor import ./faults-20261109.csv.gz \
-  --database ./network-monitor.db
+./target/release/uptime-monitor import ./faults-20261109.csv.gz \
+  --database ./uptime-monitor.db
 
 # Run the test suite (no privileges needed: the ICMP prober is replaced by a fake)
 cargo test
@@ -71,13 +71,13 @@ recovery only once `up` has held for the stabilisation window. The declarations 
 routing lists are in the sample configuration; setup and failure modes are in
 [docs/NOTIFICATIONS.md](docs/NOTIFICATIONS.md).
 
-A minimal `network-monitor.toml`:
+A minimal `uptime-monitor.toml`:
 
 ```toml
 # Defaults for every target; each one can be overridden on the command line.
 interval_ms = 5000
 timeout_ms = 2000
-database = "./network-monitor.db"
+database = "./uptime-monitor.db"
 retention_days = 0          # 0 keeps every event forever
 
 [[targets]]
@@ -88,7 +88,7 @@ label = "cloudflare-dns"
 [[targets]]
 ip = "192.168.1.1"          # no interface: the default-route interface is used
 
-# One example per method; see network-monitor.toml for every key and its default.
+# One example per method; see uptime-monitor.toml for every key and its default.
 [[targets]]
 method = "tcp"
 host = "1.1.1.1"            # address or name
@@ -117,7 +117,7 @@ Not done yet: the Windows raw-socket path is written but not exercised on a Wind
 
 | Document | Purpose |
 |---|---|
-| [Landing page](https://dashie.github.io/network-monitor/) | The public description of the project: what it does, the four checks, the screenshots, the quick start, the limits, the questions |
+| [Landing page](https://dashie.github.io/uptime-monitor/) | The public description of the project: what it does, the four checks, the screenshots, the quick start, the limits, the questions |
 | [docs/USER-GUIDE.md](docs/USER-GUIDE.md) | Install, configure, operate, troubleshoot — the manual to hand to a user |
 | [docs/PRODUCT.md](docs/PRODUCT.md) | Users, scope, functional requirements, business rules |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | arc42 structure, C4 views, component contracts, invariants |

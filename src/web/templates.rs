@@ -140,7 +140,7 @@ mod tests {
     fn the_embedded_copies_are_the_files() {
         assert!(PAGE.contains("<header class=\"masthead\">"));
         assert!(DETAIL.contains("<header class=\"masthead\">"));
-        assert!(BRAND.contains("<h1>Network Monitor</h1>"));
+        assert!(BRAND.contains("<h1>Uptime Monitor</h1>"));
         assert!(STYLESHEET.contains(".masthead"));
         assert!(SCRIPT.contains("Intl.DateTimeFormat"));
     }

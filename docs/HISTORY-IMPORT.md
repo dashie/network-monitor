@@ -1,12 +1,12 @@
 # Importing a history from another monitor
 
-Runbook for moving a history out of another monitoring tool and into a `network-monitor`
+Runbook for moving a history out of another monitoring tool and into a `uptime-monitor`
 database, or for merging such a history into one that already records transitions. The
 import command, its options, and the merge semantics are in
 [DEVELOPER-GUIDE.md](./DEVELOPER-GUIDE.md#restoring-the-history-after-a-redeploy); this
 document covers only the source side.
 
-The conversion is done by [scripts/utils/export2nm.py](../scripts/utils/export2nm.py).
+The conversion is done by [scripts/utils/convert_heartbeats.py](../scripts/utils/convert_heartbeats.py).
 Its module documentation is the reference for the field mapping and for the caveats; the
 steps below are the operation itself.
 
@@ -106,11 +106,11 @@ before touching a real export. It shows the four cases that matter:
 ## 4. Convert
 
 ```bash
-python3 scripts/utils/export2nm.py ~/Downloads/events.csv \
+python3 scripts/utils/convert_heartbeats.py ~/Downloads/events.csv \
     --initial "DNS ping=1.1.1.1" --initial "Gateway ping=192.168.1.1" \
     --alias 8.8.8.8=1.1.1.1 \
     --label 1.1.1.1=cloudflare-dns --label 192.168.1.1=gateway \
-    -o /tmp/network-monitor-events.csv
+    -o /tmp/uptime-monitor-events.csv
 ```
 
 `--initial` seeds the address of a monitor whose first heartbeats carry no message, and
@@ -159,10 +159,10 @@ then writes the archive. A target's history before and after its own window stay
 target the archive does not mention keeps everything.
 
 ```bash
-cat /tmp/network-monitor-events.csv | docker -c qubo run --rm -i \
-  -v network-monitor-data:/var/lib/network-monitor \
-  network-monitor:dev \
-  import --replace-window --database /var/lib/network-monitor/events.db -
+cat /tmp/uptime-monitor-events.csv | docker -c qubo run --rm -i \
+  -v uptime-monitor-data:/var/lib/uptime-monitor \
+  uptime-monitor:dev \
+  import --replace-window --database /var/lib/uptime-monitor/events.db -
 ```
 
 The command reports what it removed first:
@@ -202,8 +202,8 @@ FROM events e ORDER BY target, occurred_at_ms;" > /tmp/native.csv
 
 { echo "target,label,interface,state,occurred_at,rtt_us"; cat /tmp/native.csv; } > /tmp/native-import.csv
 cat /tmp/native-import.csv | docker -c qubo run --rm -i \
-  -v network-monitor-data:/var/lib/network-monitor network-monitor:dev \
-  import --database /var/lib/network-monitor/events.db -
+  -v uptime-monitor-data:/var/lib/uptime-monitor uptime-monitor:dev \
+  import --database /var/lib/uptime-monitor/events.db -
 ```
 
 ## 6. Import into the database
@@ -216,13 +216,13 @@ stopped:
 
 ```bash
 # import from the pipe, in a one-off container on the same volume
-cat /tmp/network-monitor-events.csv | docker -c qubo run --rm -i \
-  -v network-monitor-data:/var/lib/network-monitor \
-  network-monitor:dev \
-  import --database /var/lib/network-monitor/events.db -
+cat /tmp/uptime-monitor-events.csv | docker -c qubo run --rm -i \
+  -v uptime-monitor-data:/var/lib/uptime-monitor \
+  uptime-monitor:dev \
+  import --database /var/lib/uptime-monitor/events.db -
 
 # start again
-docker -c qubo start network-monitor
+docker -c qubo start uptime-monitor
 ```
 
 The expected report is `imported <rows> events for <n> target(s) ... (<d> events dropped
@@ -231,8 +231,8 @@ as repeats of the state before them, plain csv format)`.
 ## 7. Verify
 
 ```bash
-docker -c qubo run --rm -v network-monitor-data:/var/lib/network-monitor \
-  network-monitor:dev query state --database /var/lib/network-monitor/events.db
+docker -c qubo run --rm -v uptime-monitor-data:/var/lib/uptime-monitor \
+  uptime-monitor:dev query state --database /var/lib/uptime-monitor/events.db
 curl -s http://qubo:8642/healthz
 ```
 
@@ -251,9 +251,9 @@ correct an earlier import, and a plain merge only to append a newer export.
 Put the backup taken before the import back and restart:
 
 ```bash
-docker -c qubo stop network-monitor
-docker -c qubo cp backups/events-<stamp>.db network-monitor:/var/lib/network-monitor/events.db
-docker -c qubo start network-monitor
+docker -c qubo stop uptime-monitor
+docker -c qubo cp backups/events-<stamp>.db uptime-monitor:/var/lib/uptime-monitor/events.db
+docker -c qubo start uptime-monitor
 ```
 
 ## Reference: closing a measurement gap with an `unknown` row
@@ -268,20 +268,20 @@ monitor stopped:
 
 ```bash
 # stop, then edit the file in place
-docker -c qubo stop network-monitor
-docker -c qubo cp network-monitor:/var/lib/network-monitor/events.db ./events.db
+docker -c qubo stop uptime-monitor
+docker -c qubo cp uptime-monitor:/var/lib/uptime-monitor/events.db ./events.db
 LAST=$(sqlite3 ./events.db "SELECT MAX(occurred_at_ms) FROM events
         WHERE target='1.1.1.1' AND occurred_at_ms < <first native event>")
 sqlite3 ./events.db "INSERT INTO events (target, interface, previous_state, state, occurred_at_ms, rtt_us)
   VALUES ('1.1.1.1', 'eth1', 'down', 'unknown', $LAST + 1, NULL);"
-docker -c qubo cp ./events.db network-monitor:/var/lib/network-monitor/events.db
+docker -c qubo cp ./events.db uptime-monitor:/var/lib/uptime-monitor/events.db
 
 # let the store recompute the chain: a one-row import of an event already stored
 # inserts nothing and runs the normalisation
 cat normalize.csv | docker -c qubo run --rm -i \
-  -v network-monitor-data:/var/lib/network-monitor network-monitor:dev \
-  import --database /var/lib/network-monitor/events.db -
-docker -c qubo start network-monitor
+  -v uptime-monitor-data:/var/lib/uptime-monitor uptime-monitor:dev \
+  import --database /var/lib/uptime-monitor/events.db -
+docker -c qubo start uptime-monitor
 ```
 
 The marker is drawn grey like any `unknown` band, so the unmeasured hours stop counting

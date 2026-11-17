@@ -1,6 +1,6 @@
 # Notifications — runbook
 
-How to declare, enable, verify, and repair a notification channel of `network-monitor`. The
+How to declare, enable, verify, and repair a notification channel of `uptime-monitor`. The
 behaviour is stated in [PRODUCT.md](./PRODUCT.md#functional-behaviour) (`FR-25`, `FR-28`,
 `FR-29`) and in [USER-GUIDE.md](./USER-GUIDE.md#notifications); this page is the operating
 procedure and the list of failure modes.
@@ -84,7 +84,7 @@ CHAT="-1001234567890"
 curl -sS "https://api.telegram.org/bot${TOKEN}/getMe"
 curl -sS -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
   -d "chat_id=${CHAT}" \
-  -d "text=network-monitor: channel test" \
+  -d "text=uptime-monitor: channel test" \
   -d "disable_web_page_preview=true"
 ```
 
@@ -99,7 +99,7 @@ charset=utf-8`, and `Authorization: Bearer <token>` when a token is configured. 
 requires an `https` URL, so it is never sent in clear.
 
 ```bash
-curl -sS -X POST "https://automation.example.test/hooks/network-monitor" \
+curl -sS -X POST "https://automation.example.test/hooks/uptime-monitor" \
   -H "Authorization: Bearer replace-me" \
   -H "Content-Type: application/json" \
   -d '{"schema":1,"event":"target_down","target":{"key":"icmp://1.1.1.1"},"state":"down"}'
@@ -117,7 +117,7 @@ endpoint receives is one line:
 [[notification]]
 name = "hook"
 type = "webhook"
-url = "https://automation.example.test/hooks/network-monitor"
+url = "https://automation.example.test/hooks/uptime-monitor"
 token = "replace-me"
 ```
 
@@ -131,7 +131,7 @@ path may itself be a secret.
 [[notification]]
 name = "audit"
 type = "logfile"
-filename = "/var/log/network-monitor/audit.log"
+filename = "/var/log/uptime-monitor/audit.log"
 logger = "notification"
 level = "info"
 format = "jsonl"
@@ -154,8 +154,8 @@ stderr and the line is still written to the current file: a channel stays silent
 event only when its `level` hides it.
 
 ```bash
-sudo install -d -m 750 -o network-monitor /var/log/network-monitor
-tail -F /var/log/network-monitor/audit.log
+sudo install -d -m 750 -o uptime-monitor /var/log/uptime-monitor
+tail -F /var/log/uptime-monitor/audit.log
 ```
 
 `format = "text"` writes the diagnostic line; `format = "jsonl"` writes one compact JSON
@@ -165,7 +165,7 @@ level admitted, so `error` hides warnings and information.
 ## 5. Verify
 
 ```bash
-network-monitor --show-config | grep -A4 '\[\[notification\]\]'   # secrets read <redacted>
+uptime-monitor --show-config | grep -A4 '\[\[notification\]\]'   # secrets read <redacted>
 ```
 
 | Check | Expected |

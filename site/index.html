@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>network-monitor — a lightweight reachability monitor</title>
+<title>uptime-monitor — a lightweight reachability monitor</title>
 <meta name="description" content="One executable that probes ICMP, TCP, DNS and HTTP, records only state changes in SQLite, and serves a read-only history page and a JSON API.">
-<link rel="canonical" href="https://dashie.github.io/network-monitor/">
+<link rel="canonical" href="https://dashie.github.io/uptime-monitor/">
 <meta property="og:type" content="website">
-<meta property="og:title" content="network-monitor — a lightweight reachability monitor">
+<meta property="og:title" content="uptime-monitor — a lightweight reachability monitor">
 <meta property="og:description" content="Probes ICMP, TCP, DNS and HTTP, records only state changes, and serves the history as a page and a JSON API. One executable, about 6 MB, no runtime.">
-<meta property="og:url" content="https://dashie.github.io/network-monitor/">
-<meta property="og:image" content="https://dashie.github.io/network-monitor/assets/og.jpg">
+<meta property="og:url" content="https://dashie.github.io/uptime-monitor/">
+<meta property="og:image" content="https://dashie.github.io/uptime-monitor/assets/og.jpg">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
@@ -21,9 +21,9 @@
 {
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
-  "name": "network-monitor",
+  "name": "uptime-monitor",
   "description": "Reachability monitor that records state transitions of ICMP, TCP, DNS and HTTP targets in an embedded SQLite history and serves them as a read-only page and a JSON API.",
-  "url": "https://dashie.github.io/network-monitor/",
+  "url": "https://dashie.github.io/uptime-monitor/",
   "applicationCategory": "DeveloperApplication",
   "operatingSystem": "macOS, Linux, Windows",
   "isAccessibleForFree": true,
@@ -32,7 +32,7 @@
     "price": "0",
     "priceCurrency": "USD"
   },
-  "license": "https://github.com/dashie/network-monitor/blob/main/LICENSE"
+  "license": "https://github.com/dashie/uptime-monitor/blob/main/LICENSE"
 }
 </script>
 </head>
@@ -42,7 +42,7 @@
 <header class="site-header">
   <a class="wordmark" href="#top">
     <img src="assets/icon.svg" alt="" width="32" height="32">
-    <span>network-monitor</span>
+    <span>uptime-monitor</span>
   </a>
   <nav aria-label="Sections">
     <a href="#why">Why</a>
@@ -52,7 +52,7 @@
     <a href="#screenshots">Screenshots</a>
     <a href="#quick-start">Quick start</a>
     <a href="#faq">FAQ</a>
-    <a class="button" href="https://github.com/dashie/network-monitor">Source</a>
+    <a class="button" href="https://github.com/dashie/uptime-monitor">Source</a>
   </nav>
 </header>
 
@@ -64,7 +64,7 @@
       you choose — writes a row to SQLite only when a target changes state, and serves that history as
       a read-only page and a JSON API from the same process.</p>
     <p class="actions">
-      <a class="button primary" href="https://github.com/dashie/network-monitor">Get the source</a>
+      <a class="button primary" href="https://github.com/dashie/uptime-monitor">Get the source</a>
       <a class="button" href="#quick-start">Quick start</a>
     </p>
     <p class="platforms">macOS · Linux · Windows · Docker · MIT</p>
@@ -137,7 +137,7 @@
     <p class="extension">Adding a check touches neither the store, the page, the API nor the exporter: a
       new <code>Method</code> variant, one module implementing <code>Probe</code>, one arm in the
       dispatcher. The recipe, and the tests that come with it, are in the
-      <a href="https://github.com/dashie/network-monitor/blob/main/docs/DEVELOPER-GUIDE.md#adding-a-probe-type">developer
+      <a href="https://github.com/dashie/uptime-monitor/blob/main/docs/DEVELOPER-GUIDE.md#adding-a-probe-type">developer
       guide</a>.</p>
   </section>
 
@@ -242,12 +242,12 @@
         <h3>Docker</h3>
         <p>One container, one volume, and host networking so that <code>interface = "eth1"</code> means
           the physical interface of the host. <code>NET_RAW</code> is needed for <code>icmp</code> only.</p>
-        <pre><code>docker run -d --name network-monitor \
+        <pre><code>docker run -d --name uptime-monitor \
   --cap-drop ALL --cap-add NET_RAW --network host \
-  -v network-monitor-data:/var/lib/network-monitor \
-  -v "$PWD/network-monitor.toml:/etc/network-monitor/config.toml:ro" \
-  network-monitor:dev \
-  monitor --config /etc/network-monitor/config.toml \
+  -v uptime-monitor-data:/var/lib/uptime-monitor \
+  -v "$PWD/uptime-monitor.toml:/etc/uptime-monitor/config.toml:ro" \
+  uptime-monitor:dev \
+  monitor --config /etc/uptime-monitor/config.toml \
   --listen 0.0.0.0:8642</code></pre>
       </div>
       <div class="snippet">
@@ -255,36 +255,36 @@
         <p>Rust 1.75 or newer. Raw ICMP sockets need elevated privileges on every platform;
           <code>tcp</code>, <code>dns</code> and <code>http</code> need none.</p>
         <pre><code>cargo build --release
-./target/release/network-monitor check --config ./network-monitor.toml
-sudo ./target/release/network-monitor monitor --config ./network-monitor.toml \
+./target/release/uptime-monitor check --config ./uptime-monitor.toml
+sudo ./target/release/uptime-monitor monitor --config ./uptime-monitor.toml \
   --listen 0.0.0.0:8642</code></pre>
       </div>
       <div class="snippet">
         <h3>From an empty folder</h3>
         <p>A scaffolded folder with a configuration, a database directory, and an event log; the
           active TCP target needs no privilege.</p>
-        <pre><code>./target/release/network-monitor init ./monitor
-(cd ./monitor && ../target/release/network-monitor check --config network-monitor.toml)
-(cd ./monitor && ../target/release/network-monitor monitor --config network-monitor.toml \
+        <pre><code>./target/release/uptime-monitor init ./monitor
+(cd ./monitor && ../target/release/uptime-monitor check --config uptime-monitor.toml)
+(cd ./monitor && ../target/release/uptime-monitor monitor --config uptime-monitor.toml \
   --listen 127.0.0.1:8642)</code></pre>
       </div>
       <div class="snippet">
         <h3>Read the manual</h3>
         <p>The user guide is embedded in the binary and works offline. Pipe it to a pager or a
           renderer if you want one.</p>
-        <pre><code>./target/release/network-monitor manual | less -R
-./target/release/network-monitor manual | mdcat --ansi | less -R</code></pre>
+        <pre><code>./target/release/uptime-monitor manual | less -R
+./target/release/uptime-monitor manual | mdcat --ansi | less -R</code></pre>
       </div>
       <div class="snippet">
         <h3>Look first, install later</h3>
         <p>A generated history: no network, no database, and the same seed replays the same board.</p>
-        <pre><code>./target/release/network-monitor simulate --listen 127.0.0.1:8660 \
+        <pre><code>./target/release/uptime-monitor simulate --listen 127.0.0.1:8660 \
   --history 30d --seed 0</code></pre>
       </div>
     </div>
     <p class="note">The same history is JSON at <code>/api/v1/faults</code>, and the reference at
       <code>/api/v1/docs</code> opens without a network. The
-      <a href="https://github.com/dashie/network-monitor/blob/main/docs/USER-GUIDE.md">user guide</a>
+      <a href="https://github.com/dashie/uptime-monitor/blob/main/docs/USER-GUIDE.md">user guide</a>
       covers every configuration key.</p>
   </section>
 
@@ -364,13 +364,13 @@ sudo ./target/release/network-monitor monitor --config ./network-monitor.toml \
         <summary>Can I add my own check?</summary>
         <p>Yes, and that is what the design is for: one <code>Probe</code> trait, one
           <code>Method</code> variant, one module. The
-          <a href="https://github.com/dashie/network-monitor/blob/main/docs/DEVELOPER-GUIDE.md#adding-a-probe-type">developer
+          <a href="https://github.com/dashie/uptime-monitor/blob/main/docs/DEVELOPER-GUIDE.md#adding-a-probe-type">developer
           guide</a> gives the steps and the tests that come with them.</p>
       </details>
       <details>
         <summary>Is it free?</summary>
         <p>Yes. It is released under the
-          <a href="https://github.com/dashie/network-monitor/blob/main/LICENSE">MIT licence</a>: use it,
+          <a href="https://github.com/dashie/uptime-monitor/blob/main/LICENSE">MIT licence</a>: use it,
           change it, ship it, with no account and no fee.</p>
       </details>
     </div>
@@ -380,13 +380,13 @@ sudo ./target/release/network-monitor monitor --config ./network-monitor.toml \
 
 <footer>
   <img src="assets/icon.svg" alt="" width="28" height="28">
-  <p class="provenance">network-monitor — one executable, built in Rust, released under the MIT
+  <p class="provenance">uptime-monitor — one executable, built in Rust, released under the MIT
     licence.</p>
   <nav aria-label="Elsewhere">
-    <a href="https://github.com/dashie/network-monitor">Source</a>
-    <a href="https://github.com/dashie/network-monitor/blob/main/docs/USER-GUIDE.md">User guide</a>
-    <a href="https://github.com/dashie/network-monitor/blob/main/assets/api/openapi.json">API contract</a>
-    <a href="https://github.com/dashie/network-monitor/blob/main/LICENSE">MIT licence</a>
+    <a href="https://github.com/dashie/uptime-monitor">Source</a>
+    <a href="https://github.com/dashie/uptime-monitor/blob/main/docs/USER-GUIDE.md">User guide</a>
+    <a href="https://github.com/dashie/uptime-monitor/blob/main/assets/api/openapi.json">API contract</a>
+    <a href="https://github.com/dashie/uptime-monitor/blob/main/LICENSE">MIT licence</a>
   </nav>
 </footer>
 

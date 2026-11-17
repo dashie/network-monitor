@@ -90,19 +90,19 @@ mod tests {
     #[test]
     fn the_snapshot_sits_beside_the_configuration() {
         assert_eq!(
-            path_for(Path::new("/etc/network-monitor.toml")),
-            PathBuf::from("/etc/network-monitor.toml.active")
+            path_for(Path::new("/etc/uptime-monitor.toml")),
+            PathBuf::from("/etc/uptime-monitor.toml.active")
         );
         assert_eq!(
-            path_for(Path::new("network-monitor.toml")),
-            PathBuf::from("network-monitor.toml.active")
+            path_for(Path::new("uptime-monitor.toml")),
+            PathBuf::from("uptime-monitor.toml.active")
         );
     }
 
     #[test]
     fn a_write_publishes_the_bytes_and_leaves_no_temporary() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("network-monitor.toml.active");
+        let path = directory.path().join("uptime-monitor.toml.active");
 
         write(&path, b"interval_ms = 1000\n").unwrap();
 
@@ -119,7 +119,7 @@ mod tests {
     #[test]
     fn a_second_write_overwrites_the_first() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("network-monitor.toml.active");
+        let path = directory.path().join("uptime-monitor.toml.active");
 
         write(&path, b"first\n").unwrap();
         write(&path, b"second\n").unwrap();
@@ -133,7 +133,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("network-monitor.toml.active");
+        let path = directory.path().join("uptime-monitor.toml.active");
         write(&path, b"secret = \"token\"\n").unwrap();
 
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
@@ -143,14 +143,14 @@ mod tests {
     #[test]
     fn a_missing_parent_is_an_error() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("missing/network-monitor.toml.active");
+        let path = directory.path().join("missing/uptime-monitor.toml.active");
         assert!(write(&path, b"x").is_err());
     }
 
     #[test]
     fn describe_names_the_path_and_an_age() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("network-monitor.toml.active");
+        let path = directory.path().join("uptime-monitor.toml.active");
         write(&path, b"x").unwrap();
 
         let description = describe(&path).expect("the file exists");

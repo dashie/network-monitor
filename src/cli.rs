@@ -12,13 +12,13 @@ use crate::config::{Overrides, TargetSpec};
 /// Event-based ICMP reachability monitor.
 #[derive(Debug, Parser)]
 #[command(
-    name = "network-monitor",
+    name = "uptime-monitor",
     version,
     about = "Probe IP addresses with ICMP and record only state transitions",
     disable_help_subcommand = true
 )]
 pub struct Cli {
-    /// Configuration file (default: ./network-monitor.toml when it exists)
+    /// Configuration file (default: ./uptime-monitor.toml when it exists)
     #[arg(long, global = true, value_name = "PATH")]
     pub config: Option<PathBuf>,
 
@@ -328,7 +328,7 @@ mod tests {
     use super::*;
 
     fn parse(args: &[&str]) -> Cli {
-        let mut full = vec!["network-monitor"];
+        let mut full = vec!["uptime-monitor"];
         full.extend_from_slice(args);
         Cli::try_parse_from(full).expect("arguments are valid")
     }
@@ -393,7 +393,7 @@ mod tests {
             other => panic!("unexpected command: {other:?}"),
         }
         assert!(
-            Cli::try_parse_from(["network-monitor", "init"]).is_err(),
+            Cli::try_parse_from(["uptime-monitor", "init"]).is_err(),
             "the folder is required"
         );
     }
@@ -405,7 +405,7 @@ mod tests {
             assert!(matches!(cli.command, Some(Command::Manual)));
         }
         assert!(
-            Cli::try_parse_from(["network-monitor", "manual", "extra"]).is_err(),
+            Cli::try_parse_from(["uptime-monitor", "manual", "extra"]).is_err(),
             "the command takes no arguments"
         );
     }
@@ -562,7 +562,7 @@ mod tests {
     #[test]
     fn simulate_requires_a_listen_address_and_a_numeric_seed() {
         assert!(
-            Cli::try_parse_from(["network-monitor", "simulate"]).is_err(),
+            Cli::try_parse_from(["uptime-monitor", "simulate"]).is_err(),
             "--listen is required"
         );
         let cli = parse(&["simulate", "--listen", ":0", "--seed", "42"]);
@@ -571,7 +571,7 @@ mod tests {
             other => panic!("unexpected command: {other:?}"),
         }
         assert!(Cli::try_parse_from([
-            "network-monitor",
+            "uptime-monitor",
             "simulate",
             "--listen",
             ":0",
@@ -583,7 +583,7 @@ mod tests {
 
     #[test]
     fn rejects_an_unknown_log_level() {
-        let result = Cli::try_parse_from(["network-monitor", "--log-level", "loud"]);
+        let result = Cli::try_parse_from(["uptime-monitor", "--log-level", "loud"]);
         assert!(result.is_err());
     }
 }

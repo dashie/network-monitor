@@ -10,12 +10,12 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use network_monitor::cli::Compression;
-use network_monitor::history::HistorySource;
-use network_monitor::shutdown::Shutdown;
-use network_monitor::store::{DatabaseSource, Event, EventFilter, Store, TargetState};
-use network_monitor::time::now_ms;
-use network_monitor::web;
+use uptime_monitor::cli::Compression;
+use uptime_monitor::history::HistorySource;
+use uptime_monitor::shutdown::Shutdown;
+use uptime_monitor::store::{DatabaseSource, Event, EventFilter, Store, TargetState};
+use uptime_monitor::time::now_ms;
+use uptime_monitor::web;
 
 struct Server {
     stop: Shutdown,
@@ -422,7 +422,7 @@ fn a_page_is_gzipped_when_the_client_accepts_it_and_only_then() {
         decoded.starts_with("<!doctype html>"),
         "the body decompresses to the page"
     );
-    assert!(decoded.contains("Network Monitor"));
+    assert!(decoded.contains("Uptime Monitor"));
     assert!(decoded.contains("Last 10 faults"));
     assert!(
         compressed.len() * 2 < plain.len(),
@@ -462,7 +462,7 @@ fn a_refused_coding_or_an_operator_switch_leaves_the_page_plain() {
         !head.contains("Content-Encoding"),
         "with the switch off the proxy compresses"
     );
-    assert!(String::from_utf8_lossy(&body).contains("Network Monitor"));
+    assert!(String::from_utf8_lossy(&body).contains("Uptime Monitor"));
 }
 
 #[test]
@@ -761,7 +761,7 @@ fn both_pages_show_the_mark_the_server_serves() {
     let (status, page) = server.get("/");
     assert_eq!(status, 200);
     assert!(page.contains(r#"<img class="mark" src="/icon.svg" alt="" width="36" height="36">"#));
-    assert!(page.contains(r#"<h1>Network Monitor</h1>"#));
+    assert!(page.contains(r#"<h1>Uptime Monitor</h1>"#));
     assert!(page.contains(r#"<p class="tagline">Reachability monitoring</p>"#));
     assert!(page.contains(r#"type="image/svg+xml" href="/icon.svg""#));
     assert!(page.contains(r#"type="image/png" sizes="32x32" href="/icon.png""#));
@@ -1053,7 +1053,7 @@ fn every_page_opens_with_the_same_brand_block() {
 
     let shared = brand(&page);
     assert!(shared.contains(r#"<img class="mark" src="/icon.svg""#));
-    assert!(shared.contains("<h1>Network Monitor</h1>"));
+    assert!(shared.contains("<h1>Uptime Monitor</h1>"));
     assert!(shared.contains(r#"<p class="tagline">Reachability monitoring</p>"#));
 }
 
@@ -1078,7 +1078,7 @@ fn the_identity_block_returns_to_the_timeline() {
         let end = block.find("</a>").expect("the identity block closes");
         let block = &block[..end];
         assert!(
-            block.contains(r#"<img class="mark""#) && block.contains("<h1>Network Monitor</h1>"),
+            block.contains(r#"<img class="mark""#) && block.contains("<h1>Uptime Monitor</h1>"),
             "the link covers the mark and the name: {block}"
         );
     }

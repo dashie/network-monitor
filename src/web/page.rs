@@ -99,7 +99,7 @@ pub fn page(
     let downs = faults_table(downs, window.to_ms, "");
 
     super::templates::load_template("page")
-        .replace("{title}", "Network Monitor")
+        .replace("{title}", "Uptime Monitor")
         .replace("{brand}", &super::templates::brand())
         .replace("{span}", &window_span(window))
         .replace("{windows}", &window_links(window))

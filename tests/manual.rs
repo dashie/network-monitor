@@ -7,7 +7,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn output(arg: &str) -> std::process::Output {
-    ProcessCommand::new(assert_cmd::cargo::cargo_bin!("network-monitor"))
+    ProcessCommand::new(assert_cmd::cargo::cargo_bin!("uptime-monitor"))
         .arg(arg)
         .output()
         .unwrap()
@@ -43,10 +43,10 @@ fn man_is_an_alias() {
 #[test]
 fn manual_reads_no_configuration() {
     let directory = tempfile::tempdir().unwrap();
-    let invalid = directory.path().join("network-monitor.toml");
+    let invalid = directory.path().join("uptime-monitor.toml");
     std::fs::write(&invalid, "not = [valid").unwrap();
 
-    ProcessCommand::new(assert_cmd::cargo::cargo_bin!("network-monitor"))
+    ProcessCommand::new(assert_cmd::cargo::cargo_bin!("uptime-monitor"))
         .current_dir(directory.path())
         .arg("manual")
         .output()
@@ -67,7 +67,7 @@ fn manual_rejects_configuration_flags() {
     ];
 
     for (flag, value) in cases {
-        let mut command = Command::cargo_bin("network-monitor").unwrap();
+        let mut command = Command::cargo_bin("uptime-monitor").unwrap();
         command
             .current_dir(directory.path())
             .arg("manual")
@@ -85,7 +85,7 @@ fn manual_rejects_configuration_flags() {
 fn manual_creates_no_files() {
     let directory = tempfile::tempdir().unwrap();
 
-    ProcessCommand::new(assert_cmd::cargo::cargo_bin!("network-monitor"))
+    ProcessCommand::new(assert_cmd::cargo::cargo_bin!("uptime-monitor"))
         .current_dir(directory.path())
         .arg("manual")
         .output()
@@ -103,7 +103,7 @@ fn manual_creates_no_files() {
 
 #[test]
 fn manual_help_lists_the_command_and_alias() {
-    Command::cargo_bin("network-monitor")
+    Command::cargo_bin("uptime-monitor")
         .unwrap()
         .arg("--help")
         .assert()
@@ -112,7 +112,7 @@ fn manual_help_lists_the_command_and_alias() {
         .stdout(predicate::str::contains("alias: man"));
 
     for name in ["manual", "man"] {
-        Command::cargo_bin("network-monitor")
+        Command::cargo_bin("uptime-monitor")
             .unwrap()
             .args([name, "--help"])
             .assert()
@@ -129,7 +129,7 @@ fn manual_survives_a_closed_pipe() {
     use std::io::Read;
     use std::process::Stdio;
 
-    let mut child = ProcessCommand::new(assert_cmd::cargo::cargo_bin!("network-monitor"))
+    let mut child = ProcessCommand::new(assert_cmd::cargo::cargo_bin!("uptime-monitor"))
         .arg("manual")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -1,4 +1,4 @@
-# Glossary — network-monitor
+# Glossary — uptime-monitor
 
 The domain language of this project. Each term has exactly one definition; code,
 documentation, and conversations use these terms and no synonyms. Add a term when it

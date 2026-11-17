@@ -1,4 +1,4 @@
-# Developer Guide — network-monitor
+# Developer Guide — uptime-monitor
 
 ## Tech stack
 
@@ -24,8 +24,8 @@
 3. Fetch the dependencies: `cargo fetch`.
 4. Build: `cargo build --release`.
 5. Run the suite: `cargo test`.
-6. Optional, container: `docker build -t network-monitor:dev .`.
-7. Optional, manual run: create `network-monitor.toml` from the example in [README.md](../README.md#quick-start), then `sudo cargo run -- monitor --config ./network-monitor.toml`.
+6. Optional, container: `docker build -t uptime-monitor:dev .`.
+7. Optional, manual run: create `uptime-monitor.toml` from the example in [README.md](../README.md#quick-start), then `sudo cargo run -- monitor --config ./uptime-monitor.toml`.
 
 Verify the setup before starting work: the build command below must succeed on a
 clean checkout.
@@ -33,7 +33,7 @@ clean checkout.
 ## Repository layout
 
 ```text
-network-monitor/
+uptime-monitor/
 ├── Cargo.toml            crate metadata, dependencies, MSRV
 ├── Cargo.lock            pinned dependency graph, committed
 ├── LICENSE               the MIT licence of the project
@@ -41,7 +41,7 @@ network-monitor/
 ├── docker/config.toml    default configuration shipped in the image
 ├── docker-compose.yml    self-contained compose project (host networking)
 ├── .dockerignore         keeps the build context to the sources
-├── network-monitor.toml  example configuration, kept in sync with the defaults
+├── uptime-monitor.toml   example configuration, kept in sync with the defaults
 ├── .github/
 │   └── workflows/
 │       └── pages.yml     assembles site/ plus the two icons, deploys to GitHub Pages
@@ -136,7 +136,7 @@ network-monitor/
 └── .vscode/              editor settings that register those contracts
 ```
 
-`docs/USER-GUIDE.md` is embedded with `include_str!` by `src/manual.rs`, so `network-monitor
+`docs/USER-GUIDE.md` is embedded with `include_str!` by `src/manual.rs`, so `uptime-monitor
 manual` prints the guide of the build; there is no second copy to keep in step.
 
 The icon is authored once in `assets/icon/icon.svg`; the PNGs next to it are its renders,
@@ -172,13 +172,13 @@ cargo build --release --target x86_64-unknown-linux-musl
 
 ```bash
 cargo run -- --help
-cargo run -- monitor --config ./network-monitor.toml
-cargo run -- monitor --config ./network-monitor.toml --listen 127.0.0.1:8642
-cargo run -- serve --database ./network-monitor.db --listen 127.0.0.1:8642
-cargo run -- import ./history.csv.gz --database ./network-monitor.db
-cargo run -- query state --config ./network-monitor.toml
-cargo run -- query events 1.1.1.1 --since 24h --config ./network-monitor.toml
-cargo run -- --show-config --config ./network-monitor.toml
+cargo run -- monitor --config ./uptime-monitor.toml
+cargo run -- monitor --config ./uptime-monitor.toml --listen 127.0.0.1:8642
+cargo run -- serve --database ./uptime-monitor.db --listen 127.0.0.1:8642
+cargo run -- import ./history.csv.gz --database ./uptime-monitor.db
+cargo run -- query state --config ./uptime-monitor.toml
+cargo run -- query events 1.1.1.1 --since 24h --config ./uptime-monitor.toml
+cargo run -- --show-config --config ./uptime-monitor.toml
 cargo run -- simulate --listen 127.0.0.1:8660
 ```
 
@@ -226,7 +226,7 @@ no-store`, so a refresh always fetches the current file.
 ## Landing page
 
 `site/` holds the public description of the project, published at
-<https://dashie.github.io/network-monitor/>. It is static: one `index.html`, one
+<https://dashie.github.io/uptime-monitor/>. It is static: one `index.html`, one
 `style.css`, four JPEGs under `site/assets/`, and the two crawl files. No build step, no
 framework, no JavaScript, no font download.
 
@@ -269,7 +269,7 @@ same command reproduces them on any machine:
 
 ```bash
 cargo build --release
-./target/release/network-monitor simulate --listen 127.0.0.1:8660 --history 30d --seed 0
+./target/release/uptime-monitor simulate --listen 127.0.0.1:8660 --history 30d --seed 0
 ```
 
 The two wide captures, at twice the CSS size so the JPEG stays sharp on a retina screen:
@@ -338,8 +338,8 @@ Build the image and move it to the NAS from the development machine. Two paths,
 same artifact.
 
 The image contains the executable and one default configuration at
-`/etc/network-monitor/config.toml`. That default probes the container's own loopback
-address and writes to `/var/lib/network-monitor/events.db`, so a bare `docker run`
+`/etc/uptime-monitor/config.toml`. That default probes the container's own loopback
+address and writes to `/var/lib/uptime-monitor/events.db`, so a bare `docker run`
 starts and proves that the raw socket and the database work; nothing outside the
 container is probed. Mount your own file over that path, or pass `--config` elsewhere,
 to monitor real targets. Without a mounted volume the events live in the container
@@ -361,14 +361,14 @@ section; the commands here are the same steps written by hand.
 
 ```bash
 docker context ls                                   # qubo -> tcp://qubo:2376
-docker -c qubo build -t network-monitor:dev .
-docker -c qubo run -d --name network-monitor \
+docker -c qubo build -t uptime-monitor:dev .
+docker -c qubo run -d --name uptime-monitor \
   --cap-drop ALL --cap-add NET_RAW --network host \
   --log-opt max-size=10m --log-opt max-file=3 \
-  -v network-monitor-data:/var/lib/network-monitor \
-  network-monitor:dev \
+  -v uptime-monitor-data:/var/lib/uptime-monitor \
+  uptime-monitor:dev \
   monitor --target 1.1.1.1,interface=eth1 --target 192.168.1.1 \
-  --database /var/lib/network-monitor/events.db
+  --database /var/lib/uptime-monitor/events.db
 ```
 
 `-c <context>` can be prepended to every command that must reach the NAS, including
@@ -386,11 +386,11 @@ file recompiles this crate only. Measured on the QNAP (i5-4590S, four cores): ab
 minutes for the first, cold build and about twenty seconds for the next one. Both are
 Docker 23 or newer features; the cache lives in the daemon, not in the build context.
 
-The image is tagged `network-monitor:dev` for development. Build and tag the artifact
+The image is tagged `uptime-monitor:dev` for development. Build and tag the artifact
 that leaves the machine with the `release` profile:
 
 ```bash
-docker -c qubo build --build-arg PROFILE=release -t network-monitor:0.1.0 .
+docker -c qubo build --build-arg PROFILE=release -t uptime-monitor:0.1.0 .
 ```
 
 **Through a registry**, multi-architecture in one command, built on the laptop:
@@ -398,16 +398,16 @@ docker -c qubo build --build-arg PROFILE=release -t network-monitor:0.1.0 .
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
   --build-arg PROFILE=release \
-  -t registry.example.com/network-monitor:0.1.0 --push .
+  -t registry.example.com/uptime-monitor:0.1.0 --push .
 ```
 
 **Without a registry and without a context**, export and load the image:
 
 ```bash
-docker build -t network-monitor:dev .
-docker save network-monitor:dev | gzip > network-monitor-dev.tar.gz
-scp network-monitor-dev.tar.gz admin@nas:/share/Container/
-ssh admin@nas 'gzip -dc /share/Container/network-monitor-dev.tar.gz | docker load'
+docker build -t uptime-monitor:dev .
+docker save uptime-monitor:dev | gzip > uptime-monitor-dev.tar.gz
+scp uptime-monitor-dev.tar.gz admin@nas:/share/Container/
+ssh admin@nas 'gzip -dc /share/Container/uptime-monitor-dev.tar.gz | docker load'
 ```
 
 ### Through compose, from the machine that holds the sources
@@ -428,7 +428,7 @@ The build context is streamed to the daemon and only the changed layers are rebu
 so a one-line source change costs seconds.
 
 The configuration is the `content` of the `monitor-config` config, mounted over
-`/etc/network-monitor/config.toml`: compose copies it into the container when it starts
+`/etc/uptime-monitor/config.toml`: compose copies it into the container when it starts
 it, so the content travels with the project and needs no file on the NAS. Edit that
 block to change the targets, the interval, the timeout, or the retention, then
 `compose up -d` — changed content recreates the container. Inline `content` needs
@@ -439,7 +439,7 @@ path.
 
 On a NAS that holds no sources, drop `build:` and keep `image:` pointing at the image
 you loaded or pulled: the `configs` block is what carries the configuration, so the same
-YAML runs an image built anywhere. The history lives in the `network-monitor-data` volume
+YAML runs an image built anywhere. The history lives in the `uptime-monitor-data` volume
 and survives `down` and `up`.
 
 #### Rebuilding a project that is already running
@@ -464,7 +464,7 @@ previous section — `build`, `rm -f`, `run` — with stop, remove and create le
 Compose.
 
 A file on the host is never needed. If you prefer to keep the configuration outside the
-compose file, mount it read-only over `/etc/network-monitor/config.toml` instead of the
+compose file, mount it read-only over `/etc/uptime-monitor/config.toml` instead of the
 `configs` entry; a bind mount is resolved on the daemon host, not on the machine running
 compose, so that file has to exist on the NAS. Host networking is Linux only, so this
 project is meant for the NAS, not for Docker Desktop on macOS.
@@ -475,15 +475,15 @@ The compose route above is the one to prefer: the image stays generic. Baking is
 flows that carry an image and nothing else — a saved tar, a registry push, a container
 started without compose.
 
-The image carries one configuration at `/etc/network-monitor/config.toml`, and the
+The image carries one configuration at `/etc/uptime-monitor/config.toml`, and the
 `CONFIG` build argument chooses which file inside the build context becomes it. Bake
 your own file in and no bind mount is needed anywhere the image is loaded: the
 configuration travels inside the image, through a registry, a saved tar, or a build
 that runs on the NAS from a streamed context.
 
 ```bash
-docker build --build-arg CONFIG=network-monitor.toml -t network-monitor:dev .
-docker -c qubo build --build-arg CONFIG=network-monitor.toml -t network-monitor:dev .
+docker build --build-arg CONFIG=uptime-monitor.toml -t uptime-monitor:dev .
+docker -c qubo build --build-arg CONFIG=uptime-monitor.toml -t uptime-monitor:dev .
 ```
 
 In compose, set the same argument and start the monitor from the baked path instead of
@@ -494,13 +494,13 @@ targets it lists:
     build:
       context: .
       args:
-        CONFIG: network-monitor.toml
-    command: [monitor, "--config", "/etc/network-monitor/config.toml"]
+        CONFIG: uptime-monitor.toml
+    command: [monitor, "--config", "/etc/uptime-monitor/config.toml"]
 ```
 
 Three conditions make a baked file work: it must sit inside the build context (the
 repository files are not excluded by [.dockerignore](../.dockerignore)), its `database`
-must point at the mounted volume (`/var/lib/network-monitor/events.db`), and its
+must point at the mounted volume (`/var/lib/uptime-monitor/events.db`), and its
 `[[targets]]` carry the interfaces by name. The configuration is then frozen in the
 image: editing it means rebuilding and redistributing the image, while the history in
 the volume is untouched.
@@ -509,30 +509,30 @@ the volume is untouched.
 
 ```bash
 # Default configuration, database in the container layer: a proof of life.
-docker run --rm --cap-drop ALL --cap-add NET_RAW network-monitor:dev
+docker run --rm --cap-drop ALL --cap-add NET_RAW uptime-monitor:dev
 
 # Real deployment on the NAS: own configuration, named volume, restart policy.
-docker -c qubo run -d --name network-monitor \
+docker -c qubo run -d --name uptime-monitor \
   --restart unless-stopped \
   --cap-drop ALL --cap-add NET_RAW \
   --network host \
   --log-opt max-size=10m --log-opt max-file=3 \
-  -v /share/Container/network-monitor/config.toml:/etc/network-monitor/config.toml:ro \
-  -v network-monitor-data:/var/lib/network-monitor \
-  network-monitor:dev \
-  monitor --config /etc/network-monitor/config.toml
+  -v /share/Container/uptime-monitor/config.toml:/etc/uptime-monitor/config.toml:ro \
+  -v uptime-monitor-data:/var/lib/uptime-monitor \
+  uptime-monitor:dev \
+  monitor --config /etc/uptime-monitor/config.toml
 
 # Read the history from a second container while the monitor runs. No capability
 # and no host networking are needed to query.
-docker -c qubo run --rm -v network-monitor-data:/var/lib/network-monitor \
-  network-monitor:dev query events --database /var/lib/network-monitor/events.db
+docker -c qubo run --rm -v uptime-monitor-data:/var/lib/uptime-monitor \
+  uptime-monitor:dev query events --database /var/lib/uptime-monitor/events.db
 
 # Effective configuration, and the live log stream.
-docker -c qubo run --rm network-monitor:dev --show-config --config /etc/network-monitor/config.toml
-docker -c qubo logs -f network-monitor
+docker -c qubo run --rm uptime-monitor:dev --show-config --config /etc/uptime-monitor/config.toml
+docker -c qubo logs -f uptime-monitor
 
 # Stop: SIGTERM, the monitor finishes the current cycle and exits.
-docker -c qubo stop network-monitor
+docker -c qubo stop uptime-monitor
 ```
 
 Passing a command replaces the image `CMD`, so the default `--config` disappears with
@@ -542,13 +542,13 @@ from the command line, with no mounted file — the command used to validate the
 deployment:
 
 ```bash
-docker -c qubo run -d --name network-monitor \
+docker -c qubo run -d --name uptime-monitor \
   --cap-drop ALL --cap-add NET_RAW --network host \
   --log-opt max-size=10m --log-opt max-file=3 \
-  -v network-monitor-data:/var/lib/network-monitor \
-  network-monitor:dev \
+  -v uptime-monitor-data:/var/lib/uptime-monitor \
+  uptime-monitor:dev \
   monitor --target 1.1.1.1,interface=eth1 --target 192.168.1.1 \
-  --database /var/lib/network-monitor/events.db
+  --database /var/lib/uptime-monitor/events.db
 ```
 
 The database file is created by the monitor: on a fresh volume, a query started before
@@ -557,26 +557,26 @@ the first write reports that it does not exist yet.
 ### Inspecting a running container
 
 The runtime image is `scratch`: it is not the `rust:1-alpine` build stage, which is
-discarded. There is no shell, no `ip`, no `sqlite3` — only `/network-monitor`. An
+discarded. There is no shell, no `ip`, no `sqlite3` — only `/uptime-monitor`. An
 `exec` of `/bin/sh` or `/bin/bash` fails with `no such file or directory` (exit 126 or
 127). That is deliberate: the smallest possible surface and a 4.5 MB image.
 
 `exec` can still run the binary itself, without mounting a second container:
 
 ```bash
-docker -c qubo exec network-monitor \
-  /network-monitor query state --database /var/lib/network-monitor/events.db
+docker -c qubo exec uptime-monitor \
+  /uptime-monitor query state --database /var/lib/uptime-monitor/events.db
 ```
 
 To take the database away:
 
 ```bash
 # While it runs, copy the whole directory: recent writes live in the -wal file.
-docker -c qubo cp network-monitor:/var/lib/network-monitor ./data
+docker -c qubo cp uptime-monitor:/var/lib/uptime-monitor ./data
 
 # After a clean stop the WAL is checkpointed, so the single file is complete.
-docker -c qubo stop network-monitor
-docker -c qubo cp network-monitor:/var/lib/network-monitor/events.db ./events.db
+docker -c qubo stop uptime-monitor
+docker -c qubo cp uptime-monitor:/var/lib/uptime-monitor/events.db ./events.db
 sqlite3 ./events.db 'select target, state, occurred_at_ms from events;'
 ```
 
@@ -584,7 +584,7 @@ To inspect the network the container actually sees, join its namespace with a to
 image; the interfaces are the same, including when host networking is in use:
 
 ```bash
-docker -c qubo run --rm --network container:network-monitor alpine:3.20 ip -o link
+docker -c qubo run --rm --network container:uptime-monitor alpine:3.20 ip -o link
 ```
 
 Use `nicolaka/netshoot` instead of `alpine` when you need `ping`, `tcpdump`, or `ss`.
@@ -597,16 +597,16 @@ Host networking is already in use for the interface binding, so the monitor itse
 serves the page on the NAS address and no port is published:
 
 ```bash
-docker -c qubo run -d --name network-monitor \
+docker -c qubo run -d --name uptime-monitor \
   --restart unless-stopped \
   --network host \
   --cap-drop ALL --cap-add NET_RAW \
   --log-opt max-size=10m --log-opt max-file=3 \
-  -v /share/Container/network-monitor/config.toml:/etc/network-monitor/config.toml:ro \
-  -v network-monitor-data:/var/lib/network-monitor \
-  network-monitor:dev \
-  monitor --config /etc/network-monitor/config.toml \
-  --database /var/lib/network-monitor/events.db --listen 0.0.0.0:8642
+  -v /share/Container/uptime-monitor/config.toml:/etc/uptime-monitor/config.toml:ro \
+  -v uptime-monitor-data:/var/lib/uptime-monitor \
+  uptime-monitor:dev \
+  monitor --config /etc/uptime-monitor/config.toml \
+  --database /var/lib/uptime-monitor/events.db --listen 0.0.0.0:8642
 ```
 
 The page is then at `http://<nas>:8642/`; select a lane to open that target's 30-day
@@ -618,12 +618,12 @@ networking, for example on a laptop reading a copy of the database or against th
 volume:
 
 ```bash
-docker -c qubo run -d --name network-monitor-web \
+docker -c qubo run -d --name uptime-monitor-web \
   --restart unless-stopped \
   -p 8642:8642 \
-  -v network-monitor-data:/var/lib/network-monitor \
-  network-monitor:dev \
-  serve --listen 0.0.0.0:8642 --database /var/lib/network-monitor/events.db
+  -v uptime-monitor-data:/var/lib/uptime-monitor \
+  uptime-monitor:dev \
+  serve --listen 0.0.0.0:8642 --database /var/lib/uptime-monitor/events.db
 ```
 
 ### Restoring the history after a redeploy
@@ -633,13 +633,13 @@ or pipe it, and the faults are written into the target database.
 
 ```bash
 # from the archive the page offered
-network-monitor import ./faults-20261109.csv.gz --database /var/lib/network-monitor/events.db
+uptime-monitor import ./faults-20261109.csv.gz --database /var/lib/uptime-monitor/events.db
 
 # straight from the page
-network-monitor import http://nas:8642/export/faults.csv.gz --database ./events.db
+uptime-monitor import http://nas:8642/export/faults.csv.gz --database ./events.db
 
 # from a pipe, with the format detected
-gunzip -c faults.csv.gz | network-monitor import - --database ./events.db
+gunzip -c faults.csv.gz | uptime-monitor import - --database ./events.db
 ```
 
 The format is detected from the first two bytes, so a plain CSV works as it is. The rows need no order: the chain is rebuilt from the timestamps at the end of the import, and an event that repeats the state before it is dropped and counted. Running
@@ -660,7 +660,7 @@ events, even the ones inside the span the file brackets (ADR-0020).
 
 ```bash
 # re-apply a corrected archive over the same days
-network-monitor import corrected.csv.gz --replace-window --database ./events.db
+uptime-monitor import corrected.csv.gz --replace-window --database ./events.db
 ```
 
 The archive is read twice in that mode, so stdin and an URL are copied once into
@@ -680,9 +680,9 @@ clean stop checkpoints the WAL into the main file, so the single `.db` is comple
 an unclean stop copy `events.db-wal` as well, or the backup is missing the last writes.
 
 ```bash
-docker -c qubo stop network-monitor
+docker -c qubo stop uptime-monitor
 mkdir -p backups
-docker -c qubo cp network-monitor:/var/lib/network-monitor/events.db \
+docker -c qubo cp uptime-monitor:/var/lib/uptime-monitor/events.db \
   "backups/events-$(date +%Y%m%d-%H%M%S).db"
 ```
 
@@ -788,7 +788,7 @@ cargo clippy --all-targets -- -D warnings
 2. Add the matching `clap` argument in `cli.rs`; there is no option without a flag (INV-2). The one deliberate exception is the notification declarations and the `notify` lists of `FR-25`: they carry secrets, so they are read from the file only, and every secret reads `<redacted>` in `Debug`, `to_toml`, and every error string (ADR-0033). Never add a flag, an environment variable, or a log line for a secret.
 3. Apply the merge in `config.rs`, which is the only place that knows the precedence order.
 4. Decide whether the value applies to a running monitor: if it does, apply it in `Supervisor::apply` and cover it in `tests/reload.rs`; if it needs a restart, warn there instead.
-5. Document the key in `network-monitor.sample.toml`, in the README example, in the user guide, and in [PRODUCT.md](./PRODUCT.md) when it changes behaviour.
+5. Document the key in `uptime-monitor.sample.toml`, in the README example, in the user guide, and in [PRODUCT.md](./PRODUCT.md) when it changes behaviour.
 6. Test three cases: value from the file only, value from the flag only, flag overriding the file.
 7. A key that names a file is resolved against the file that states it: rebase it in
    `FileConfig::rebase_paths` (called by `config::parse_at`) and leave the flag value relative
@@ -834,7 +834,7 @@ alternatives and the effect on the static build (ADR-0024 is the example).
    `Destination` — the real sink — so two channels cannot share one (INV-14).
 2. Create `notify/<type>.rs` and implement `Channel`: `name`, `kind`, `open`, `verify`,
    `payload`, `send`, `close`. `verify` proves the channel can deliver without delivering
-   anything, and it is what `network-monitor check` runs; keep it cheap and read-only (a
+   anything, and it is what `uptime-monitor check` runs; keep it cheap and read-only (a
    `getMe`, a connection that is closed again, a file opened and closed). Keep the
    serialisation inside the module; the trait is the only contract the runner knows.
 3. Refuse a key that belongs to another type, and refuse a secret on a plaintext URL. Scrub
@@ -895,6 +895,20 @@ Fixed rules for adding anything to this project:
 <!-- skill:end:devguide-design-rules -->
 
 <!-- skill:block:devguide-git-standards -->
+## Renaming the repositories
+
+The tool was renamed `uptime-monitor` in plan 014; the repositories are renamed separately,
+by the owner. GitHub and Gitea redirect a renamed repository's web URL, but the GitHub Pages
+project address changes with the repository name, so the site already states the new
+canonical URL.
+
+1. Rename the Gitea repository, then update the remote:
+   `git remote set-url origin ssh://git@gitea.h7labs.it/maurizio/uptime-monitor.git`.
+2. Rename the GitHub mirror to `uptime-monitor` and check that the Pages workflow publishes
+   `https://dashie.github.io/uptime-monitor/`.
+3. Rename the local checkout folder and reopen the workspace.
+4. Old clones and links keep working through the redirects; update external bookmarks.
+
 ## Git Standards
 
 These rules are mandatory for every contributor, human or AI. They define how work

@@ -8,14 +8,14 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use network_monitor::config::{self, Config, Overrides};
-use network_monitor::monitor::{self, Reload};
-use network_monitor::notify::fake::FakeNotifier;
-use network_monitor::notify::Notifier;
-use network_monitor::probe::fake::{up, FakeProbe};
-use network_monitor::probe::Probe;
-use network_monitor::shutdown::Shutdown;
-use network_monitor::store::{EventFilter, Store};
+use uptime_monitor::config::{self, Config, Overrides};
+use uptime_monitor::monitor::{self, Reload};
+use uptime_monitor::notify::fake::FakeNotifier;
+use uptime_monitor::notify::Notifier;
+use uptime_monitor::probe::fake::{up, FakeProbe};
+use uptime_monitor::probe::Probe;
+use uptime_monitor::shutdown::Shutdown;
+use uptime_monitor::store::{EventFilter, Store};
 
 struct Running {
     stop: Shutdown,
@@ -193,7 +193,7 @@ fn wait_for_events(database: &Path, expected: usize, timeout: Duration) {
 
 fn temp_paths() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let directory = tempfile::tempdir().unwrap();
-    let config_path = directory.path().join("network-monitor.toml");
+    let config_path = directory.path().join("uptime-monitor.toml");
     let database = directory.path().join("events.db");
     (directory, config_path, database)
 }
@@ -399,7 +399,7 @@ fn a_promotion_is_not_replayed_as_a_reload() {
     let candidate_path = directory.path().join("next.toml");
     write_config(&candidate_path, &database, 30, &["127.0.0.1", "127.0.0.2"]);
     let bytes = std::fs::read(&candidate_path).expect("the test reads the candidate");
-    let candidate = network_monitor::promote::Candidate {
+    let candidate = uptime_monitor::promote::Candidate {
         source: candidate_path,
         main: config_path.clone(),
         bytes: bytes.clone(),
@@ -437,7 +437,7 @@ fn a_promotion_is_not_replayed_as_a_reload() {
 fn start_with_promotion(
     config_path: &Path,
     database: &Path,
-    candidate: network_monitor::promote::Candidate,
+    candidate: uptime_monitor::promote::Candidate,
 ) -> (Running, Arc<FakeNotifier>) {
     let loaded = config::load(Some(config_path)).unwrap().unwrap();
     let settings = Config::resolve(Some(loaded.config), Overrides::default()).unwrap();

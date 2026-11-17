@@ -8,10 +8,10 @@ use std::path::Path;
 use std::thread;
 
 use assert_cmd::Command;
-use network_monitor::import;
-use network_monitor::store::{Event, EventFilter, Store, TargetState};
-use network_monitor::web::export::write_csv_gz;
 use predicates::prelude::*;
+use uptime_monitor::import;
+use uptime_monitor::store::{Event, EventFilter, Store, TargetState};
+use uptime_monitor::web::export::write_csv_gz;
 
 const HEADER: &str = "target,label,interface,state,occurred_at,rtt_us\n";
 
@@ -323,7 +323,7 @@ fn the_cli_reads_the_archive_from_standard_input() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let restored = directory.path().join("restored.db");
 
-    Command::cargo_bin("network-monitor")
+    Command::cargo_bin("uptime-monitor")
         .expect("the binary builds")
         .args(["import", "-", "--database", restored.to_str().unwrap()])
         .write_stdin(format!(
@@ -612,7 +612,7 @@ fn a_replacement_over_stdin_works_by_spooling() {
         .expect("the event is written");
     drop(store);
 
-    Command::cargo_bin("network-monitor")
+    Command::cargo_bin("uptime-monitor")
         .expect("the binary builds")
         .args([
             "import",

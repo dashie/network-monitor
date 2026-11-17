@@ -302,7 +302,7 @@ mod tests {
     #[test]
     fn a_name_that_does_not_resolve_is_a_local_error() {
         let error = TcpProbe::new()
-            .probe(&tcp("network-monitor.invalid", 80), None, timeout())
+            .probe(&tcp("uptime-monitor.invalid", 80), None, timeout())
             .expect_err("a name that does not resolve is our failure");
 
         assert_eq!(error.code(), "TCP.RESOLVE");

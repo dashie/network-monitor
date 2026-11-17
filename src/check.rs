@@ -540,7 +540,7 @@ mod tests {
     #[test]
     fn a_missing_snapshot_is_a_warning_with_no_failure() {
         let directory = tempfile::tempdir().unwrap();
-        let active = directory.path().join("network-monitor.toml.active");
+        let active = directory.path().join("uptime-monitor.toml.active");
         let report = run_with(
             &config(directory.path(), Some(vec![icmp_target("127.0.0.1")])),
             Options {
@@ -559,7 +559,7 @@ mod tests {
     #[test]
     fn an_existing_snapshot_is_ok_with_its_path_and_age() {
         let directory = tempfile::tempdir().unwrap();
-        let active = directory.path().join("network-monitor.toml.active");
+        let active = directory.path().join("uptime-monitor.toml.active");
         crate::snapshot::write(&active, b"interval_ms = 1000\n").unwrap();
         let report = run_with(
             &config(directory.path(), Some(vec![icmp_target("127.0.0.1")])),

@@ -817,7 +817,7 @@ mod tests {
         let verdict = DnsProbe::new()
             .probe(
                 &Endpoint::Dns {
-                    name: "network-monitor.invalid".to_string(),
+                    name: "uptime-monitor.invalid".to_string(),
                     resolver: None,
                     record: RecordType::A,
                 },

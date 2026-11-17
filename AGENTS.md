@@ -1,6 +1,6 @@
-# network-monitor — Agent Instructions
+# uptime-monitor — Agent Instructions
 
-`network-monitor` is a command-line reachability monitor written in Rust. It probes a list of IP addresses with ICMP echo requests defined in a TOML file, optionally from a specific network interface, and records only the moments a target becomes reachable or unreachable in an embedded SQLite database.
+`uptime-monitor` is a command-line reachability monitor written in Rust. It probes a list of IP addresses with ICMP echo requests defined in a TOML file, optionally from a specific network interface, and records only the moments a target becomes reachable or unreachable in an embedded SQLite database.
 
 The repository holds the documentation baseline and the implementation that produces one dependency-free executable for macOS, Linux, and Windows.
 

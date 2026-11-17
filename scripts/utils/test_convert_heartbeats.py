@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import export2nm
+import convert_heartbeats
 
 
 def heartbeat(monitor, status, time, message="", ping=""):
@@ -24,7 +24,7 @@ def heartbeat(monitor, status, time, message="", ping=""):
 class AddressTest(unittest.TestCase):
     def test_the_address_follows_the_ping_command(self):
         self.assertEqual(
-            export2nm.address_of("PING 1.1.1.1 (1.1.1.1) 56(84) bytes of data."),
+            convert_heartbeats.address_of("PING 1.1.1.1 (1.1.1.1) 56(84) bytes of data."),
             "1.1.1.1",
         )
 
@@ -33,33 +33,33 @@ class AddressTest(unittest.TestCase):
             "PING 192.168.1.1 (192.168.1.1) 56(84) bytes of data. "
             "From 192.168.2.1 icmp_seq=1 Destination Net Unreachable"
         )
-        self.assertEqual(export2nm.address_of(message), "192.168.1.1")
+        self.assertEqual(convert_heartbeats.address_of(message), "192.168.1.1")
 
     def test_a_message_without_a_ping_names_no_address(self):
-        self.assertIsNone(export2nm.address_of(""))
-        self.assertIsNone(export2nm.address_of("monitor is paused"))
+        self.assertIsNone(convert_heartbeats.address_of(""))
+        self.assertIsNone(convert_heartbeats.address_of("monitor is paused"))
 
 
 class FieldTest(unittest.TestCase):
     def test_the_time_becomes_an_instant_in_utc(self):
         self.assertEqual(
-            export2nm.instant("2026-07-05 16:23:47.590"), "2026-07-05T16:23:47.590Z"
+            convert_heartbeats.instant("2026-07-05 16:23:47.590"), "2026-07-05T16:23:47.590Z"
         )
-        self.assertEqual(export2nm.instant("2026-07-05 16:23:47"), "2026-07-05T16:23:47.000Z")
+        self.assertEqual(convert_heartbeats.instant("2026-07-05 16:23:47"), "2026-07-05T16:23:47.000Z")
 
     def test_the_ping_becomes_microseconds(self):
-        self.assertEqual(export2nm.micros("6.56"), "6560")
-        self.assertEqual(export2nm.micros("6"), "6000")
-        self.assertEqual(export2nm.micros(""), "")
+        self.assertEqual(convert_heartbeats.micros("6.56"), "6560")
+        self.assertEqual(convert_heartbeats.micros("6"), "6000")
+        self.assertEqual(convert_heartbeats.micros(""), "")
 
     def test_an_unreadable_ping_is_refused(self):
         with self.assertRaises(ValueError):
-            export2nm.micros("n/a")
+            convert_heartbeats.micros("n/a")
 
 
 class ConvertTest(unittest.TestCase):
     def convert(self, rows, **options):
-        return export2nm.convert(
+        return convert_heartbeats.convert(
             rows,
             options.get("initial", {}),
             options.get("aliases", {}),
@@ -165,7 +165,7 @@ class ExampleTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "events.csv"
             self.assertEqual(
-                export2nm.main(
+                convert_heartbeats.main(
                     [
                         str(origin),
                         "--initial",
@@ -199,7 +199,7 @@ class CommandTest(unittest.TestCase):
             origin.write_text(source, encoding="utf-8")
             target = Path(directory) / "events.csv"
             self.assertEqual(
-                export2nm.main([str(origin), "-o", str(target)]), 0
+                convert_heartbeats.main([str(origin), "-o", str(target)]), 0
             )
             self.assertEqual(
                 target.read_text(encoding="utf-8"),
@@ -211,7 +211,7 @@ class CommandTest(unittest.TestCase):
     def test_an_unreadable_file_exits_with_two(self):
         with tempfile.TemporaryDirectory() as directory:
             missing = Path(directory) / "absent.csv"
-            self.assertEqual(export2nm.main([str(missing)]), 2)
+            self.assertEqual(convert_heartbeats.main([str(missing)]), 2)
 
 
 if __name__ == "__main__":

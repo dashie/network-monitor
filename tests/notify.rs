@@ -4,14 +4,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use network_monitor::config::{
+use uptime_monitor::config::{
     ChannelSettings, LogFile as LogFileSettings, LogFormat, NotificationConfig,
 };
-use network_monitor::logging::Level;
-use network_monitor::notify::fake::FakeChannel;
-use network_monitor::notify::message::{Cause, Kind, TargetRef};
-use network_monitor::notify::{start_with, Message, SendError};
-use network_monitor::shutdown::Shutdown;
+use uptime_monitor::logging::Level;
+use uptime_monitor::notify::fake::FakeChannel;
+use uptime_monitor::notify::message::{Cause, Kind, TargetRef};
+use uptime_monitor::notify::{start_with, Message, SendError};
+use uptime_monitor::shutdown::Shutdown;
 
 const KEY: &str = "tcp://1.1.1.1:443";
 
@@ -69,7 +69,7 @@ fn wait_for(condition: impl Fn() -> bool, timeout: Duration, what: &str) {
     }
 }
 
-fn start(config: &NotificationConfig, sink: &FakeChannel) -> network_monitor::notify::Handle {
+fn start(config: &NotificationConfig, sink: &FakeChannel) -> uptime_monitor::notify::Handle {
     start_with(config, |_| Box::new(sink.clone()), &Shutdown::new()).expect("the channel starts")
 }
 
@@ -198,7 +198,7 @@ fn the_startup_message_reaches_the_root_list() {
     let handle = start(&config(Duration::from_secs(60), true), &sink);
 
     handle.notifier.send(Message::startup(
-        Some("/etc/network-monitor.toml".to_string()),
+        Some("/etc/uptime-monitor.toml".to_string()),
         vec![KEY.to_string()],
         Some("http://0.0.0.0:8642/".to_string()),
         0,
@@ -214,7 +214,7 @@ fn the_startup_message_reaches_the_root_list() {
         .into_iter()
         .find(|body| body.starts_with("READY"))
         .expect("the startup payload");
-    assert!(ready.contains("Config: /etc/network-monitor.toml"));
+    assert!(ready.contains("Config: /etc/uptime-monitor.toml"));
     assert!(ready.contains("\n- tcp://1.1.1.1:443"));
     handle.shutdown(None);
 }

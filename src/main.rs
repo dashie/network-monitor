@@ -8,25 +8,25 @@ use std::sync::{Arc, Mutex};
 use clap::Parser;
 use thiserror::Error;
 
-use network_monitor::check;
-use network_monitor::cli::{Cli, Command, Compression};
-use network_monitor::config::{self, ChannelSettings, Config, ConfigError, Overrides};
-use network_monitor::history::HistorySource;
-use network_monitor::import::{self, ImportError};
-use network_monitor::init;
-use network_monitor::logging::{self, Level};
-use network_monitor::manual;
-use network_monitor::monitor::{self, RunError};
-use network_monitor::probe::interface;
-use network_monitor::probe::{Probe, Prober};
-use network_monitor::promote::Candidate;
-use network_monitor::query::{self, QueryError};
-use network_monitor::shutdown;
-use network_monitor::sim::history::SimulatedSource;
-use network_monitor::snapshot;
-use network_monitor::store::{DatabaseSource, Store, StoreError};
-use network_monitor::time::{format_rfc3339, now_ms};
-use network_monitor::web::{self, ServeError};
+use uptime_monitor::check;
+use uptime_monitor::cli::{Cli, Command, Compression};
+use uptime_monitor::config::{self, ChannelSettings, Config, ConfigError, Overrides};
+use uptime_monitor::history::HistorySource;
+use uptime_monitor::import::{self, ImportError};
+use uptime_monitor::init;
+use uptime_monitor::logging::{self, Level};
+use uptime_monitor::manual;
+use uptime_monitor::monitor::{self, RunError};
+use uptime_monitor::probe::interface;
+use uptime_monitor::probe::{Probe, Prober};
+use uptime_monitor::promote::Candidate;
+use uptime_monitor::query::{self, QueryError};
+use uptime_monitor::shutdown;
+use uptime_monitor::sim::history::SimulatedSource;
+use uptime_monitor::snapshot;
+use uptime_monitor::store::{DatabaseSource, Store, StoreError};
+use uptime_monitor::time::{format_rfc3339, now_ms};
+use uptime_monitor::web::{self, ServeError};
 
 fn main() -> ExitCode {
     match run() {

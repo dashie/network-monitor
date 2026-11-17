@@ -2,11 +2,11 @@
 
 use clap::Parser;
 
-use network_monitor::cli::Cli;
-use network_monitor::config::{Config, FileConfig, FileNotification, FileTarget, Overrides};
+use uptime_monitor::cli::Cli;
+use uptime_monitor::config::{Config, FileConfig, FileNotification, FileTarget, Overrides};
 
 fn parse(arguments: &[&str]) -> Cli {
-    let mut full = vec!["network-monitor"];
+    let mut full = vec!["uptime-monitor"];
     full.extend_from_slice(arguments);
     Cli::try_parse_from(full).expect("the arguments are valid")
 }
@@ -85,7 +85,7 @@ fn built_in_defaults_apply_below_the_file() {
 
     assert_eq!(config.interval.as_millis(), 5_000);
     assert_eq!(config.timeout.as_millis(), 2_000);
-    assert_eq!(config.database.to_string_lossy(), "network-monitor.db");
+    assert_eq!(config.database.to_string_lossy(), "uptime-monitor.db");
     assert_eq!(config.retention_days, 0);
 }
 
@@ -160,8 +160,8 @@ fn the_target_keys_of_every_method_are_reachable_from_the_flag() {
 /// INV-2: they carry secrets, so they are read from the file only.
 #[test]
 fn the_notification_channels_have_no_flag() {
-    assert!(Cli::try_parse_from(["network-monitor", "--notification", "x"]).is_err());
-    assert!(Cli::try_parse_from(["network-monitor", "--notify", "x"]).is_err());
+    assert!(Cli::try_parse_from(["uptime-monitor", "--notification", "x"]).is_err());
+    assert!(Cli::try_parse_from(["uptime-monitor", "--notify", "x"]).is_err());
 
     let file = FileConfig {
         notification: Some(vec![FileNotification {
@@ -189,14 +189,14 @@ fn the_notification_channels_have_no_flag() {
 #[test]
 fn the_file_paths_are_resolved_beside_the_file() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("network-monitor.toml");
+    let path = directory.path().join("uptime-monitor.toml");
     std::fs::write(
         &path,
         "database = \"events.db\"\n\n[[targets]]\nip = \"1.1.1.1\"\n",
     )
     .unwrap();
 
-    let loaded = network_monitor::config::load(Some(&path)).unwrap().unwrap();
+    let loaded = uptime_monitor::config::load(Some(&path)).unwrap().unwrap();
     let config = Config::resolve(Some(loaded.config), parse(&[]).overrides().unwrap()).unwrap();
 
     assert_eq!(config.database, directory.path().join("events.db"));

@@ -1,5 +1,5 @@
 # Default configuration shipped inside the container image at
-# /etc/network-monitor/config.toml.
+# /etc/uptime-monitor/config.toml.
 #
 # It exists so that a bare `docker run` starts and proves that the ICMP socket and the
 # database work, instead of failing on a missing file. It monitors the container's own
@@ -12,7 +12,7 @@
 
 interval_ms = 30000
 timeout_ms = 2000
-database = "/var/lib/network-monitor/events.db"
+database = "/var/lib/uptime-monitor/events.db"
 retention_days = 0
 
 [[targets]]

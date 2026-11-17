@@ -11,7 +11,7 @@
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use network_monitor::probe::{interface, Endpoint, IcmpProbe, Probe, Verdict};
+use uptime_monitor::probe::{interface, Endpoint, IcmpProbe, Probe, Verdict};
 
 fn probe() -> IcmpProbe {
     IcmpProbe::new()
@@ -89,7 +89,7 @@ fn the_timeout_of_the_request_bounds_the_wait() {
 #[test]
 #[cfg(unix)]
 fn a_missing_interface_is_rejected() {
-    let error = interface::validate("network-monitor-no-such-interface").unwrap_err();
+    let error = interface::validate("uptime-monitor-no-such-interface").unwrap_err();
     assert!(
         error.contains("does not exist"),
         "unexpected message: {error}"

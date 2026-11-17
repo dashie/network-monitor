@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 
-use network_monitor::store::{Event, EventFilter, Store, TargetState};
+use uptime_monitor::store::{Event, EventFilter, Store, TargetState};
 
 fn event(index: i64) -> Event {
     Event {
