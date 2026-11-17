@@ -7,6 +7,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY assets ./assets
+COPY docs ./docs
 
 # `release-dev` is `release` with thin LTO and parallel codegen: the same optimised
 # binary for practical purposes, and a link step that no longer dominates the build
