@@ -47,8 +47,10 @@ Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 | ADR-0033 | Deliver notifications through declared channels with a typed message | accepted | 2026-11-16 | A channel is declared once and enabled by name; one typed `Message` rendered per transport; Telegram, webhook and log file; one queue, thread and policy per channel; secrets file-only |
 | ADR-0034 | Verify a configuration without starting, promote a candidate only after it probes, and keep one active snapshot | accepted | 2026-11-17 | `check` is a subcommand, not a flag; promotion runs in the monitor after the first probe round; one timestamped backup per deployment and one `.active` recovery file written once per start |
 | ADR-0035 | Rotate a log file channel by size, and only on a write | accepted | 2026-11-17 | `max_bytes`/`max_files` on a `logfile` channel, default off; the line is never split, a failed rotation is one `WARN`; the diagnostic log stays on stderr and the deployment bounds it |
-| ADR-0036 | Scaffold a local setup with an init verb, not an installer | accepted | 2026-11-17 | A fixed folder template with one unprivileged TCP target, a commented ICMP example, `data/` and `logs/`, and an enabled rotating event log; missing or empty folder only, no configuration flags, nothing outside the folder |
+| ADR-0036 | Scaffold a local setup with an init verb, not an installer | accepted; the working-directory consequence is amended by ADR-0038 | 2026-11-17 | A fixed folder template with one unprivileged TCP target, a commented ICMP example, `data/` and `logs/`, and an enabled rotating event log; missing or empty folder only, no configuration flags, nothing outside the folder |
 | ADR-0037 | Embed the user guide and print it as Markdown, without a renderer | accepted | 2026-11-17 | `include_str!` of `docs/USER-GUIDE.md`; `manual` with `man` alias; raw Markdown to stdout; TTY-only hint on stderr; no renderer, pager, subprocess, man page, or new dependency |
+| ADR-0038 | Resolve a configuration file's relative paths against the file | accepted | 2026-11-17 | File paths use the file's directory, flag paths use the working directory, absolute paths are unchanged; rebasing happens once in `config::parse_at` |
+| ADR-0039 | Let the configuration file state the listen address | accepted | 2026-11-17 | Top-level `listen`; `monitor` binds it when the flag is absent, `check` verifies it, `serve`/`simulate` ignore it; a changed value needs a restart |
 
 ## Records
 
@@ -1762,9 +1764,9 @@ ever.
 
 The first run needs a configuration, a predictable database location, and a log directory. The
 sample configuration is a reference, not a scaffold: it lists several targets, several need
-`root`/`CAP_NET_RAW`, and its database path is a reference. `Config::resolve` resolves
-`database` against the process working directory, and a `logfile` channel creates its file but
-not its directory (`FR-29`). The product is one binary for appliances and containers, where the
+`root`/`CAP_NET_RAW`, and its database path is a reference. `Config::resolve` resolved
+`database` against the process working directory at the time of this decision (amended by
+ADR-0038), and a `logfile` channel creates its file but not its directory (`FR-29`). The product is one binary for appliances and containers, where the
 repository may not be present, and the NFR says "no installer".
 
 ### Decision
@@ -1785,7 +1787,9 @@ repository may not be present, and the NFR says "no installer".
 
 - A first run is three commands: `init`, `check`, `monitor`; the folder is the unit of
   deployment and is run from its own directory.
-- Relative paths are not rewritten; the printed `cd` makes the working directory explicit.
+- Relative paths are not rewritten on disk; the printed `cd` makes the working directory
+  explicit. *(Amended by [ADR-0038](./ADR.md): a relative path in the file now resolves
+  against the file's directory, so the `cd` is no longer required.)*
 - `data/` is a convention (`Store::open_rw` would create it), while `logs/` is required by the
   channel.
 - Existing behaviour and configuration precedence are unchanged; no key is added.
@@ -1842,3 +1846,99 @@ installation step.
 - **A native roff man page:** rejected — a second format and an installation step.
 - **Spawning a pager:** rejected — an external process and platform differences.
 - **Printing only when stdout is a terminal:** rejected — it breaks pipelines.
+
+## ADR-0038 — Resolve a configuration file's relative paths against the file
+
+**Status:** accepted · **Date:** 2026-11-17
+
+### Context
+
+A configuration file may name a `database` and a `logfile` channel's `filename`. Until now
+every relative path was resolved by the operating system against the process working
+directory: `config::normalise_path` joined a `logfile` name to `std::env::current_dir()`, and
+the SQLite open did the same for the database. A service manager, a container, or any caller
+that names an absolute `--config` therefore had to set a working directory too, or the data
+landed somewhere else. The scaffolded folder from ADR-0036 taught "run from this folder",
+which does not survive a unit file.
+
+### Decision
+
+1. A relative path written in the configuration file resolves against the directory that
+   holds the file: `database = "events.db"` in `/etc/network-monitor/config.toml` names
+   `/etc/network-monitor/events.db`, and a `logfile` `filename` follows the same rule.
+2. A relative path given on the command line resolves against the working directory, and an
+   absolute path in either layer is used as written. The layer decides the base; there is no
+   extra key, environment variable, or per-path switch (BR-3).
+3. Rebasing happens once, after parsing, in `config::parse_at`; the merge in
+   `Config::resolve` keeps its signature and precedence, and every file the process reads —
+   the main file, the candidate, the active snapshot, the reload — goes through it.
+4. `.` and `..` are folded lexically and a symlink is not followed, matching the existing
+   `normalise_path` contract. Nothing is moved or copied when the base changes.
+
+### Consequences
+
+- `--show-config` states the absolute path the process will use for a path that came from the
+  file; a default or a flag value prints as written.
+- The scaffolded folder works from any working directory, and a service manager needs only the
+  absolute `--config`.
+- A deployment that relied on the working directory and upgrades without reading the guide
+  will find its database and event log beside the configuration file. The guide states the
+  migration (absolute paths) and nothing is rewritten automatically.
+- ADR-0036's consequence "relative paths are not rewritten" is amended: the paths are still
+  not rewritten on disk, but they are now read against the file.
+
+### Alternatives considered
+
+- **Keep the working directory for every layer:** rejected — it is the inconsistency this
+  record removes, and it makes an absolute `--config` depend on an ambient setting.
+- **A per-key or per-file switch:** rejected — two ways to read the same path, and a decision
+  the operator would have to make for every key.
+- **Resolve every path, including a flag, against the file:** rejected — a flag is typed in a
+  shell, so the working directory is the base the operator already sees.
+- **Follow symlinks to canonicalise the file's directory:** rejected — it makes the result
+  depend on the filesystem and diverges from the existing lexical helper.
+
+## ADR-0039 — Let the configuration file state the listen address
+
+**Status:** accepted · **Date:** 2026-11-17
+
+### Context
+
+`monitor --listen` is the only way to publish the page from the monitoring process
+(ADR-0009), and `docker-compose.yml`, `docs/DEVELOPER-GUIDE.md`, and every unit file repeated
+the address on the command line. Every other configuration key already had a file form, and
+`--show-config` could not state the address the process would bind. `serve` and `simulate` are
+page-only commands with their own flag and, for `serve`, their own default.
+
+### Decision
+
+1. Add one top-level key, `listen = "ADDRESS:PORT"`, to the configuration file.
+2. `monitor` binds the file's address when `--listen` is absent; the flag wins when both are
+   given; neither means no page, so INV-11 is preserved.
+3. `check` verifies the effective address — the flag when given, the file otherwise — in its
+   `listen` line.
+4. `serve` and `simulate` keep their own `--listen` flag and ignore the key; `simulate`
+   continues to require the flag.
+5. A running monitor cannot rebind: a reload that changes `listen` logs one `WARN` and keeps
+   the bound address, exactly as a changed `database` is reported and used from the next start.
+
+### Consequences
+
+- A deployment carries the page address in the same file as the targets, and a start that
+  copies the file to another host carries it too.
+- `--show-config` prints the merged address, so the effective configuration states whether a
+  socket will be opened.
+- The file can expose the page on `0.0.0.0`; the existing warning that the page has no
+  authentication now also applies to a value read from the file.
+- The address is not validated at resolve time; `--show-config` prints it, `check` verifies it,
+  and `monitor` fails at bind, exactly as the flag behaves today.
+
+### Alternatives considered
+
+- **Keep the flag only:** rejected — it is the last key without a file form and forces a
+  second source of truth in every deployment.
+- **A `[web]` or `page.listen` table:** rejected — one key does not justify a section, and the
+  effective configuration would gain a layer with no second member.
+- **Extend the key to `serve` and `simulate`:** rejected for this change — `serve` has a
+  documented default and `simulate` deliberately requires an explicit address (ADR-0032).
+- **An environment variable:** rejected — there is no environment-variable layer (BR-3).

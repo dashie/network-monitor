@@ -76,7 +76,8 @@ pub struct Cli {
 pub enum Command {
     /// Probe the configured targets and record state transitions
     Monitor {
-        /// Also serve the web page on this address and port
+        /// Also serve the web page on this address and port; overrides the file's
+        /// `listen` key, and without either no page is served
         #[arg(long, value_name = "ADDRESS:PORT")]
         listen: Option<String>,
 
@@ -310,6 +311,10 @@ impl Cli {
             interval_ms: self.interval_ms,
             timeout_ms: self.timeout_ms,
             database: self.database.clone(),
+            listen: match &self.command {
+                Some(Command::Monitor { listen, .. }) => listen.clone(),
+                _ => None,
+            },
             retention_days: self.retention_days,
             targets,
         })
@@ -475,6 +480,16 @@ mod tests {
         let targets = overrides.targets.unwrap();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].interface.as_deref(), Some("eth1"));
+    }
+
+    #[test]
+    fn the_monitor_listen_flag_is_a_configuration_override() {
+        let cli = parse(&["monitor", "--listen", "127.0.0.1:8642"]);
+        assert_eq!(
+            cli.overrides().unwrap().listen.as_deref(),
+            Some("127.0.0.1:8642")
+        );
+        assert!(parse(&[]).overrides().unwrap().listen.is_none());
     }
 
     #[test]

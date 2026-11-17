@@ -62,7 +62,8 @@ services:
       - source: monitor-config
         target: /etc/network-monitor/config.toml
 
-    # The configuration comes from the mount above; `--listen` has no key in the file.
+    # The configuration comes from the mount above; `--listen` overrides its `listen`
+    # key, and `--config` names the mounted path.
     command:
       - monitor
       - --config

@@ -113,9 +113,9 @@ fn run() -> Result<ExitCode, AppError> {
 
     match cli.command {
         Some(Command::Monitor {
-            listen,
             candidate,
             fallback_to_active,
+            ..
         }) => {
             if candidate.is_some() && cli.config.is_none() {
                 return Err(AppError::Invalid(
@@ -126,7 +126,6 @@ fn run() -> Result<ExitCode, AppError> {
             monitor_command(
                 cli.config.as_deref(),
                 &overrides,
-                listen,
                 candidate.as_deref(),
                 fallback_to_active,
                 compression,
@@ -140,7 +139,7 @@ fn run() -> Result<ExitCode, AppError> {
                     let report = check::run(
                         &settings,
                         check::Options {
-                            listen,
+                            listen: listen.or(settings.listen.clone()),
                             probe,
                             active: source.as_deref().map(snapshot::path_for),
                         },
@@ -344,7 +343,7 @@ fn snapshot_plan_for(path: &Path) -> Option<snapshot::Snapshot> {
 /// Read the snapshot as configuration through the same parse/resolve/check pipeline.
 fn load_snapshot(path: &Path, overrides: &Overrides) -> Option<Config> {
     let text = std::fs::read_to_string(path).ok()?;
-    let file = config::parse(&text, path).ok()?;
+    let file = config::parse_at(&text, path).ok()?;
     let config = Config::resolve(Some(file), overrides.clone()).ok()?;
     let report = check::run(
         &config,
@@ -374,7 +373,6 @@ fn main_config_path(explicit: Option<&Path>) -> PathBuf {
 fn monitor_command(
     explicit: Option<&Path>,
     overrides: &Overrides,
-    listen: Option<String>,
     candidate_path: Option<&Path>,
     fallback_to_active: bool,
     compression: Compression,
@@ -406,6 +404,7 @@ fn monitor_command(
         path: path.clone(),
         overrides: overrides.clone(),
     });
+    let listen = effective.listen.clone();
     run_monitor(
         &effective,
         source.as_deref(),
@@ -641,7 +640,7 @@ fn choose_configuration(
 fn resolve_candidate(bytes: &[u8], path: &Path, overrides: &Overrides) -> Result<Config, String> {
     let text =
         std::str::from_utf8(bytes).map_err(|error| format!("it is not valid UTF-8: {error}"))?;
-    let file = config::parse(text, path).map_err(|error| error.to_string())?;
+    let file = config::parse_at(text, path).map_err(|error| error.to_string())?;
     Config::resolve(Some(file), overrides.clone()).map_err(|error| error.to_string())
 }
 

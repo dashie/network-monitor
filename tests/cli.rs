@@ -110,6 +110,77 @@ fn a_configuration_file_is_read_from_the_default_path() {
 }
 
 #[test]
+fn a_file_path_is_resolved_beside_the_configuration_file() {
+    let root = tempfile::tempdir().unwrap();
+    let conf = root.path().join("conf");
+    std::fs::create_dir(&conf).unwrap();
+    std::fs::write(
+        conf.join("network-monitor.toml"),
+        concat!(
+            "notify = [\"audit\"]\n",
+            "database = \"events.db\"\n\n",
+            "[[notification]]\n",
+            "name = \"audit\"\n",
+            "type = \"logfile\"\n",
+            "filename = \"logs/audit.log\"\n\n",
+            "[[targets]]\n",
+            "ip = \"127.0.0.1\"\n",
+        ),
+    )
+    .unwrap();
+
+    monitor(root.path())
+        .args(["--config", "conf/network-monitor.toml", "--show-config"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "database = \"{}\"",
+            conf.join("events.db").display()
+        )))
+        .stdout(predicate::str::contains(format!(
+            "filename = \"{}\"",
+            conf.join("logs/audit.log").display()
+        )));
+}
+
+#[test]
+fn check_creates_the_log_beside_the_configuration_file() {
+    let root = tempfile::tempdir().unwrap();
+    let conf = root.path().join("conf");
+    std::fs::create_dir_all(conf.join("logs")).unwrap();
+    std::fs::write(
+        conf.join("network-monitor.toml"),
+        concat!(
+            "notify = [\"audit\"]\n",
+            "database = \"events.db\"\n\n",
+            "[[notification]]\n",
+            "name = \"audit\"\n",
+            "type = \"logfile\"\n",
+            "filename = \"logs/audit.log\"\n\n",
+            "[[targets]]\n",
+            "ip = \"127.0.0.1\"\n",
+        ),
+    )
+    .unwrap();
+
+    monitor(root.path())
+        .args(["check", "--config", "conf/network-monitor.toml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ok    channel"));
+
+    assert!(
+        conf.join("logs/audit.log").is_file(),
+        "the log belongs beside the configuration"
+    );
+    assert!(
+        !root.path().join("logs/audit.log").exists(),
+        "nothing is created in the working directory"
+    );
+    assert!(!root.path().join("events.db").exists());
+}
+
+#[test]
 fn an_unknown_key_in_the_file_fails() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -656,9 +727,80 @@ fn check_reports_a_bad_listen_address_on_stdout() {
         .stdout(predicate::str::contains("invalid listen address"));
 }
 
+#[test]
+fn the_configured_listen_address_is_checked() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("network-monitor.toml"),
+        "listen = \"127.0.0.1:0\"\ndatabase = \"events.db\"\n\n[[targets]]\nip = \"127.0.0.1\"\n",
+    )
+    .unwrap();
+
+    monitor(directory.path())
+        .args(["check", "--config", "network-monitor.toml"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "ok    listen             127.0.0.1:0 is available",
+        ));
+}
+
+#[test]
+fn the_monitor_listen_flag_overrides_the_configured_address() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("network-monitor.toml"),
+        "listen = \"127.0.0.1:1\"\ndatabase = \"events.db\"\n\n[[targets]]\nip = \"127.0.0.1\"\n",
+    )
+    .unwrap();
+
+    monitor(directory.path())
+        .args([
+            "check",
+            "--config",
+            "network-monitor.toml",
+            "--listen",
+            "127.0.0.1:0",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("127.0.0.1:0 is available"))
+        .stdout(predicate::str::contains("127.0.0.1:1 is available").not());
+}
+
+#[test]
+fn show_config_prints_the_merged_listen_address() {
+    let directory = tempfile::tempdir().unwrap();
+
+    monitor(directory.path())
+        .args([
+            "monitor",
+            "--listen",
+            "127.0.0.1:8642",
+            "--show-config",
+            "--target",
+            "1.1.1.1",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("listen = \"127.0.0.1:8642\""));
+
+    std::fs::write(
+        directory.path().join("network-monitor.toml"),
+        "listen = \"127.0.0.1:8643\"\n\n[[targets]]\nip = \"1.1.1.1\"\n",
+    )
+    .unwrap();
+    monitor(directory.path())
+        .args(["--show-config"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("listen = \"127.0.0.1:8643\""));
+}
+
 // --- `monitor --try`: the candidate decision table -------------------------------
 
-use std::net::TcpListener;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Child, Command as StdCommand, ExitStatus, Stdio};
 use std::thread;
@@ -762,6 +904,114 @@ fn wait_for_events(database: &Path, timeout: Duration) {
 
 fn loopback_listener() -> TcpListener {
     TcpListener::bind("127.0.0.1:0").expect("the test binds a loopback port")
+}
+
+#[test]
+fn the_monitor_serves_the_page_on_the_configured_address() {
+    let directory = tempfile::tempdir().unwrap();
+    let listener = loopback_listener();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    std::fs::write(
+        directory.path().join("network-monitor.toml"),
+        format!(
+            "interval_ms = 100\ntimeout_ms = 200\ndatabase = \"events.db\"\n\
+             listen = \"127.0.0.1:{port}\"\n\n[[targets]]\nmethod = \"tcp\"\n\
+             host = \"127.0.0.1\"\nport = 9\nlabel = \"closed\"\n"
+        ),
+    )
+    .unwrap();
+
+    let log = directory.path().join("monitor.log");
+    let running = Running::spawn(directory.path(), &["monitor"], &log);
+    let status = wait_for_page(port, Duration::from_secs(5));
+    running.stop();
+
+    assert!(
+        status.contains("200") || status.contains("503"),
+        "status: {status}"
+    );
+    assert!(
+        log_text(&log).contains(&format!("web interface ready on http://127.0.0.1:{port}/")),
+        "log: {}",
+        log_text(&log)
+    );
+}
+
+fn write_listen_config(path: &Path, port: u16) {
+    std::fs::write(
+        path,
+        format!(
+            "interval_ms = 100\ntimeout_ms = 200\ndatabase = \"events.db\"\n\
+             listen = \"127.0.0.1:{port}\"\n\n[[targets]]\nmethod = \"tcp\"\n\
+             host = \"127.0.0.1\"\nport = 9\nlabel = \"closed\"\n"
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_changed_listen_address_needs_a_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let first = loopback_listener();
+    let first_port = first.local_addr().unwrap().port();
+    drop(first);
+    let second = loopback_listener();
+    let second_port = second.local_addr().unwrap().port();
+    drop(second);
+    assert_ne!(first_port, second_port);
+
+    let config = directory.path().join("network-monitor.toml");
+    write_listen_config(&config, first_port);
+    let log = directory.path().join("monitor.log");
+    let running = Running::spawn(directory.path(), &["monitor"], &log);
+    wait_for_page(first_port, Duration::from_secs(5));
+
+    write_listen_config(&config, second_port);
+    let expected =
+        format!("listen changed to 127.0.0.1:{second_port}; restart the monitor to use it");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !log_text(&log).contains(&expected) {
+        assert!(
+            Instant::now() < deadline,
+            "no reload warning in: {}",
+            log_text(&log)
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    let status = wait_for_page(first_port, Duration::from_secs(2));
+    assert!(
+        status.contains("200") || status.contains("503"),
+        "status: {status}"
+    );
+    assert!(running.stop().success());
+}
+
+/// Wait until the page answers on `port`, then return the status line.
+fn wait_for_page(port: u16, timeout: Duration) -> String {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) {
+            stream
+                .write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("the request is written");
+            let mut answer = String::new();
+            stream
+                .read_to_string(&mut answer)
+                .expect("the answer is read");
+            if let Some(status) = answer.lines().next() {
+                if status.starts_with("HTTP/1.") {
+                    return status.to_string();
+                }
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no page on 127.0.0.1:{port} within {timeout:?}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 fn log_text(path: &Path) -> String {

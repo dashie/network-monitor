@@ -66,7 +66,8 @@ network-monitor monitor --config network-monitor.toml --listen 127.0.0.1:8642
 `init` refuses a folder that is not empty and never overwrites a file. If it stops with an
 error after creating part of the folder, remove the folder and run it again. The folder holds
 `network-monitor.toml`, `data/` for `events.db`, and `logs/` for `events.log`. The relative
-paths resolve against the working directory, so run the commands from the folder. `check`
+paths resolve against the configuration file, so the folder can be run from any working
+directory; the `cd` is only a convenience. `check`
 creates `logs/events.log` (the `events` `logfile` channel) and leaves the database to the first
 monitor start. The diagnostic log stays on stderr. The generated file contains no secret; a
 Telegram or webhook token added later is read from the file only and should be protected, as the
@@ -144,7 +145,12 @@ line, and `--show-config` prints the result of merging the two.
 `./network-monitor.toml` is read when present and skipped otherwise. A changed file is re-read
 within one second while the monitor runs and applied without a restart; a file that does not
 parse is rejected with a warning and the running configuration stays in effect. A changed
-`database` path is reported and used from the next start.
+`database` path or `listen` address is reported and used from the next start.
+
+A path written in this file — the `database` and a `logfile` channel's `filename` — is relative
+to the directory that holds the file; a relative path given on the command line is relative to
+the working directory, and an absolute path is used as written. `--show-config` prints the
+absolute path a file path resolved to, so the two layers are never ambiguous.
 
 Two files live beside the configuration and are not configuration layers:
 
@@ -163,7 +169,8 @@ and `.gitignore` excludes `*.active` and `*.bak` so a working copy cannot commit
 |---|---|---|
 | `interval_ms` | `5000` | Pause after a probe, per target |
 | `timeout_ms` | `2000` | Maximum wait for an answer, per probe |
-| `database` | `./network-monitor.db` | SQLite file; keep it on a local filesystem. Ignored by `simulate`, which reads and writes no database |
+| `database` | `./network-monitor.db` | SQLite file; a relative path is relative to this file. Keep it on a local filesystem. Ignored by `simulate`, which reads and writes no database |
+| `listen` | none | `ADDRESS:PORT`, the page address `monitor` binds when `--listen` is absent; `--listen` wins. Without either, no page is served. `serve` and `simulate` ignore this key |
 | `retention_days` | `0` | Delete events older than this; `0` keeps everything |
 | `notify` | empty | Channel names enabled for global events and as the default for every target; see [Notifications](#notifications) |
 
@@ -512,6 +519,10 @@ listed in [Troubleshooting](#troubleshooting), later in this guide.
 | `query events [target] [--since 24h] [--limit 100] [--format json]` | Recorded transitions, newest first |
 | `import <path\|http://url\|-> [--replace-window]` | Restore a history exported from the page |
 
+`monitor --listen` overrides the file's `listen` key, and `check --listen` verifies the address
+you name instead of the configured one. `serve` and `simulate` keep their own `--listen` flag
+and ignore the key.
+
 `query events <target>` accepts the label, the full key, or a bare ICMP address. Diagnostics go
 to stderr as `<timestamp> <LEVEL> [<target>] <message>`; data goes to stdout, so a query can be
 piped.
@@ -545,7 +556,7 @@ warn  active             no snapshot yet
 
 | Option | Meaning |
 |---|---|
-| `--listen <address:port>` | Also verify that this address can be bound. An address in use is a `warn` — the running monitor is the usual cause — and anything else that prevents the bind is a `fail` |
+| `--listen <address:port>` | Verify this address instead of the configured `listen` key. An address in use is a `warn` — the running monitor is the usual cause — and anything else that prevents the bind is a `fail` |
 | `--probe` | Perform one real probe per target. `up` is `ok`, `down` is a `warn` with its cause, and a local probe failure (no `NET_RAW`, missing interface, unresolvable resolver) is a `fail` |
 
 Every line is one of `ok`, `warn`, or `fail`. The command exits `0` when no line is a `fail`
@@ -557,7 +568,8 @@ read-only. The only thing it may create is the file of a `logfile` channel, exac
 would; a missing event database is a `warn`, because the next start creates it.
 
 The checks, in order, are: the target list; every target's interface; the event database; the
-`--listen` address when given; every declared notification channel (one read-only Telegram
+effective listen address — the `--listen` override, or the file's `listen` key — when one is
+given; every declared notification channel (one read-only Telegram
 `getMe`, one connection per webhook, one open and close per log file); the active snapshot; and,
 only with `--probe`, one real probe per target.
 
@@ -566,7 +578,8 @@ only with `--probe`, one real probe per target.
 `simulate` serves the same page, the same REST API and the same export over a history that is
 generated instead of recorded. It is meant for looking at the page, demonstrating a deployment,
 or reviewing a change without waiting days for real data, and it is safe to run anywhere: it
-runs no probe, opens no database, and writes no file.
+runs no probe, opens no database, and writes no file. `--listen` remains required and the
+file's `listen` key is ignored.
 
 ```bash
 network-monitor simulate --listen 127.0.0.1:8660 --history 30d --seed 0
@@ -864,6 +877,11 @@ import reads plain `http://` URLs; download an `https` archive with `curl` first
    process that opens the same file. The export moves to `/export/faults.csv.gz` and the file is
    named `faults-YYYYMMDD.csv.gz`; the old address still answers. An archive exported by 0.2
    imports into 0.3 unchanged.
+5. **From 0.11 to 0.12** a relative path in the configuration file resolves against the file
+   instead of the working directory. Nothing is moved: run `--show-config` before the
+   upgrade, compare the `database` path with the one it prints afterwards, and make any path
+   that must stay where it is absolute. The same `--show-config` states the resolved `listen`
+   address, a new key that `monitor` uses when `--listen` is absent.
 
 `serve` and `query` never write, so they open a 0.2 database as it is: its rows state no cause
 until a `monitor` or an `import` has upgraded the file. That also means the page runs against a
@@ -874,7 +892,12 @@ snapshot, a backup, or a volume mounted read-only.
 Verify while the running monitor keeps working, then let the process promote the candidate only
 after it probes:
 
-1. Write the candidate beside the main file, for example `next.toml`.
+1. Write the candidate beside the main file, for example `next.toml`. A relative path inside a
+   candidate resolves against the candidate's own directory while it runs; promotion copies the
+   bytes, so after the move the same path resolves against the main file's directory. Use
+   absolute paths in a candidate that lives in another directory. A candidate that states a
+   different `listen` address binds that address while it runs, and the promoted file keeps it
+   for the next start.
 2. Verify it: `network-monitor check --config ./next.toml --listen 0.0.0.0:8642`. A `fail` line
    names the reason; fix it before going on.
 3. Add `--try ./next.toml` to the start script or the unit file and restart, or run the process
@@ -1001,6 +1024,8 @@ rotation is one more file to follow and no line disappears from the stream.
 | Symptom | Cause and fix |
 |---|---|
 | `interface 'eth1' ... does not exist` | The name differs on this host (`en0`, `eth0`, `lo0`). The process refuses to start rather than probe the wrong interface. |
+| The database or the event log appears in an unexpected folder | A relative path in the configuration file resolves against the file, not the working directory. Run `--show-config` to see the absolute path, then make the value absolute if it must stay where it is. |
+| `listen` in the file is ignored by `serve` or `simulate` | By design: those commands keep their own `--listen` flag. Only `monitor` reads the key. |
 | A `fail` line from `check` | The configuration would not start, and the subject names the condition: `targets` (no target), `interface` (a name that does not exist on this host), `database` (cannot be read, or a schema newer than the binary), `listen` (an address that cannot be bound), `channel` (a channel that cannot open or verify), `probe` (a local failure such as a missing `NET_RAW`). The detail names the key, the file, or the reason. |
 | `Operation not permitted` at startup | ICMP needs `root` or `CAP_NET_RAW`. Drop `icmp` targets, or grant the capability. `check --probe` reports the same condition as a `fail probe` line before the restart. |
 | A candidate is never promoted | The first probe of a target failed locally, so the promotion was cancelled and the main configuration stayed in effect. The log states the target and the reason (`candidate configuration … cannot probe: …`); run `check --probe` on the candidate to see it before the next attempt. |
@@ -1040,6 +1065,10 @@ rotation is one more file to follow and no line disappears from the stream.
 - There is exactly one active snapshot and no history of snapshots, and the deployment backups
   are never pruned by the tool. A candidate is promoted only after every target has probed once
   without a local failure; reachability of a target is not a condition.
+- A relative path in the configuration file is resolved against the file; only a flag path uses
+  the working directory. Absolute paths are used as written.
+- The `listen` key supplies the page address to `monitor` only; `serve` and `simulate` keep
+  their own `--listen` flag, and `simulate` still requires it.
 - `init` scaffolds a folder and `manual` prints the embedded guide; neither installs nor
   supervises a service. The scaffolded event log is a `logfile` channel bounded by
   `max_bytes`/`max_files`, and the diagnostic log remains stderr, bounded by the supervisor.

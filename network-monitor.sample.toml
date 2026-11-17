@@ -43,8 +43,13 @@ interval_ms = 5000
 # `timeout_ms`.
 timeout_ms = 2000
 
-# SQLite event database. Keep it on a local filesystem: WAL is not supported on
-# network shares.
+# The page the monitor serves when --listen is absent. Without this key and without
+# --listen, no page is served. `serve` and `simulate` ignore this key and keep their
+# own --listen flag.
+# listen = "127.0.0.1:8642"
+
+# SQLite event database. A relative path is relative to this file, not to the working
+# directory. Keep it on a local filesystem: WAL is not supported on network shares.
 database = "./tmp/network-monitor.db"
 
 # Delete events older than this many days. 0 keeps every event.

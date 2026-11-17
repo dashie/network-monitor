@@ -433,8 +433,9 @@ it, so the content travels with the project and needs no file on the NAS. Edit t
 block to change the targets, the interval, the timeout, or the retention, then
 `compose up -d` — changed content recreates the container. Inline `content` needs
 Compose 2.23.3 or newer; on an older Compose, point `file:` at a TOML inside the project
-instead, which compose copies to the daemon the same way. `--listen` has no key in the
-file, which is why the command still passes it, and `--config` names the mounted path.
+instead, which compose copies to the daemon the same way. `--listen` overrides the file's
+`listen` key, which is why this deployment still passes it, and `--config` names the mounted
+path.
 
 On a NAS that holds no sources, drop `build:` and keep `image:` pointing at the image
 you loaded or pulled: the `configs` block is what carries the configuration, so the same
@@ -789,6 +790,10 @@ cargo clippy --all-targets -- -D warnings
 4. Decide whether the value applies to a running monitor: if it does, apply it in `Supervisor::apply` and cover it in `tests/reload.rs`; if it needs a restart, warn there instead.
 5. Document the key in `network-monitor.sample.toml`, in the README example, in the user guide, and in [PRODUCT.md](./PRODUCT.md) when it changes behaviour.
 6. Test three cases: value from the file only, value from the flag only, flag overriding the file.
+7. A key that names a file is resolved against the file that states it: rebase it in
+   `FileConfig::rebase_paths` (called by `config::parse_at`) and leave the flag value relative
+   to the working directory (BR-11, ADR-0038). A path key added without that step breaks the
+   service-manager deployment the rule exists for.
 
 ### Adding a probe type
 

@@ -51,7 +51,10 @@ const METHODS: [&str; 4] = ["icmp", "tcp", "dns", "http"];
 pub struct FileConfig {
     pub interval_ms: Option<u64>,
     pub timeout_ms: Option<u64>,
+    /// The event database; a relative path is resolved against this file by `parse_at`.
     pub database: Option<String>,
+    /// The address the monitor serves the page on when `--listen` is absent.
+    pub listen: Option<String>,
     pub retention_days: Option<u64>,
     pub telegram: Option<FileTelegram>,
     /// The channels enabled for global events and for every target that does not
@@ -435,6 +438,8 @@ pub struct Config {
     pub interval: Duration,
     pub timeout: Duration,
     pub database: PathBuf,
+    /// The page address when the monitor should serve one; `None` opens no socket.
+    pub listen: Option<String>,
     pub retention_days: u64,
     pub notify: NotificationConfig,
     pub targets: Vec<Target>,
@@ -665,6 +670,7 @@ pub struct Overrides {
     pub interval_ms: Option<u64>,
     pub timeout_ms: Option<u64>,
     pub database: Option<PathBuf>,
+    pub listen: Option<String>,
     pub retention_days: Option<u64>,
     pub targets: Option<Vec<TargetSpec>>,
 }
@@ -715,7 +721,7 @@ pub fn load(explicit: Option<&Path>) -> Result<Option<Loaded>, ConfigError> {
         path: path.clone(),
         source,
     })?;
-    let config = parse(&text, &path)?;
+    let config = parse_at(&text, &path)?;
     Ok(Some(Loaded { path, config }))
 }
 
@@ -725,6 +731,43 @@ pub fn parse(text: &str, path: &Path) -> Result<FileConfig, ConfigError> {
         path: path.to_path_buf(),
         source: Box::new(source),
     })
+}
+
+/// Parse a configuration file that was read from `path`, resolving the paths it states
+/// against the directory that holds it.
+///
+/// A relative `database` or `logfile` `filename` names a path beside the configuration
+/// file, so a service manager that names an absolute `--config` does not need to set a
+/// working directory too. An absolute path is used as it is; `.` and `..` are folded
+/// lexically, without following a symlink.
+pub fn parse_at(text: &str, path: &Path) -> Result<FileConfig, ConfigError> {
+    let mut config = parse(text, path)?;
+    config.rebase_paths(path);
+    Ok(config)
+}
+
+impl FileConfig {
+    /// Resolve the paths this file states against the directory that holds it.
+    fn rebase_paths(&mut self, config_path: &Path) {
+        let base = config_path.parent().unwrap_or_else(|| Path::new(""));
+        if let Some(database) = self.database.clone() {
+            if !database.is_empty() {
+                self.database = Some(rebase(base, &database));
+            }
+        }
+        for channel in self.notification.iter_mut().flatten() {
+            if let Some(filename) = channel.filename.clone() {
+                channel.filename = Some(rebase(base, &filename));
+            }
+        }
+    }
+}
+
+/// Resolve one path against the file's directory and fold its lexical components.
+fn rebase(base: &Path, path: &str) -> String {
+    normalise_path(&base.join(path))
+        .to_string_lossy()
+        .into_owned()
 }
 
 impl Config {
@@ -752,6 +795,8 @@ impl Config {
             .database
             .or_else(|| file.database.map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from(DEFAULT_DATABASE));
+
+        let listen = clean(overrides.listen).or(clean(file.listen));
 
         let retention_days = overrides
             .retention_days
@@ -800,6 +845,7 @@ impl Config {
             interval,
             timeout,
             database,
+            listen,
             retention_days,
             notify,
             targets,
@@ -826,6 +872,8 @@ impl Config {
             interval_ms: u64,
             timeout_ms: u64,
             database: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            listen: Option<String>,
             retention_days: u64,
             notify: Vec<String>,
             notification: Vec<SerializableNotification>,
@@ -985,6 +1033,7 @@ impl Config {
             interval_ms: self.interval.as_millis() as u64,
             timeout_ms: self.timeout.as_millis() as u64,
             database: self.database.to_string_lossy().into_owned(),
+            listen: self.listen.clone(),
             retention_days: self.retention_days,
             notify: self.notify.global.clone(),
             notification,
@@ -1810,6 +1859,88 @@ mod tests {
             },
         );
         assert!(matches!(result, Err(ConfigError::Invalid { .. })));
+    }
+
+    #[test]
+    fn a_relative_path_is_resolved_against_the_file_that_states_it() {
+        let path = Path::new("/etc/network-monitor/config.toml");
+        let file = parse_at(
+            concat!(
+                "database = \"events.db\"\n\n",
+                "[[notification]]\n",
+                "name = \"audit\"\n",
+                "type = \"logfile\"\n",
+                "filename = \"logs/audit.log\"\n",
+            ),
+            path,
+        )
+        .unwrap();
+
+        assert_eq!(
+            file.database.as_deref(),
+            Some("/etc/network-monitor/events.db")
+        );
+        let channel = &file.notification.unwrap()[0];
+        assert_eq!(
+            channel.filename.as_deref(),
+            Some("/etc/network-monitor/logs/audit.log")
+        );
+    }
+
+    #[test]
+    fn an_absolute_path_in_the_file_is_only_folded() {
+        let file = parse_at(
+            "database = \"/var/lib/./network-monitor/../network-monitor/events.db\"\n",
+            Path::new("/etc/network-monitor/config.toml"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            file.database.as_deref(),
+            Some("/var/lib/network-monitor/events.db")
+        );
+    }
+
+    #[test]
+    fn a_file_without_a_parent_keeps_the_working_directory_as_its_base() {
+        let file = parse_at(
+            "database = \"events.db\"\n",
+            Path::new("network-monitor.toml"),
+        )
+        .unwrap();
+
+        let database = PathBuf::from(file.database.unwrap());
+        assert!(database.is_absolute());
+        assert!(database.ends_with("events.db"));
+    }
+
+    #[test]
+    fn the_listen_address_is_merged_and_rendered() {
+        let file = FileConfig {
+            listen: Some("127.0.0.1:8642".to_string()),
+            ..FileConfig::default()
+        };
+        let config = Config::resolve(Some(file.clone()), Overrides::default()).unwrap();
+        assert_eq!(config.listen.as_deref(), Some("127.0.0.1:8642"));
+
+        let overridden = Config::resolve(
+            Some(file),
+            Overrides {
+                listen: Some("0.0.0.0:9000".to_string()),
+                ..Overrides::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(overridden.listen.as_deref(), Some("0.0.0.0:9000"));
+
+        let text = config.to_toml();
+        assert!(text.contains("listen = \"127.0.0.1:8642\""));
+        let again = Config::resolve(
+            Some(parse(&text, Path::new("roundtrip.toml")).unwrap()),
+            Overrides::default(),
+        )
+        .unwrap();
+        assert_eq!(again.listen, config.listen);
     }
 
     #[test]

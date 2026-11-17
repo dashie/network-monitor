@@ -255,7 +255,7 @@ impl Supervisor {
             }
         };
 
-        let file = match crate::config::parse(text, path) {
+        let file = match crate::config::parse_at(text, path) {
             Ok(file) => file,
             Err(error) => {
                 logging::warn(
@@ -312,6 +312,17 @@ impl Supervisor {
                 ),
             );
             next.database = self.config.database.clone();
+        }
+
+        if next.listen != self.config.listen {
+            logging::warn(
+                None,
+                &format!(
+                    "listen changed to {}; restart the monitor to use it",
+                    next.listen.as_deref().unwrap_or("no page")
+                ),
+            );
+            next.listen = self.config.listen.clone();
         }
 
         let notify_changed = next.notify != self.config.notify;

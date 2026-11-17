@@ -171,3 +171,31 @@ fn init_accepts_a_path_with_spaces() {
 
     assert!(folder.join("network-monitor.toml").is_file());
 }
+
+#[test]
+fn the_scaffolded_folder_is_checked_from_another_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let folder = root.path().join("monitor");
+    monitor(root.path())
+        .arg("init")
+        .arg(&folder)
+        .assert()
+        .success();
+
+    let config = folder.join("network-monitor.toml");
+    monitor(root.path())
+        .args(["check", "--config", config.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ok    channel"));
+
+    assert!(
+        folder.join("logs/events.log").is_file(),
+        "the event log belongs beside the configuration"
+    );
+    assert!(
+        !root.path().join("logs").exists(),
+        "nothing is created in the working directory"
+    );
+    assert!(!root.path().join("events.db").exists());
+}

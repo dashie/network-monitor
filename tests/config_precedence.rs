@@ -185,3 +185,41 @@ fn the_notification_channels_have_no_flag() {
         vec!["audit".to_string()]
     );
 }
+
+#[test]
+fn the_file_paths_are_resolved_beside_the_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("network-monitor.toml");
+    std::fs::write(
+        &path,
+        "database = \"events.db\"\n\n[[targets]]\nip = \"1.1.1.1\"\n",
+    )
+    .unwrap();
+
+    let loaded = network_monitor::config::load(Some(&path)).unwrap().unwrap();
+    let config = Config::resolve(Some(loaded.config), parse(&[]).overrides().unwrap()).unwrap();
+
+    assert_eq!(config.database, directory.path().join("events.db"));
+}
+
+#[test]
+fn the_listen_address_comes_from_the_file_and_the_flag_wins() {
+    let file = || FileConfig {
+        listen: Some("127.0.0.1:1111".to_string()),
+        targets: Some(vec![FileTarget {
+            ip: Some("1.1.1.1".to_string()),
+            ..FileTarget::default()
+        }]),
+        ..FileConfig::default()
+    };
+
+    let config = Config::resolve(Some(file()), parse(&[]).overrides().unwrap()).unwrap();
+    assert_eq!(config.listen.as_deref(), Some("127.0.0.1:1111"));
+
+    let cli = parse(&["monitor", "--listen", "127.0.0.1:2222"]);
+    let config = Config::resolve(Some(file()), cli.overrides().unwrap()).unwrap();
+    assert_eq!(config.listen.as_deref(), Some("127.0.0.1:2222"));
+
+    let config = Config::resolve(None, parse(&[]).overrides().unwrap()).unwrap();
+    assert!(config.listen.is_none());
+}
