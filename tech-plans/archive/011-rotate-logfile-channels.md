@@ -179,7 +179,7 @@ repository mentions a container log limit.
   and "Adding a notification channel" notes that a channel writing to a file owns its rotation.
 - `docs/GLOSSARY.md` *(maybe)* — "Rotated log file": one file the channel renames at the size
   limit, the suffix being its age.
-- `network-monitor.sample.toml` and `docker/config.toml` *(maybe)* — one commented example of a
+- `uptime-monitor.sample.toml` and `docker/config.toml` *(maybe)* — one commented example of a
   bounded `logfile` channel, so the sample states a value an operator can copy.
 
 ## Architecture impact
@@ -242,13 +242,13 @@ example in the sample configuration.
 
 **Verify:** `cargo test --test notify_channels` passes; every documented key exists in
 `src/config.rs` with the same default (`grep -n "max_bytes\|max_files" src/config.rs`) and in
-the user-guide table; `network-monitor.sample.toml` still parses (`./target/debug/network-monitor
---config network-monitor.sample.toml --show-config` exits `0`).
+the user-guide table; `uptime-monitor.sample.toml` still parses (`./target/debug/uptime-monitor
+--config uptime-monitor.sample.toml --show-config` exits `0`).
 
 ### Step 4 — Bound the main log in the deployment
 
 The tool keeps writing its diagnostics to stderr; nothing in this step changes `src/logging.rs`.
-In `docker-compose.yml`, add to the `network-monitor` service:
+In `docker-compose.yml`, add to the `uptime-monitor` service:
 
 ```yaml
     # The main log is the engine's file, not the tool's: stdout and stderr go to the
@@ -268,9 +268,9 @@ The host case gets the same treatment in the user guide, because a host run is w
 question is easiest to get wrong:
 
 ```ini
-# /etc/systemd/system/network-monitor.service
+# /etc/systemd/system/uptime-monitor.service
 [Service]
-ExecStart=/usr/local/bin/network-monitor monitor --config /etc/network-monitor/config.toml
+ExecStart=/usr/local/bin/uptime-monitor monitor --config /etc/uptime-monitor/config.toml
 # stderr goes to the journal, which owns rotation:
 #   journald.conf: SystemMaxUse=500M  SystemMaxFileSize=50M
 StandardOutput=journal
@@ -278,8 +278,8 @@ StandardError=journal
 ```
 
 ```text
-# /etc/logrotate.d/network-monitor  — only for `StandardOutput=append:` or a shell redirect
-/var/log/network-monitor/monitor.log {
+# /etc/logrotate.d/uptime-monitor  — only for `StandardOutput=append:` or a shell redirect
+/var/log/uptime-monitor/monitor.log {
     size 10M
     rotate 3
     compress
@@ -331,9 +331,9 @@ version.
   `monitor` against a flapping target and confirm `<file>`, `<file>.1`, `<file>.2`, `<file>.3`
   appear and no file exceeds the limit by more than one line; then make the directory read-only
   and confirm one `WARN`, the line still written, and monitoring unaffected. On the NAS, after
-  `compose up`, `docker inspect --format '{{.HostConfig.LogConfig}}' network-monitor` states the
+  `compose up`, `docker inspect --format '{{.HostConfig.LogConfig}}' uptime-monitor` states the
   `json-file` driver with the two limits, and `du -h $(docker inspect --format
-  '{{.LogPath}}' network-monitor)` stops growing at 10 MiB while the service keeps logging.
+  '{{.LogPath}}' uptime-monitor)` stops growing at 10 MiB while the service keeps logging.
 - **Rollback:** set `max_bytes = 0` (or delete the key) and the behaviour returns to the one
   documented today; remove the `logging` block and the engine default returns; the code rollback
   is one revert, as no other component depends on the two keys or on the compose stanza.
@@ -346,8 +346,8 @@ version.
 - [ ] Should `check` (`FR-30`, plan `010`) report a `warn` line for a `logfile` channel with
   `max_bytes = 0`? Best guess: yes, once plan `010` has landed, because that is exactly the
   moment to notice a sink that grows without a bound; it is one line in `check` and one test.
-- [ ] Should the repository ship `deploy/network-monitor.service` and
-  `deploy/network-monitor.logrotate` instead of keeping both snippets inline in the guide? Best
+- [ ] Should the repository ship `deploy/uptime-monitor.service` and
+  `deploy/uptime-monitor.logrotate` instead of keeping both snippets inline in the guide? Best
   guess: inline for now — the user guide is distributed standalone and must carry them anyway,
   and a `deploy/` folder is a follow-up if host installs become a supported shape.
 - [ ] Compress the rotated file? Best guess: no, for the reason in Non-goals.
@@ -390,7 +390,7 @@ version.
 | `docs/NOTIFICATIONS.md` | Keys, rotation behaviour and the failed-rotation failure mode |
 | `docs/DEVELOPER-GUIDE.md` | `--log-opt` on every deployment recipe; the channel-ownership rule in “Adding a notification channel” |
 | `docs/GLOSSARY.md` | “Rotated log file” |
-| `network-monitor.sample.toml` | A commented bounded `logfile` channel |
+| `uptime-monitor.sample.toml` | A commented bounded `logfile` channel |
 | `docker-compose.yml` | `logging` with the `json-file` driver, `max-size: 10m`, `max-file: "3"` |
 | `NOTES.md` | The same two `--log-opt` flags on the bare `docker run` recipe |
 
@@ -423,7 +423,7 @@ version.
 | `cargo test --lib notify::logfile` | 17 passed |
 | `cargo test --lib config::` | 46 passed |
 | `cargo test --test notify_channels` | 5 passed |
-| `./target/debug/network-monitor --config network-monitor.sample.toml --show-config` | exit `0` |
+| `./target/debug/uptime-monitor --config uptime-monitor.sample.toml --show-config` | exit `0` |
 | `docker compose config` | prints the `logging` block with driver `json-file`, `max-size: 10m`, `max-file: "3"` |
 | `grep -n "copytruncate" docs/USER-GUIDE.md` | found the stanza and its reason |
 | `git diff --stat Cargo.lock` | one line, the crate's own version |

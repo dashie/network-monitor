@@ -13,8 +13,8 @@ branch_recommended: false
 
 ## Summary
 
-`network-monitor init <FOLDER>` creates a new folder, or fills an existing empty one, with a
-fixed `network-monitor.toml`, a `data/` directory for the SQLite database, and a `logs/`
+`uptime-monitor init <FOLDER>` creates a new folder, or fills an existing empty one, with a
+fixed `uptime-monitor.toml`, a `data/` directory for the SQLite database, and a `logs/`
 directory for the event log, then prints the three commands that check and start it. The generated
 configuration has one unprivileged TCP target, a commented ICMP example, and an enabled
 size-rotated `logfile` channel; it contains no secret.
@@ -25,7 +25,7 @@ folder is the unit of deployment: the operator edits the TOML and runs the monit
 folder. A later `install` verb can reuse the same template for a system service; this plan
 does not add one.
 
-The same plan adds `network-monitor manual`, with `man` as a visible alias, which prints the
+The same plan adds `uptime-monitor manual`, with `man` as a visible alias, which prints the
 user guide embedded at build time as Markdown to stdout. It reads no configuration, starts
 nothing, and adds no dependency. When stdout is a terminal it prints one hint to stderr; when
 piped, stdout is pure Markdown, so `manual | less -R` and `manual | mdcat --ansi | less -R`
@@ -38,8 +38,8 @@ of the build, so the binary carries no stale or duplicated manual.
   directory for a log file. The binary creates the database and its parent, but it does not
   create the configuration or the log directory; the two missing pieces are easy to get wrong,
   and they fail at different moments (config parse, channel open).
-- The repository ships `network-monitor.sample.toml`, but it is a reference, not a scaffold:
-  its `database = "./tmp/network-monitor.db"` is a reference path, it lists several targets,
+- The repository ships `uptime-monitor.sample.toml`, but it is a reference, not a scaffold:
+  its `database = "./tmp/uptime-monitor.db"` is a reference path, it lists several targets,
   and several of them need `root`/`CAP_NET_RAW`. Copying it is not a first run.
 - `Config::resolve` resolves `database` against the process working directory, not against the
   configuration file. A relative path in a config launched from elsewhere therefore puts the
@@ -78,11 +78,11 @@ of the build, so the binary carries no stale or duplicated manual.
   needs a parser and renderer dependency, which conflicts with the project's minimal
   dependency principle.
 - A curated short manual would duplicate content and drift from the user guide; embedding the
-  existing file keeps one source of truth. A native `man network-monitor` page would need a
+  existing file keeps one source of truth. A native `man uptime-monitor` page would need a
   second format and an installation step, reopening the installer question the project
   deliberately avoids.
 
-Evidence: `network-monitor.sample.toml` (`database = "./tmp/network-monitor.db"`, several
+Evidence: `uptime-monitor.sample.toml` (`database = "./tmp/uptime-monitor.db"`, several
 targets), `src/config.rs` (`DEFAULT_DATABASE`, `Config::resolve`, `FileNotification`),
 `src/check.rs` (`check_database` treats a missing database as a warning),
 `src/store/mod.rs` (`Store::open_rw` creates the database's parent),
@@ -95,17 +95,17 @@ portability requirement).
 
 ## Goals
 
-- `network-monitor init <FOLDER>` exits `0` for a missing or empty folder and creates exactly
-  `<FOLDER>/network-monitor.toml`, `<FOLDER>/data/`, and `<FOLDER>/logs/`; it writes nothing
+- `uptime-monitor init <FOLDER>` exits `0` for a missing or empty folder and creates exactly
+  `<FOLDER>/uptime-monitor.toml`, `<FOLDER>/data/`, and `<FOLDER>/logs/`; it writes nothing
   outside that folder.
-- The generated `network-monitor.toml` parses through `config::parse` and resolves through
+- The generated `uptime-monitor.toml` parses through `config::parse` and resolves through
   `Config::resolve` with no override. It has one active target, `tcp://1.1.1.1:443`, with no
   interface, and the defaults `interval_ms = 5000`, `timeout_ms = 2000`,
   `database = "data/events.db"`, and `retention_days = 0`.
 - The generated file declares one enabled `logfile` channel named `events`, at
   `logs/events.log`, with `stabilize_seconds = 0`, `max_bytes = 10485760`, and `max_files = 5`;
   the root `notify` list enables it for global events and every target.
-- From the folder, `network-monitor check --config network-monitor.toml` exits `0` (the missing
+- From the folder, `uptime-monitor check --config uptime-monitor.toml` exits `0` (the missing
   database is a warning) and creates `logs/events.log`; `data/events.db` does not exist until
   the monitor starts.
 - The active target is not ICMP and has no interface, so the monitor starts without
@@ -115,9 +115,9 @@ portability requirement).
   with a configuration flag (`--config`, `--interval-ms`, `--timeout-ms`, `--database`,
   `--retention-days`, `--target`, `--show-config`). Every refusal exits non-zero, names the
   reason, and writes nothing.
-- `init` never reads `./network-monitor.toml`, never opens the database, never starts a probe,
+- `init` never reads `./uptime-monitor.toml`, never opens the database, never starts a probe,
   and never binds a socket.
-- A second `init` on the same folder fails and leaves the first `network-monitor.toml`
+- A second `init` on the same folder fails and leaves the first `uptime-monitor.toml`
   byte-identical.
 - The command, the folder layout, and the event-log choice are documented in `PRODUCT`,
   `USER-GUIDE`, `README`, `ARCHITECTURE`, `DEVELOPER-GUIDE`, `GLOSSARY`, `ADR`, and the landing
@@ -125,11 +125,11 @@ portability requirement).
 - Existing behaviour is unchanged: no new configuration key and no change to `Config::resolve`,
   `check`, `monitor`, `probe`, `store`, `web`, `notify`, or `import`. The binary remains one
   statically linked executable with no runtime dependency.
-- `network-monitor manual` exits `0` and writes the exact bytes of the embedded
-  `docs/USER-GUIDE.md` to stdout; `network-monitor man` is a visible alias with byte-identical
+- `uptime-monitor manual` exits `0` and writes the exact bytes of the embedded
+  `docs/USER-GUIDE.md` to stdout; `uptime-monitor man` is a visible alias with byte-identical
   stdout.
 - `manual` reads no configuration: it succeeds in a directory containing an invalid
-  `network-monitor.toml`, and it never parses `--target`; `--config`, `--show-config`,
+  `uptime-monitor.toml`, and it never parses `--target`; `--config`, `--show-config`,
   `--interval-ms`, `--timeout-ms`, `--database`, `--retention-days`, or a non-empty `--target`
   exits non-zero with `manual takes no arguments; it does not read a configuration`.
 - `manual` creates no file, opens no database, starts no probe, and binds no socket.
@@ -156,7 +156,7 @@ portability requirement).
 - No new configuration key, no `--log-file`, and no change to the diagnostic log on stderr.
 - No fake log lines and no generated history; `simulate` remains the demo mode.
 - No generated `README`, `.gitignore`, run script, Makefile, unit file, or compose file.
-- No changes to `network-monitor.sample.toml`, `docker/config.toml`, `Dockerfile`, or
+- No changes to `uptime-monitor.sample.toml`, `docker/config.toml`, `Dockerfile`, or
   `docker-compose.yml`.
 - No Windows/macOS-specific code. The implementation uses `std::fs` and `std::path` only; no CI
   matrix exists, so the integration tests run on the host platform.
@@ -164,7 +164,7 @@ portability requirement).
   OSC 8 hyperlinks; the raw Markdown is the output.
 - No pager or subprocess: `less`, `more`, and `mdcat` are optional tools the user pipes to;
   the binary never spawns them.
-- No native `man network-monitor` page, no roff, and no installation step.
+- No native `man uptime-monitor` page, no roff, and no installation step.
 - No section argument, `--list`, search, or filter; `manual` prints the whole guide.
 - No curated duplicate manual and no generated summary.
 - No new flag for `manual` and no web route for the guide.
@@ -215,7 +215,7 @@ portability requirement).
 - `site/index.html` — a “From an empty folder” snippet and a “Read the manual” snippet in
   “Quick start”.
 
-No change: `network-monitor.sample.toml`, `docker/config.toml`, `Dockerfile`,
+No change: `uptime-monitor.sample.toml`, `docker/config.toml`, `Dockerfile`,
 `docker-compose.yml`, `Cargo.toml`, and `Cargo.lock` (no new dependency; the version bump is
 applied by `spec-close`).
 
@@ -296,7 +296,7 @@ Create `src/init.rs` with:
 
 - Constants for the layout: `DATA_DIR = "data"`, `LOG_DIR = "logs"`,
   `DATABASE = "data/events.db"`, `EVENT_LOG = "logs/events.log"`, and the `TEMPLATE` string.
-  Reuse `config::DEFAULT_CONFIG_FILE` for `network-monitor.toml`. Make the path constants and
+  Reuse `config::DEFAULT_CONFIG_FILE` for `uptime-monitor.toml`. Make the path constants and
   `TEMPLATE` `pub` so the component contract, the tests, and `-D warnings` can name them
   without a dead-code exemption.
 - `pub struct Report` with the `folder`, `config`, `data`, and `logs` paths and a `render()`
@@ -319,7 +319,7 @@ Create `src/init.rs` with:
      return `NotADirectory`/`NotEmpty`/`Read` before creating anything.
   3. If the path does not exist, `create_dir_all(folder)` so a nested path works.
   4. Create `data/` and `logs/` with `create_dir`.
-  5. Write the template to `network-monitor.toml` with `OpenOptions::create_new(true)` so a
+  5. Write the template to `uptime-monitor.toml` with `OpenOptions::create_new(true)` so a
      file that appears between the check and the write is never clobbered.
   6. Return the `Report`.
   The steps are ordered so the template is known valid before the folder is touched, and the
@@ -338,11 +338,11 @@ The paths are relative on purpose: the header tells the operator to run from the
 path rewriting is a non-goal.
 
 ```toml
-# network-monitor.toml — generated by `network-monitor init`.
+# uptime-monitor.toml — generated by `uptime-monitor init`.
 # Edit this file; `init` never overwrites it.
 # Run from this folder:
-#   network-monitor check --config network-monitor.toml
-#   network-monitor monitor --config network-monitor.toml
+#   uptime-monitor check --config uptime-monitor.toml
+#   uptime-monitor monitor --config uptime-monitor.toml
 #
 # The diagnostic log is written to stderr. The event log is `logs/events.log`,
 # enabled as a `logfile` channel below and rotated by size.
@@ -388,7 +388,7 @@ Unit tests in `src/init.rs`:
   `a_file_is_not_a_directory`, `a_second_run_is_refused`, and
   `the_report_lists_the_paths_and_commands`.
 - The `NotEmpty` and `NotADirectory` tests assert the error variant and that no new
-  `network-monitor.toml` was created; the second-run test asserts the existing file is
+  `uptime-monitor.toml` was created; the second-run test asserts the existing file is
   byte-identical.
 
 **Verify:** `cargo test --lib init` passes; `cargo test --lib config` still passes.
@@ -416,7 +416,7 @@ In `src/main.rs`:
 - Add `AppError::Init(#[from] init::InitError)`.
 - Match `Command::Init` after the `--log-level` handling and before `Cli::overrides`, the
   `--show-config` branch, and `load_settings`. This is what guarantees that `init` never reads
-  `./network-monitor.toml` and never parses a `--target`.
+  `./uptime-monitor.toml` and never parses a `--target`.
 - Add a small guard that rejects the configuration flags:
   `--config`, `--show-config`, `--interval-ms`, `--timeout-ms`, `--database`,
   `--retention-days`, and a non-empty `--target` list. The error is one line:
@@ -441,15 +441,15 @@ output because clap propagates `global = true`; the runtime guard rejects them, 
 Add `tests/init.rs`, using `assert_cmd`, `predicates`, and `tempfile` as in `tests/cli.rs`:
 
 - `init_creates_a_folder_that_check_accepts`: run `init <root>/monitor`; assert success, the
-  three paths, and no `data/events.db`; then run `check --config network-monitor.toml` with
+  three paths, and no `data/events.db`; then run `check --config uptime-monitor.toml` with
   `current_dir(<root>/monitor)`; assert success and that `logs/events.log` exists while
   `data/events.db` still does not.
 - `init_refuses_a_non_empty_folder`: put a file in the target; run; assert failure, the “not
-  empty” message, and no `network-monitor.toml`.
+  empty” message, and no `uptime-monitor.toml`.
 - `init_refuses_a_file`: pass a path that is a regular file; assert “not a directory”.
 - `init_refuses_a_second_run`: run once, capture the config bytes, run again; assert failure
   and byte-identical content.
-- `init_does_not_read_the_default_configuration`: write an invalid `network-monitor.toml` in the
+- `init_does_not_read_the_default_configuration`: write an invalid `uptime-monitor.toml` in the
   process working directory, run `init` on a different new folder; assert success and that the
   invalid file is untouched. This pins the dispatch order.
 - `init_rejects_configuration_flags`: one case each for `--config`, `--target`, `--database`,
@@ -483,10 +483,10 @@ run time, so `manual` works when the binary is moved alone to another host. No c
 file key is added or changed; the only new surface is the command:
 
 ```text
-network-monitor manual
-network-monitor man
-network-monitor manual | less -R
-network-monitor manual | mdcat --ansi | less -R
+uptime-monitor manual
+uptime-monitor man
+uptime-monitor manual | less -R
+uptime-monitor manual | mdcat --ansi | less -R
 ```
 
 **Verify:** `cargo test --lib manual` passes.
@@ -529,7 +529,7 @@ Add `tests/manual.rs`, using `assert_cmd`, `predicates`, and `tempfile` as in `t
   stdout contains `## Command line` and `## Configuration`; stdout equals the bytes of
   `docs/USER-GUIDE.md` read by the test (the `include_str!` guarantee).
 - `man_is_an_alias`: `man` and `manual` produce byte-identical stdout and both exit `0`.
-- `manual_reads_no_configuration`: write an invalid `network-monitor.toml` in a temporary
+- `manual_reads_no_configuration`: write an invalid `uptime-monitor.toml` in a temporary
   working directory; run `manual` there; assert success and that the invalid file is
   untouched. This pins the dispatch order.
 - `manual_rejects_configuration_flags`: one case each for `--config`, `--target`,
@@ -554,7 +554,7 @@ Update `docs/PRODUCT.md`:
   folder; no systemd, launchd, or Windows service is installed.”
 - Add `FR-33` after `FR-32`: `init <FOLDER>` creates a minimal setup, takes no configuration
   flag, accepts a missing or empty folder and refuses a file or a non-empty folder; it writes
-  `network-monitor.toml` with the defaults, one unprivileged TCP target, a commented ICMP
+  `uptime-monitor.toml` with the defaults, one unprivileged TCP target, a commented ICMP
   example, and an enabled `logfile` channel `events` at `logs/events.log` with the rotation
   keys; it creates `data/` and `logs/`; it validates the generated file before writing it,
   starts no probe, opens no database, binds no socket, reads no configuration, writes nothing
@@ -568,14 +568,14 @@ Update `docs/USER-GUIDE.md`:
   should be near the top). It must be self-contained:
 
   ```bash
-  network-monitor init ./monitor
+  uptime-monitor init ./monitor
   cd ./monitor
-  network-monitor check --config network-monitor.toml
-  network-monitor monitor --config network-monitor.toml --listen 127.0.0.1:8642
+  uptime-monitor check --config uptime-monitor.toml
+  uptime-monitor monitor --config uptime-monitor.toml --listen 127.0.0.1:8642
   ```
 
-  The guide uses `network-monitor` for the binary on `PATH`; in a source checkout, use
-  `./target/release/network-monitor`. Explain what the folder contains, that the active target
+  The guide uses `uptime-monitor` for the binary on `PATH`; in a source checkout, use
+  `./target/release/uptime-monitor`. Explain what the folder contains, that the active target
   is TCP `1.1.1.1:443` and needs no privilege, that the ICMP example is commented and needs
   `root`/`CAP_NET_RAW`, that `logs/events.log` is the event log of the `events` channel and the
   diagnostic log remains on stderr, that `check` creates the log file, that the relative paths
@@ -601,10 +601,10 @@ Update `README.md` “Quick start” with one block, after the build command:
 
 ```bash
 # Scaffold a runnable setup in ./monitor, then check and start it
-./target/release/network-monitor init ./monitor
+./target/release/uptime-monitor init ./monitor
 cd ./monitor
-../target/release/network-monitor check --config network-monitor.toml
-../target/release/network-monitor monitor --config network-monitor.toml \
+../target/release/uptime-monitor check --config uptime-monitor.toml
+../target/release/uptime-monitor monitor --config uptime-monitor.toml \
   --listen 127.0.0.1:8642
 ```
 
@@ -621,8 +621,8 @@ Update the same `docs/USER-GUIDE.md` “Command line > Subcommands” table with
 After the table, add a short paragraph with the two pipelines:
 
 ```bash
-network-monitor manual | less -R
-network-monitor manual | mdcat --ansi | less -R
+uptime-monitor manual | less -R
+uptime-monitor manual | mdcat --ansi | less -R
 ```
 
 State that `less` and `mdcat` are optional, that `manual` never starts a pager or another
@@ -632,7 +632,7 @@ guide printed is the guide of that build, not a copy that can drift.
 Add one line to the `README.md` quick start, after the init block:
 
 ```bash
-./target/release/network-monitor manual | less -R
+./target/release/uptime-monitor manual | less -R
 ```
 
 **Verify:** `grep -n "init\|manual" docs/PRODUCT.md docs/USER-GUIDE.md README.md` finds the new
@@ -669,7 +669,7 @@ manual pipelines are exactly the ones the smoke test uses.
   an installer`, with the context, decision, consequences, and rejected alternatives recorded
   in “Decision-record impact”. Status `accepted`, date `2026-11-17`.
 - `site/index.html`: add a fourth `.snippet` in the Quick start grid, “From an empty folder”,
-  with the same four commands, using `./target/release/network-monitor` as the surrounding
+  with the same four commands, using `./target/release/uptime-monitor` as the surrounding
   source snippet does, and one sentence that the active target is TCP and needs no privilege.
   The grid is single-column, so no CSS change is needed.
 
@@ -688,8 +688,8 @@ manual pipelines are exactly the ones the smoke test uses.
   Markdown, without a renderer`, with the context, decision, consequences, and rejected
   alternatives recorded in “Decision-record impact”; status `accepted`, date `2026-11-17`.
 - `site/index.html`: add a fifth `.snippet`, “Read the manual”, with
-  `./target/release/network-monitor manual | less -R` and
-  `./target/release/network-monitor manual | mdcat --ansi | less -R`, and one sentence that the
+  `./target/release/uptime-monitor manual | less -R` and
+  `./target/release/uptime-monitor manual | mdcat --ansi | less -R`, and one sentence that the
   manual is embedded and works offline.
 
 **Verify:** `grep -n "init\|manual\|Manual" docs/ARCHITECTURE.md docs/DEVELOPER-GUIDE.md
@@ -710,12 +710,12 @@ Then a manual smoke test in a scratch directory:
 
 ```bash
 cargo build --release
-BIN="$PWD/target/release/network-monitor"
+BIN="$PWD/target/release/uptime-monitor"
 rm -rf /tmp/nm-init-demo
 "$BIN" init /tmp/nm-init-demo
 cd /tmp/nm-init-demo
-"$BIN" check --config network-monitor.toml
-"$BIN" monitor --config network-monitor.toml --listen 127.0.0.1:8642
+"$BIN" check --config uptime-monitor.toml
+"$BIN" monitor --config uptime-monitor.toml --listen 127.0.0.1:8642
 ```
 
 The `check` must exit `0`, create `logs/events.log`, and leave `data/events.db` absent. The
@@ -727,7 +727,7 @@ Then confirm `init /tmp/nm-init-demo` fails with the non-empty message and
 For `manual`, with the same built binary:
 
 ```bash
-BIN="$PWD/target/release/network-monitor"
+BIN="$PWD/target/release/uptime-monitor"
 "$BIN" manual > /tmp/nm-manual.md
 cmp /tmp/nm-manual.md docs/USER-GUIDE.md
 "$BIN" manual | head -n 5

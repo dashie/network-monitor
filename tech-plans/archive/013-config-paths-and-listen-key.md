@@ -27,10 +27,10 @@ receives a `FileConfig` with no knowledge of the file it came from, and
 not even normalised at resolve time; the SQLite open resolves it against the working
 directory. Reproduced on the built binary:
 
-- A file at `/tmp/.../conf/network-monitor.toml` containing
+- A file at `/tmp/.../conf/uptime-monitor.toml` containing
   `database = "events.db"` and a `logfile` channel at `filename = "audit.log"` prints, from
   the repository root, `database = "events.db"` and
-  `filename = "/home/ubuntu/src/network-monitor/audit.log"`: the log file lands in the
+  `filename = "/home/ubuntu/src/uptime-monitor/audit.log"`: the log file lands in the
   working directory, not beside the file that declares it.
 - A configuration containing `listen = "127.0.0.1:8642"` is refused by
   `FileConfig`'s `deny_unknown_fields` with `unknown field 'listen'`, so the address can only
@@ -93,7 +93,7 @@ sites, and a split would review the same merge twice without a stable intermedia
 - No listener authentication, TLS, proxy, or new socket: the security posture of the page is
   unchanged.
 - No change to how the configuration file itself is found: `--config` and the default
-  `./network-monitor.toml` still resolve against the working directory.
+  `./uptime-monitor.toml` still resolve against the working directory.
 - No change to the snapshot and backup naming (`<main>.active`, `<main>.<timestamp>.bak`);
   they stay beside the main file.
 
@@ -146,9 +146,9 @@ sites, and a split would review the same merge twice without a stable intermedia
 - `docs/GLOSSARY.md` — `Check` (configured address), `Web page` (flag or file).
 - `docs/DEVELOPER-GUIDE.md` — the compose note that "`--listen` has no key in the file", and
   `Adding a configuration option` gains the path-base rule.
-- `network-monitor.sample.toml` — a commented `listen`, and the path-base note beside
+- `uptime-monitor.sample.toml` — a commented `listen`, and the path-base note beside
   `database`.
-- `network-monitor.toml` — the same path-base note, with `listen` left commented so a
+- `uptime-monitor.toml` — the same path-base note, with `listen` left commented so a
   development start does not open a page.
 - `docker-compose.yml` — the comment that claims the key does not exist; the command itself
   may keep `--listen`, which now demonstrates the flag winning over the file (no key is
@@ -203,7 +203,7 @@ pure parser for callers that validate text before a file exists (`init::validate
 
 **Verify:** `cargo test --lib config` passes, including new unit tests for a relative
 `database`, a relative `filename`, an absolute path, `..` folding, and a path with no parent
-(`network-monitor.toml` stays relative to the working directory).
+(`uptime-monitor.toml` stays relative to the working directory).
 
 ### Step 2 — Use the file-aware parser everywhere a file is read
 
@@ -233,7 +233,7 @@ value alone, the flag alone, the flag winning over the file, no value at all, an
 
 ### Configuration excerpt (required when the plan adds or changes configuration)
 
-`network-monitor.sample.toml`, before:
+`uptime-monitor.sample.toml`, before:
 
 ```toml
 interval_ms = 5000
@@ -241,7 +241,7 @@ timeout_ms = 2000
 
 # SQLite event database. Keep it on a local filesystem: WAL is not supported on
 # network shares.
-database = "./tmp/network-monitor.db"
+database = "./tmp/uptime-monitor.db"
 retention_days = 0
 ```
 
@@ -259,19 +259,19 @@ timeout_ms = 2000
 # SQLite event database. A relative path is relative to this file, not to the
 # working directory. Keep it on a local filesystem: WAL is not supported on network
 # shares.
-database = "./tmp/network-monitor.db"
+database = "./tmp/uptime-monitor.db"
 retention_days = 0
 ```
 
 The command line keeps its own base and wins over the file:
 
 ```bash
-network-monitor monitor --config /etc/network-monitor/config.toml --listen 0.0.0.0:8642
+uptime-monitor monitor --config /etc/uptime-monitor/config.toml --listen 0.0.0.0:8642
 # the flag overrides a `listen` key; --database stays relative to the working directory
 ```
 
 **Verify:** the key in the sample parses and appears with this spelling in `docs/USER-GUIDE.md`
-(`Global keys`); `network-monitor --show-config --config network-monitor.sample.toml` prints
+(`Global keys`); `uptime-monitor --show-config --config uptime-monitor.sample.toml` prints
 the same merged value when the comment is removed.
 
 ### Step 4 — Bind the effective address and let `check` verify it
@@ -307,7 +307,7 @@ asserts the process is still running and the old address still answers.
 In `src/init.rs`, change the `TEMPLATE` comment from "Run from this folder" to state that the
 paths inside the file are relative to the file, so the folder can be checked or started from
 anywhere. Keep `Report::render`'s `cd` line: it remains valid and makes the simplest first run
-explicit. Add an integration test that runs `check --config <folder>/network-monitor.toml`
+explicit. Add an integration test that runs `check --config <folder>/uptime-monitor.toml`
 from the parent and asserts `<folder>/logs/events.log` exists while the parent has no
 `logs/` or `events.db`.
 
@@ -327,7 +327,7 @@ Update, in this order, so each statement matches the code that now exists:
    note in `Upgrade` and the `serve`/`simulate` exclusion in `Limits and deliberate choices`.
    Keep the guide self-contained and do not link it to the repository documents.
 5. `docs/GLOSSARY.md`, `docs/DEVELOPER-GUIDE.md` (the compose note and `Adding a
-   configuration option`), `network-monitor.sample.toml`, `network-monitor.toml`, and the
+   configuration option`), `uptime-monitor.sample.toml`, `uptime-monitor.toml`, and the
    `docker-compose.yml` comment.
 6. `README.md` and `site/index.html` need no edit; walk them once and record the confirmation
    in `## Implementation Notes`.
@@ -367,7 +367,7 @@ exits zero.
   precedence, the `--show-config` round trip, the `check` line, the bound page, the reload
   rule, and the scaffold from another directory.
 - **Quality gate:** `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`.
-- **Manual:** create `conf/network-monitor.toml` with `database = "events.db"` and a
+- **Manual:** create `conf/uptime-monitor.toml` with `database = "events.db"` and a
   `logfile` channel at `logs/events.log` (create `conf/logs/` first), then from the parent
   run `--show-config` and `check`; confirm the absolute paths and that `conf/logs/events.log`
   exists. Start `monitor` briefly and confirm `conf/events.db` is created. Add
@@ -420,7 +420,7 @@ exits zero.
   key. `database` keeps its existing treatment (no trimming) because the plan did not ask for a
   behaviour change there.
 - **Decision** — `Cli::overrides` reads `monitor --listen` into `Overrides.listen`; this is what
-  makes `network-monitor monitor --listen X --show-config` print `listen = "X"` and keeps a
+  makes `uptime-monitor monitor --listen X --show-config` print `listen = "X"` and keeps a
   single merge path for the monitor, the candidate, and the snapshot.
 - **Deviation** — the reload test lives in `tests/cli.rs`
   (`a_changed_listen_address_needs_a_restart`), not in `tests/reload.rs` as the step suggested.

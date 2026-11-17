@@ -1,4 +1,4 @@
-# network-monitor — Claude entry point
+# uptime-monitor — Claude entry point
 
 <!-- skill:block:claude-pointer replace="body" -->
 The agent instructions for this repository live in [AGENTS.md](./AGENTS.md). This file

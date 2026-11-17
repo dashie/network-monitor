@@ -13,7 +13,7 @@ branch_recommended: false
 
 ## Summary
 
-Both pages open with the same identity block — mark, `Network Monitor`, `Reachability
+Both pages open with the same identity block — mark, `Uptime Monitor`, `Reachability
 monitoring` — flush left and on the same centre line, inside a masthead of fixed height. The
 detail page carries no breadcrumb and states its target at the right end of the same
 masthead: `label | address` over `UP for 5d 3h`. Its toolbar holds the way back and the
@@ -45,7 +45,7 @@ regress again without a test catching it.
 
 ## Goals
 
-- Both pages open with the same identity block (mark, `Network Monitor`, `Reachability
+- Both pages open with the same identity block (mark, `Uptime Monitor`, `Reachability
   monitoring`), flush left and vertically centred, inside a `72px` masthead.
 - The detail page carries no breadcrumb, and the target — `label | address`, then the state
   badge with its duration — sits at the right end of the masthead, on the same centre line.
@@ -279,7 +279,7 @@ the name it accepts comes from the renderers, not from the URL.
 ### Delivered design
 
 - **Masthead**, both pages: `min-height: 72px`, `align-items: center`. The identity block —
-  mark, `Network Monitor`, `Reachability monitoring` — comes from `brand.html` through
+  mark, `Uptime Monitor`, `Reachability monitoring` — comes from `brand.html` through
   `{brand}` and is held against the left edge by `margin-right: auto`.
 - **Toolbar**, both pages: `min-height: 56px`. The timeline shows the window and its links;
   the target page opens with `← Back` and lists the periods.

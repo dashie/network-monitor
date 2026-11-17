@@ -803,7 +803,7 @@ wrong the moment the check lands, so they change in the same commit.
   sequential requests with a valid maximum-width window followed by `/healthz` and `/` still
   answering `200`, run against **the `release` profile as well as `debug`**, because a `debug`
   panic and a `release` hang are different failures and only the second one ships. Then start
-  `./target/debug/network-monitor serve --database <file> --listen 127.0.0.1:8642`
+  `./target/debug/uptime-monitor serve --database <file> --listen 127.0.0.1:8642`
   and run `curl -s '127.0.0.1:8642/api/v1/targets?limit=2'`,
   `curl -s '127.0.0.1:8642/api/v1/faults?target=icmp://1.1.1.1&from=2026-11-01T00:00:00Z'`,
   `curl -s '127.0.0.1:8642/api/v1/faults/daily?from=2026-11-01T00:00:00Z&to=2026-12-01T00:00:00Z'`,
@@ -1447,7 +1447,7 @@ The pattern is that each round fixes the reported expression and the next one in
 
 ### The round-5 blocker, re-measured on the profile that ships
 
-`target/release-dev/network-monitor serve`, a database with an open `up` run, RSS 4 MB idle:
+`target/release-dev/uptime-monitor serve`, a database with an open `up` run, RSS 4 MB idle:
 
 | Request | Before (round 5) | After |
 |---|---|---|

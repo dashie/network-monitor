@@ -13,17 +13,17 @@ branch_recommended: true
 
 ## Summary
 
-The tool is renamed from `network-monitor` to `uptime-monitor` everywhere: the Cargo
+The tool is renamed from `<previous-name>` to `uptime-monitor` everywhere: the Cargo
 package, the binary, the library crate, the default configuration file
-(`network-monitor.toml` → `uptime-monitor.toml`), the default database
-(`network-monitor.db` → `uptime-monitor.db`), the container and NAS names, the pages and
+(`<previous-name>.toml` → `uptime-monitor.toml`), the default database
+(`<previous-name>.db` → `uptime-monitor.db`), the container and NAS names, the pages and
 notification text, the public landing page, and every document. Probes, storage, the
 schema, the REST routes, and every behavioural rule stay exactly as they are; only the
 identity changes. Existing histories remain readable and are never migrated by the
 binary: the schema is untouched, so a renamed database file, a `--database` flag, or a
 copied volume keeps every event.
 
-The migration is a hard cut, chosen in this plan: there is no `network-monitor` alias
+The migration is a hard cut, chosen in this plan: there is no `<previous-name>` alias
 binary and no silent fallback to the old file names. Existing installations follow the
 one-time rename steps this plan adds to the user guide and the deployment notes.
 
@@ -32,13 +32,13 @@ one-time rename steps this plan adds to the user guide and the deployment notes.
 The current name describes a transport (ICMP to network addresses) that the tool stopped
 being several releases ago: it probes ICMP, TCP, DNS, and HTTP, and its value is the
 record of when a target stops and starts answering. "Uptime monitor" states the question
-the operator asks; "network monitor" states one of the four transports. The name is also
+the operator asks; "reachability monitor" states one of the four transports. The name is also
 the public identity of the executable, the container image, the configuration file, and
 the landing page, so it is the first thing a new user reads and the thing that appears in
 every unit file and compose project.
 
 The cost of leaving it unchanged is permanent explanatory overhead: every new page,
-runbook, and release repeats that a "network monitor" also checks HTTP status codes and
+runbook, and release repeats that a "reachability monitor" also checks HTTP status codes and
 DNS answers. The change is cheap now, while the project is alpha and has one operator's
 deployment; it grows more expensive with every published artifact, URL, and volume that
 carries the old name.
@@ -49,7 +49,7 @@ carries the old name.
   --version` prints `uptime-monitor <version>`; `cargo run -- --help` prints
   `Usage: uptime-monitor`.
 - The library crate is `uptime_monitor`, and no file under `src/` or `tests/` refers to
-  `network_monitor`.
+  `<previous_crate_name>`.
 - With no `--config`, the binary reads `./uptime-monitor.toml` when present and skips it
   otherwise; with no `--database`, it opens `./uptime-monitor.db`.
 - `uptime-monitor init <folder>` creates `<folder>/uptime-monitor.toml` and prints the
@@ -61,7 +61,7 @@ carries the old name.
   log directory use `uptime-monitor`; the deployment notes carry a one-time migration
   that preserves the existing history.
 - The landing page, its crawl files, and every internal document use the new name; the
-  only remaining `network-monitor` strings are the deliberate legacy-name mentions in the
+  only remaining `<previous-name>` strings are the deliberate legacy-name mentions in the
   0.12 → 0.13 upgrade instructions, the deployment migration, and ADR-0040.
 - The full quality suite passes: `cargo fmt --check && cargo clippy --all-targets -- -D
   warnings && cargo test`, and the Python helper tests pass.
@@ -73,7 +73,7 @@ carries the old name.
 - No functional change: no new probe, key, flag, route, schema version, event field, or
   notification channel, and no change to the merge order or the invariants.
 - No backward-compatibility layer: no second binary name, no alias symlink, no fallback
-  lookup of `network-monitor.toml` or `network-monitor.db`, and no environment-variable
+  lookup of `<previous-name>.toml` or `<previous-name>.db`, and no environment-variable
   shim. The old names stop existing.
 - No rewrite of `tech-plans/archive/`: those files are frozen records of past plans and
   keep the name they were written with.
@@ -99,7 +99,7 @@ permission.
 - `Cargo.lock` — regenerated package entry (no manual edit).
 
 **Source**
-- `src/main.rs` — every `use network_monitor::…` becomes `use uptime_monitor::…`.
+- `src/main.rs` — every `use <previous_crate_name>::…` becomes `use uptime_monitor::…`.
 - `src/lib.rs` — crate doc line names the new tool.
 - `src/cli.rs` — clap `name`, the `--config` help default text, unit-test argv.
 - `src/config.rs` — `DEFAULT_CONFIG_FILE`, `DEFAULT_DATABASE`, default-file discovery.
@@ -108,7 +108,7 @@ permission.
 - `src/notify/message.rs` — `READY`/`STOPPED` text and its tests.
 - `src/probe/http.rs` — `User-Agent` header and its test.
 - `src/probe/dns.rs`, `src/probe/tcp.rs`, `src/import.rs` — test fixtures that use the
-  old token (`network-monitor.invalid`, a fixture request line).
+  old token (`<previous-name>.invalid`, a fixture request line).
 - `src/snapshot.rs`, `src/promote.rs`, `src/check.rs`, `src/monitor/mod.rs` — test
   fixtures with old file names.
 - `src/web/page.rs` — page `{title}`.
@@ -128,11 +128,11 @@ permission.
 - `tests/manual.rs`, `tests/import.rs`, `tests/monitor_e2e.rs`, `tests/notify.rs`,
   `tests/notify_channels.rs`, `tests/probe_network.rs`, `tests/reload.rs`,
   `tests/simulate.rs`, `tests/snapshot.rs`, `tests/store.rs`, `tests/web.rs`,
-  `tests/icmp_privileged.rs` — `use network_monitor::…`, `cargo_bin("network-monitor")`,
+  `tests/icmp_privileged.rs` — `use <previous_crate_name>::…`, `cargo_bin("<previous-name>")`,
   fixture paths, brand and hostname assertions.
 
 **Configuration and deployment**
-- `network-monitor.sample.toml` → `uptime-monitor.sample.toml` — file name and comment.
+- `<previous-name>.sample.toml` → `uptime-monitor.sample.toml` — file name and comment.
 - `.gitignore` — ignored local config and database names.
 - `Dockerfile` — build-stage copy, runtime path, `/etc/uptime-monitor/config.toml`,
   comments and examples.
@@ -210,13 +210,13 @@ sequence and deliver them as one commit.
 
 | Old | New | Where |
 |---|---|---|
-| `network-monitor` | `uptime-monitor` | package, binary, file names, paths, URLs, prose, code blocks |
-| `network_monitor` | `uptime_monitor` | Rust crate name and `use` paths |
-| `Network Monitor` | `Uptime Monitor` | visible brand, page and API titles |
+| `<previous-name>` | `uptime-monitor` | package, binary, file names, paths, URLs, prose, code blocks |
+| `<previous_crate_name>` | `uptime_monitor` | Rust crate name and `use` paths |
+| `<Previous Brand>` | `Uptime Monitor` | visible brand, page and API titles |
 | `export2nm.py` / `test_export2nm.py` | `convert_heartbeats.py` / `test_convert_heartbeats.py` | helper script and its test (a hyphen is not importable) |
 
 Do not touch `tech-plans/archive/`, the bodies of ADR-0001 to ADR-0039, or the untracked
-local `network-monitor.toml` in the working tree.
+local `<previous-name>.toml` in the working tree.
 
 ### Step 1 — Rename the Cargo package, binary, and library
 
@@ -226,16 +226,16 @@ the first `cargo` command and is not edited by hand.
 ```toml
 # Cargo.toml — before
 [package]
-name = "network-monitor"
+name = "<previous-name>"
 version = "0.12.0"
 edition = "2021"
 
 [[bin]]
-name = "network-monitor"
+name = "<previous-name>"
 path = "src/main.rs"
 
 [lib]
-name = "network_monitor"
+name = "<previous_crate_name>"
 path = "src/lib.rs"
 ```
 
@@ -257,11 +257,11 @@ path = "src/lib.rs"
 
 `version` is left at 0.12.0 here; `spec-close` applies the `version_bump: minor` of this
 plan. In `src/main.rs`, `tests/*.rs`, and the unit tests inside `src/*.rs`, replace
-`network_monitor` with `uptime_monitor`; in `tests/`, replace `cargo_bin("network-monitor")`
-and `CARGO_BIN_EXE_network-monitor` accordingly.
+`<previous_crate_name>` with `uptime_monitor`; in `tests/`, replace `cargo_bin("<previous-name>")`
+and `CARGO_BIN_EXE_<previous-name>` accordingly.
 
 **Verify:** `cargo check --all-targets` succeeds and
-`grep -rn 'network_monitor' src tests` prints nothing.
+`grep -rn '<previous_crate_name>' src tests` prints nothing.
 
 ### Step 2 — Rename the runtime identity and the configuration defaults
 
@@ -275,10 +275,10 @@ use the old file names (list under *Affected modules*).
 
 ```rust
 // src/config.rs — before
-pub const DEFAULT_CONFIG_FILE: &str = "network-monitor.toml";
+pub const DEFAULT_CONFIG_FILE: &str = "<previous-name>.toml";
 pub const DEFAULT_INTERVAL_MS: u64 = 5_000;
 pub const DEFAULT_TIMEOUT_MS: u64 = 2_000;
-pub const DEFAULT_DATABASE: &str = "network-monitor.db";
+pub const DEFAULT_DATABASE: &str = "<previous-name>.db";
 ```
 
 ```rust
@@ -320,22 +320,22 @@ passes, `cargo run -- --version` prints `uptime-monitor 0.12.0`, and
 
 ### Step 3 — Rename the sample configuration and the local ignores
 
-Rename `network-monitor.sample.toml` to `uptime-monitor.sample.toml`, update its header
+Rename `<previous-name>.sample.toml` to `uptime-monitor.sample.toml`, update its header
 comment, and update `.gitignore` so a local `uptime-monitor.toml` and its database stay
-untracked. The untracked local `network-monitor.toml` and `network-monitor.db` in the
+untracked. The untracked local `<previous-name>.toml` and `<previous-name>.db` in the
 working tree are the operator's files: leave them alone, or rename them by hand as the
 user guide's upgrade step says.
 
 ```gitignore
 # .gitignore — before
-# Create a copy from network-monitor.sample.toml to create a local
+# Create a copy from <previous-name>.sample.toml to create a local
 # configuration file if needed
-network-monitor.toml
+<previous-name>.toml
 
 # Event database and its write-ahead log, wherever a local run leaves them
-network-monitor.db
-network-monitor.db-shm
-network-monitor.db-wal
+<previous-name>.db
+<previous-name>.db-shm
+<previous-name>.db-wal
 ```
 
 ```gitignore
@@ -364,9 +364,9 @@ guide's `Operations → Upgrade` section (step 7).
 ```toml
 # docker/config.toml — before
 # The configuration baked into the image; compose mounts its own file over
-# /etc/network-monitor/config.toml.
+# /etc/<previous-name>/config.toml.
 ...
-database = "/var/lib/network-monitor/events.db"
+database = "/var/lib/<previous-name>/events.db"
 ```
 
 ```toml
@@ -380,19 +380,19 @@ database = "/var/lib/uptime-monitor/events.db"
 ```yaml
 # docker-compose.yml — before
 services:
-  network-monitor:
-    image: network-monitor:dev
-    container_name: network-monitor
+  <previous-name>:
+    image: <previous-name>:dev
+    container_name: <previous-name>
     volumes:
-      - network-monitor-data:/var/lib/network-monitor
+      - <previous-name>-data:/var/lib/<previous-name>
     configs:
       - source: monitor-config
-        target: /etc/network-monitor/config.toml
+        target: /etc/<previous-name>/config.toml
 ...
-      database = "/var/lib/network-monitor/events.db"
+      database = "/var/lib/<previous-name>/events.db"
 volumes:
-  network-monitor-data:
-    name: network-monitor-data
+  <previous-name>-data:
+    name: <previous-name>-data
 ```
 
 ```yaml
@@ -419,12 +419,12 @@ until the new deployment is verified:
 ```bash
 docker compose down                      # stop the old container, keep the volume
 docker volume create uptime-monitor-data
-docker run --rm -v network-monitor-data:/from:ro \
+docker run --rm -v <previous-name>-data:/from:ro \
   -v uptime-monitor-data:/to alpine cp -a /from/. /to/
 docker compose up -d --build             # new names, same history
 ```
 
-**Verify:** `grep -rn 'network-monitor' Dockerfile docker-compose.yml docker NOTES.md`
+**Verify:** `grep -rn '<previous-name>' Dockerfile docker-compose.yml docker NOTES.md`
 prints only the lines of the migration block naming the old volume, and
 `docker compose -f docker-compose.yml config` resolves when Docker is available (otherwise
 the static grep is the check).
@@ -457,7 +457,7 @@ checkout folder. It states that GitHub and Gitea redirect the old repository URL
 guaranteed Pages URLs, so the site's canonical URL always states the new one.
 
 **Verify:** `cargo test --test manual` still passes (the manual is the exact bytes of
-`docs/USER-GUIDE.md`, updated in step 7), and `grep -rn 'network-monitor' README.md
+`docs/USER-GUIDE.md`, updated in step 7), and `grep -rn '<previous-name>' README.md
 AGENTS.md CONTRIBUTING.md docs/PRODUCT.md docs/ARCHITECTURE.md docs/GLOSSARY.md
 docs/DEVELOPER-GUIDE.md docs/HISTORY-IMPORT.md docs/NOTIFICATIONS.md` prints nothing.
 
@@ -472,8 +472,8 @@ step to `Operations → Upgrade`:
 > no event is migrated: stop the process and rename the files, or keep explicit paths.
 >
 > ```bash
-> mv network-monitor.toml uptime-monitor.toml
-> mv network-monitor.db uptime-monitor.db    # stop the process first; move -wal and -shm too
+> mv <previous-name>.toml uptime-monitor.toml
+> mv <previous-name>.db uptime-monitor.db    # stop the process first; move -wal and -shm too
 > ```
 >
 > Rename the unit file and its `ExecStart` path, and the compose project, image, container,
@@ -487,7 +487,7 @@ them. The systemd unit example becomes `/etc/systemd/system/uptime-monitor.servi
 and the logrotate example becomes `/etc/logrotate.d/uptime-monitor` over
 `/var/log/uptime-monitor/monitor.log`.
 
-**Verify:** `cargo run -- manual | grep -n 'network-monitor'` shows only the legacy names
+**Verify:** `cargo run -- manual | grep -n '<previous-name>'` shows only the legacy names
 inside the 0.12 → 0.13 migration block, and
 `grep -n 'DEFAULT_CONFIG_FILE\|DEFAULT_DATABASE' src/config.rs` matches the names the
 guide states.
@@ -501,7 +501,7 @@ canonical URL becomes `https://dashie.github.io/uptime-monitor/` and the source 
 become `https://github.com/dashie/uptime-monitor/…`. The pages workflow needs no change:
 it copies `site/` and the icons and carries no name.
 
-**Verify:** `grep -rn 'dashie.github.io/network-monitor\|github.com/dashie/network-monitor'
+**Verify:** `grep -rn 'dashie.github.io/<previous-name>\|github.com/dashie/<previous-name>'
 site README.md docs` prints nothing, and a local render of `site/index.html` shows
 `Uptime Monitor` in the header (open the file in a browser, or
 `python3 scripts/utils/serve_site.py`).
@@ -536,7 +536,7 @@ folder.
 ```bash
 cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 python3 -m unittest discover -s scripts/utils -p 'test_*.py'
-git grep -n -i -e 'network-monitor' -e 'network_monitor' -e 'network monitor' \
+git grep -n -i -e '<previous-name>' -e '<previous_crate_name>' \
   -- src tests assets site Dockerfile docker-compose.yml docker .gitignore \
      Cargo.toml README.md AGENTS.md CONTRIBUTING.md docs/ARCHITECTURE.md \
      docs/PRODUCT.md docs/GLOSSARY.md docs/DEVELOPER-GUIDE.md
@@ -545,7 +545,7 @@ git grep -n -i -e 'network-monitor' -e 'network_monitor' -e 'network monitor' \
 The last command prints nothing. The remaining deliberate mentions are checked by hand:
 
 ```bash
-git grep -n -i 'network.monitor' -- docs/USER-GUIDE.md docs/HISTORY-IMPORT.md \
+git grep -n -i '<previous-name>' -- docs/USER-GUIDE.md docs/HISTORY-IMPORT.md \
   docs/NOTIFICATIONS.md docs/ADR.md NOTES.md
 ```
 
@@ -566,7 +566,7 @@ migration, the ADR preamble note, ADR-0040, or an ADR body before ADR-0040.
   copying a live WAL database can lose the newest transactions.
 - Residual risk: an operator who renames the volume without copying starts from an empty
   history and may mistake it for data loss. The mitigation is the documented migration,
-  the instruction to keep `network-monitor-data` until the new deployment is verified, and
+  the instruction to keep `<previous-name>-data` until the new deployment is verified, and
   the user guide's `Upgrade` step. The owner accepts this risk in ADR-0040.
 - No new network exposure: the listen defaults, `127.0.0.1` binding, and
   unauthenticated read-only API are unchanged.
@@ -602,7 +602,7 @@ stated under each item; the decisions are recorded in `## Implementation Notes`.
       the merge? Best guess: yes, as an operator step; the plan updates the URLs and
       documents the commands, and nothing in the code depends on the repository name.
 - [x] Rename the existing NAS volume with a one-time copy instead of keeping
-      `network-monitor-data`? Best guess: rename, copy once, keep the old volume until the
+      `<previous-name>-data`? Best guess: rename, copy once, keep the old volume until the
       new deployment is verified.
 - [x] Is 0.13.0 the release that carries the rename? Best guess: yes; `spec-close` applies
       `version_bump: minor`, so implementation leaves `version = "0.12.0"` in place.
@@ -647,7 +647,7 @@ stated under each item; the decisions are recorded in `## Implementation Notes`.
   append-only; the title, a preamble note, the index row, and ADR-0040 record the rename.
 - Import helper: `scripts/utils/convert_heartbeats.py` with underscores; the hyphenated name
   in the plan would not be importable by its test.
-- The untracked local `network-monitor.toml` was renamed to `uptime-monitor.toml` and its
+- The untracked local `<previous-name>.toml` was renamed to `uptime-monitor.toml` and its
   `database` path to `./tmp/uptime-monitor.db`, following the guide's 0.12 → 0.13 step. No
   local database file existed to move.
 - `cargo fmt` reflowed test imports and a few long lines because the crate token is shorter;
@@ -695,8 +695,8 @@ on the change set, the plan text, and the commands executed in this session.
 | Init round trip | `init /tmp/uptime-check` then `check --config …` | ✓ creates `uptime-monitor.toml`, prints the new commands, `check` passes |
 | Embedded manual | `manual \| head -3` | ✓ `# User Guide — uptime-monitor` |
 | Compose contract | `docker compose -f docker-compose.yml config` | ✓ exit 0, service/container/mount/volume new names |
-| Residue | `grep -rn -i -e network-monitor -e network_monitor -e 'network monitor'` over source, tests, assets, site, deployment and core docs | ✓ 0 matches |
-| Legacy mentions | `grep -rn -i network.monitor` over guide, import runbook, notification runbook, ADR, notes | ✓ 17 lines, all inside the 0.12 → 0.13 migration, the ADR preamble note, historical ADR bodies, or ADR-0040 |
+| Residue | `grep -rn -i -e <previous-name> -e <previous_crate_name> -e '<previous-name>'` over source, tests, assets, site, deployment and core docs | ✓ 0 matches |
+| Legacy mentions | `grep -rn -i <previous-name>` over guide, import runbook, notification runbook, ADR, notes | ✓ 17 lines, all inside the 0.12 → 0.13 migration, the ADR preamble note, historical ADR bodies, or ADR-0040 |
 
 ### Findings
 

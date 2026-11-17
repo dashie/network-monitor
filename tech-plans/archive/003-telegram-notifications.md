@@ -122,7 +122,7 @@ statement".
   file-only secret, and how to test the notifier without the network.
 - `AGENTS.md` — one row for the runbook in the project-documents table.
 - `README.md` — one line in `## Quick start` and one row in `## Documentation`.
-- `network-monitor.toml` — a commented `[telegram]` example with no real token.
+- `uptime-monitor.toml` — a commented `[telegram]` example with no real token.
 
 ## Architecture impact
 
@@ -332,11 +332,11 @@ per recorded transition, none for a local probe error, and the reload warning.
   secret that is file-only and redacted; in `### Adding a test`, how `notify::fake` drives the
   delivery without the network.
 - `AGENTS.md`: the runbook row. `README.md`: the quick-start line and the documentation row.
-- `network-monitor.toml`: a commented `[telegram]` block whose token reads
+- `uptime-monitor.toml`: a commented `[telegram]` block whose token reads
   `123456789:replace-me`.
 
 **Verify:** `grep -n "telegram" docs/USER-GUIDE.md docs/TELEGRAM-NOTIFICATIONS.md
-network-monitor.toml` shows every key of `FileTelegram`, and `cargo run -- --show-config`
+uptime-monitor.toml` shows every key of `FileTelegram`, and `cargo run -- --show-config`
 prints the section with `<redacted>` and no real token.
 
 ## Security considerations
@@ -490,7 +490,7 @@ prints the section with `<redacted>` and no real token.
   wait, and it removed the three seconds the two existing retry tests spent sleeping.
   `tests/notify.rs` still drives the real `deliver` path end to end, so the constant is covered.
 - **Finding 6** — the `.gitignore` entry is outside `## Affected modules` and the user approved
-  it explicitly in review round 1: it keeps the local `network-monitor-telegram.toml`, which
+  it explicitly in review round 1: it keeps the local `uptime-monitor-telegram.toml`, which
   holds a real token, out of Git. Recorded here so the next round sees the decision.
 - **Finding 4** — no code change: the one-line fixture update in `tests/config_precedence.rs` is
   a consequence of the new `FileConfig` field, already recorded under *Discoveries*.
@@ -513,7 +513,7 @@ prints the section with `<redacted>` and no real token.
 | 3 | major | `docs/USER-GUIDE.md:293` | The new subsection closes with a relative link to `TELEGRAM-NOTIFICATIONS.md`. The user guide declares itself distributable on its own and is otherwise link-free, so an internal link breaks its self-containment. | open |
 | 4 | minor | `tests/config_precedence.rs` | Outside `## Affected modules`: one line (`..FileConfig::default()`) forced by the new `FileConfig` field. Recorded in Implementation Notes; no assertion changed. | open |
 | 5 | minor | `src/notify/mod.rs` | No test exhausts the retry loop (five attempts, then `notification lost`). `a_retryable_failure_is_attempted_again` stops at three, `a_permanent_failure_is_not_retried` at one, so deleting the cap would keep the suite green. The plan's verification list did not ask for this case. | open |
-| 6 | minor | `.gitignore` | Outside `## Affected modules`: one ignored path, `network-monitor-telegram.toml`, so the local file with a real token cannot be committed. Approved by the user in this review round. | approved 2026-11-14 |
+| 6 | minor | `.gitignore` | Outside `## Affected modules`: one ignored path, `uptime-monitor-telegram.toml`, so the local file with a real token cannot be committed. Approved by the user in this review round. | approved 2026-11-14 |
 
 ### Gap analysis
 

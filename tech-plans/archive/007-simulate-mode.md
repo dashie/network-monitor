@@ -13,7 +13,7 @@ branch_recommended: true
 
 ## Summary
 
-A new subcommand, `network-monitor simulate --listen <ADDR>`, publishes the same read-only
+A new subcommand, `uptime-monitor simulate --listen <ADDR>`, publishes the same read-only
 page, JSON API and CSV export the tool already has — over a history it **generates
 deterministically** from the targets found in the configuration, instead of reading a
 database. It opens no database file, performs no real probe, and writes nothing anywhere.
@@ -46,7 +46,7 @@ Without the last property the mode becomes a second product that drifts from the
 
 ## Goals
 
-- `network-monitor simulate --listen 127.0.0.1:8660` starts and serves `/`, `/target`,
+- `uptime-monitor simulate --listen 127.0.0.1:8660` starts and serves `/`, `/target`,
   `/api/v1/targets`, `/api/v1/faults`, `/api/v1/daily`, `/api/v1/openapi.json` and
   `/export/faults.csv.gz` with data generated from the `[[targets]]` of the configuration;
   a test walks every route and asserts a `200` and a non-empty body.
@@ -265,7 +265,7 @@ message), build a `SimulatedSource`, and call `web::run(&source, &listen, …)`.
 line stating the mode, the number of targets, the window, the seed, and that no database is
 used. `--database` and `[database]` are accepted and ignored; `[telegram]` is not started.
 
-**Verify:** `cargo run -- --config network-monitor.toml simulate --listen 127.0.0.1:8660`
+**Verify:** `cargo run -- --config uptime-monitor.toml simulate --listen 127.0.0.1:8660`
 prints the log line and `curl -s localhost:8660/ | head -3` returns the page; `simulate` without
 `--listen` exits with clap's "required argument" error; `--history 0` and `--history 4000d` are refused with a message naming the
 accepted range.
@@ -501,7 +501,7 @@ None: every branch that would change the files, the steps or the verification is
 | # | Severity | Area | Finding | Status |
 |---|---|---|---|---|
 | 1 | major | `src/sim/history.rs` | `SimulatedHistory::rows()` regenerates the **whole covered past** into a `Vec<Event>` on every `states()`/`find_target()`, so `/`, `/target` and `/api/v1/targets` cost `history_days × fault_rate × targets` and ignore the window the page asks for. Measured with the two documented maxima, `--history 3660d --fault-rate 1000`: `/` answered `200` in **70.9 s** with **1.71 GB** RSS; `--fault-rate 100` → 10.8 s, 1.50 GB; the defaults (`--history 3660d`, rate 3) → 0.53 s, 89 MB. The plan's Security considerations require "the per-request work bounded by the window the page asks for", so this is an unmet constraint, not a preference. The fix is local: the current row needs `first_seen_at_ms = first_ms()` and `episode_at(target, now_ms)` — one day — not the past. | open |
-| 2 | minor | `README.md` | A new subcommand is a run step, and the Quick start named `monitor`, `serve`, `query` and `import` but not `simulate`. Added after the `serve` block: `# Look at that page with no network and no database: a generated history, the same for the same seed` + `./target/release/network-monitor simulate --listen 127.0.0.1:8660 --history 30d --seed 0`. | fixed in review |
+| 2 | minor | `README.md` | A new subcommand is a run step, and the Quick start named `monitor`, `serve`, `query` and `import` but not `simulate`. Added after the `serve` block: `# Look at that page with no network and no database: a generated history, the same for the same seed` + `./target/release/uptime-monitor simulate --listen 127.0.0.1:8660 --history 30d --seed 0`. | fixed in review |
 | 3 | minor | `docs/ARCHITECTURE.md` | Two sentences the change made wrong: §1 "One invocation is either a long-running `monitor` … or a short-lived `query`" now reads "… or one of the short-lived commands — `serve` and `simulate` that read a history and publish it, `query` and `import` that read or restore the database"; §2 "**No listening socket.** The process opens no port; the only integration surface is the SQLite file…" now reads "**No listening socket unless asked.** The process opens a port only when `--listen` is given (INV-11)…". | fixed in review |
 | 4 | minor | `tech-plans/007-simulate-mode.md` (Goals) | The first goal names `/api/v1/daily`; the route is `/api/v1/faults/daily`, which is what `tests/simulate.rs` walks and what the goal intends. Plan text; the reviewer does not edit the plan. | open (plan wording) |
 | 5 | minor | `src/web/templates/detail.html`, `src/web/detail.rs`, `tests/web.rs`, `docs/USER-GUIDE.md`, `docs/ARCHITECTURE.md` | The tree carried an unrecorded change the plan never specified: the detail page's way back reads `HOME` instead of `targets`, which failed the two assertions in `src/web/detail.rs` (602, 873) and `tests/web.rs` (659). At the user's explicit decision in this round it is **part of the change**: the template (already staged by the user), the three assertions, the user guide's `HOME • <label> (<address>)` line and the `web` contract in the architecture now agree. Recorded here because it changes a user-visible label and because it edits existing tests, which a review does not do on its own. | fixed in review (approved by the user) |

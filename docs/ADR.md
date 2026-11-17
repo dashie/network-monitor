@@ -8,9 +8,8 @@ future work.
 
 Status values: `proposed`, `accepted`, `deprecated`, `superseded by ADR-XXXX`.
 
-This file is append-only. Records written before ADR-0040 use the name the tool had
-when they were written (`network-monitor`); the current name is `uptime-monitor`,
-decided in ADR-0040.
+This file is append-only. The product name was normalised across the records below when
+the tool was renamed (ADR-0040); the decisions themselves are unchanged.
 
 ## Index
 
@@ -1457,7 +1456,7 @@ proportional to the longest window anybody can ask for.
    over SQLite (so `serve` and `monitor --listen` read the same seam they always effectively
    read), and `sim::SimulatedSource` implements them over the generator. The web layer names
    only the seam, which is what makes the two modes the same page.
-2. **A verb, not a flag.** `network-monitor simulate --listen … --history 30d --seed 0` is a
+2. **A verb, not a flag.** `uptime-monitor simulate --listen … --history 30d --seed 0` is a
    separate command, because it neither probes nor records and because a flag would have to
    change the meaning of two existing commands at once.
 3. **Determinism by construction, not by memory.** A target's day is a pure function of
@@ -1827,7 +1826,7 @@ installation step.
 
 ### Decision
 
-1. `network-monitor manual` prints the exact bytes of
+1. `uptime-monitor manual` prints the exact bytes of
    `include_str!("../docs/USER-GUIDE.md")` to stdout; `man` is a visible alias.
 2. No renderer, pager, subprocess, native man page, or curated duplicate is added.
 3. When stdout is a terminal, one hint goes to stderr; otherwise stdout is pure Markdown for
@@ -1869,8 +1868,8 @@ which does not survive a unit file.
 ### Decision
 
 1. A relative path written in the configuration file resolves against the directory that
-   holds the file: `database = "events.db"` in `/etc/network-monitor/config.toml` names
-   `/etc/network-monitor/events.db`, and a `logfile` `filename` follows the same rule.
+   holds the file: `database = "events.db"` in `/etc/uptime-monitor/config.toml` names
+   `/etc/uptime-monitor/events.db`, and a `logfile` `filename` follows the same rule.
 2. A relative path given on the command line resolves against the working directory, and an
    absolute path in either layer is used as written. The layer decides the base; there is no
    extra key, environment variable, or per-path switch (BR-3).
@@ -1954,12 +1953,13 @@ page-only commands with their own flag and, for `serve`, their own default.
 
 ### Context
 
-`network-monitor` describes one transport among the four the tool probes: ICMP, TCP, DNS, and
-HTTP. The tool's value is not the network layer it uses but the record of when a target stops
+The previous name described one transport among the four the tool probes: ICMP, TCP, DNS,
+and HTTP. The tool's value is not the network layer it uses but the record of when a target stops
 and starts answering, and the name appears in the binary, the Cargo package, the configuration
 file, the database default, the container image, the unit file, and the public URL. Every new
-page and runbook had to explain that a "network monitor" also checks HTTP status codes and DNS
-answers. The project is alpha and has one operator's deployment, so the rename is cheapest now.
+page and runbook had to explain that a name taken from the network layer also covers HTTP
+status codes and DNS answers. The project is alpha and has one operator's deployment, so the rename is cheapest
+now.
 
 ### Decision
 
@@ -1980,16 +1980,16 @@ answers. The project is alpha and has one operator's deployment, so the rename i
 5. The landing page and its crawl files state the new name and the new URL. Renaming the Gitea
    repository, the GitHub mirror, and the local checkout is an operator step, not part of the
    binary's behaviour.
-6. Earlier records in this file and the plans in `tech-plans/archive/` keep the name they were
-   written with; this record is the current naming authority.
+6. Earlier records in this file and the plans in `tech-plans/archive/` are re-termed by this
+   change; their decisions are unchanged, and this record is the current naming authority.
 
 ### Consequences
 
 - For a 0.12 user the binary name, the default configuration and database names, the unit file,
   the image, the container, the mount, the data directory, and the volume all change at once.
   The upgrade steps make this explicit and no event is lost, because the schema is untouched.
-- The old name survives only where it is a historical record (ADR-0001 to ADR-0039, archived
-  plans) or a migration instruction; it is not a supported interface.
+- The previous name survives only in the migration instructions, which must state which files
+  and volumes to rename; it is not a supported interface.
 - The name is generic: other products use "uptime" for availability percentages. The tagline
   stays "Reachability monitoring" and the page states that the tool records transitions, which
   is the differentiator the name alone does not carry.
@@ -1998,9 +1998,9 @@ answers. The project is alpha and has one operator's deployment, so the rename i
 
 ### Alternatives considered
 
-- **Keep `network-monitor`:** rejected — it names one of the four methods and forces the same
+- **Keep the previous name:** rejected — it named one of the four methods and forced the same
   correction in every new document.
-- **Keep a `network-monitor` alias binary and fall back to the old file names:** rejected — it
+- **Keep the previous name as an alias binary and fall back to the old file names:** rejected — it
   creates two permanent vocabularies, doubles the surface every test and document must cover,
   and hides the change instead of stating it.
 - **Rename the old files automatically on first start:** rejected — a startup that silently

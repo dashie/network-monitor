@@ -127,7 +127,7 @@ history that cannot record anything but ICMP.
   (TLS, DNS and socket dependencies without an async runtime); index rows.
 - `docs/DEVELOPER-GUIDE.md` — rewrite "Adding a probe type", note the per-method test command.
 - `README.md` — description and one example per method.
-- `network-monitor.toml` — one commented example per method, per-target timeout and interval.
+- `uptime-monitor.toml` — one commented example per method, per-target timeout and interval.
 - `.spec-workflow.yml` — *(new)* created with this plan (workflow profile).
 
 ## Architecture impact
@@ -177,7 +177,7 @@ ICMP behaviour is unchanged: same packet, same socket-per-call, same classificat
 
 **Verify:** `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`
 (the whole existing suite, including `tests/monitor_e2e.rs` and `tests/icmp_privileged.rs`,
-passes with ICMP only); `cargo run -- monitor --config network-monitor.toml` still logs the
+passes with ICMP only); `cargo run -- monitor --config uptime-monitor.toml` still logs the
 same transitions.
 
 ### Step 2 — Model the target and its identity
@@ -262,7 +262,7 @@ a local UDP server answering and one staying silent); manual
 
 - URL parsing at configuration time (`http` and `https`, optional port, path and query,
   no credentials, no fragment, ASCII host); reject anything else with a named key.
-- Request: `GET <target> HTTP/1.1`, `Host`, `User-Agent: network-monitor/<version>`,
+- Request: `GET <target> HTTP/1.1`, `Host`, `User-Agent: uptime-monitor/<version>`,
   `Accept: */*`, `Connection: close`; no body, no redirect following.
 - Response: read the head up to `\r\n\r\n` within an 8 KiB cap, parse the status line;
   `expect_status` defaults to `200..=399` and accepts a list of exact codes or a class
@@ -306,11 +306,11 @@ target and the download/import round trip keeps the exact keys.
   rows.
 - `docs/DEVELOPER-GUIDE.md`: "Adding a probe type" rewritten around
   `src/probe/<method>.rs` and `cargo test --lib probe::<method>`.
-- `README.md` and `network-monitor.toml`: one example per method; per-target timeout and
+- `README.md` and `uptime-monitor.toml`: one example per method; per-target timeout and
   interval.
 - `Cargo.toml`: version `0.2.0`, description without "ICMP only".
 
-**Verify:** `cargo run -- --show-config --config network-monitor.toml` accepts the example;
+**Verify:** `cargo run -- --show-config --config uptime-monitor.toml` accepts the example;
 `grep -rn "ICMP" README.md docs/PRODUCT.md` shows only statements that are still true;
 `docker compose -f docker-compose.yml config -q` stays valid.
 
@@ -347,7 +347,7 @@ target and the download/import round trip keeps the exact keys.
 - **Quality gate:** `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`.
 - **Manual:** `sudo cargo run -- monitor --target 1.1.1.1 --target tcp:1.1.1.1:443 --target dns:example.com@9.9.9.9 --target http:https://example.com --listen 127.0.0.1:8642`
   and a look at the page; then `cargo test --test probe_network -- --ignored` against real
-  endpoints; then the container build (`docker build -t network-monitor:dev .`) to prove the
+  endpoints; then the container build (`docker build -t uptime-monitor:dev .`) to prove the
   static binary still links with `rustls`.
 - **Rollback:** revert the commit and rebuild. The database keeps reading: keys are opaque
   text. Caveat to state in the release notes — an older binary writes ICMP targets under the
@@ -492,7 +492,7 @@ target and the download/import round trip keeps the exact keys.
   taken (Rust 1.75 kept, trust store ours, DNS system-resolver limit).
 - DEVELOPER-GUIDE: layout tree, "Adding a probe type" rewritten around `probe/<method>.rs`, a
   new crate is stated as a decision that needs an ADR.
-- README, `network-monitor.toml` (one example per method, per-target timeout), `Cargo.toml`
+- README, `uptime-monitor.toml` (one example per method, per-target timeout), `Cargo.toml`
   (0.2.0, description).
 - `--show-config` of the shipped example parses back to an identical configuration (verified by
   running it twice and diffing).
@@ -536,7 +536,7 @@ target and the download/import round trip keeps the exact keys.
 | 1 | major | `src/probe/tcp.rs:229` | `a_socket_bound_to_an_interface_still_connects` is racy: the accept thread returns and drops the listener immediately, so under load the client sees `POLLHUP` and the test panics on `.expect(...)`. Reproduced on the lib test binary: 4 failures in 40 runs at `--test-threads=32`; 0 in 60 runs of `probe::tcp` alone. A nondeterministic quality gate cannot back a PASS. Keep the listener (and the accepted stream) alive until the probe returns. | open |
 | 2 | major | `src/probe/tcp.rs:110` (`classify`) | The same failure exposes a classification gap: socket2 reports a handshake that completed and was then closed by the peer as `Err` with no errno (`"cannot connect: no error set after POLLHUP"`), and `classify` maps it to `Local`, so a service that accepts and closes at once is never `up` and never produces a verdict, contrary to FR-20. Confirm the outcome with `Socket::peer_addr()` (or `SO_ERROR`) before classifying, and retry `ErrorKind::Interrupted` instead of calling it local. | open |
 | 3 | major | `tests/probe_network.rs` | Listed under Affected modules and in the Verification plan as the ignored real-endpoint check, but the file does not exist and no Implementation Note records the drop. The functional evidence was gathered by hand instead (four-method run, HTTPS in the container); either create the file or record the deferral explicitly. | open |
-| 4 | minor | `README.md` quick start | The minimal TOML still shows ICMP targets only; the plan asked for one example per method. The four methods are documented in `network-monitor.toml` and `docs/USER-GUIDE.md`, so this is a discoverability gap, not a contradiction. | open |
+| 4 | minor | `README.md` quick start | The minimal TOML still shows ICMP targets only; the plan asked for one example per method. The four methods are documented in `uptime-monitor.toml` and `docs/USER-GUIDE.md`, so this is a discoverability gap, not a contradiction. | open |
 | 5 | nit | `src/probe/dns.rs:196` | `parse_response` does not compare the response identifier with the query's; unreachable in practice because each probe uses a fresh connected socket, but the codec is public to the module. | open |
 
 ### Gap analysis
@@ -626,7 +626,7 @@ target and the download/import round trip keeps the exact keys.
 | 3 | major | `tests/probe_network.rs` | The planned ignored acceptance file did not exist. Created with five tests and executed: `cargo test --test probe_network -- --ignored` → 5 passed in 0.11 s; the suite counts them as ignored by default. | fixed in round 2 |
 | 4 | major | `docs/USER-GUIDE.md` | Not self-contained: the guide links the repository's internal documents, so it breaks when distributed alone — `GLOSSARY.md` and `PRODUCT.md` (lines 7–8), `DEVELOPER-GUIDE.md#build` (line 59), `DEVELOPER-GUIDE.md#container-and-qnap-deployment` (line 79), `ADR.md` + `PRODUCT.md` (lines 350–351). Replace every link with the statement it stands for: the term note, the two build commands, one sentence on how the configuration reaches the container, and the reason behind the deliberate limits. | open |
 | 5 | minor | `docs/USER-GUIDE.md:22` | The opening summary is three paragraphs over seven lines; the guide contract asks for one paragraph of at most three lines. | open |
-| 6 | minor | `README.md` quick start | The minimal TOML still shows ICMP targets only, though the plan asked for one example per method; `network-monitor.toml` and the user guide carry all four. | open |
+| 6 | minor | `README.md` quick start | The minimal TOML still shows ICMP targets only, though the plan asked for one example per method; `uptime-monitor.toml` and the user guide carry all four. | open |
 | 7 | nit | `src/probe/dns.rs:196` | `parse_response` does not compare the response identifier with the query's; unreachable in practice, since each probe uses a fresh connected socket. | open |
 | 8 | nit | `tech-plans/001-multi-method-targets.md` | Review round 1 suggested retrying `ErrorKind::Interrupted`; the implementer did not, with a recorded reason (a retry needs a fresh socket plus a deterministic way to interrupt a connect, which the suite cannot produce). Accepted as a deviation, not a defect. | closed |
 
@@ -662,7 +662,7 @@ target and the download/import round trip keeps the exact keys.
 ### Recommendations for future work
 
 - Point the 40-run stress at the binary `cargo test --no-run` names: `target/debug/deps` keeps
-  stale `network_monitor-*` executables, and the first one found can be an old build.
+  stale `uptime_monitor-*` executables, and the first one found can be an old build.
 - Consider a `probe::tcp` test that drives a listener accepting and closing at once, so the
   production shape of finding 2 stays covered end to end.
 

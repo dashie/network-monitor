@@ -150,7 +150,7 @@ written before this change keep working with no cause.
 - `docs/DEVELOPER-GUIDE.md` — "Adding a probe type" gains "declare the codes in `probe::failure`
   and word the message once"; the import examples use `faults-*.csv.gz` and the new route.
 - `README.md` — the quick start's import example uses the new file name.
-- `network-monitor.toml` — unchanged (no new configuration key).
+- `uptime-monitor.toml` — unchanged (no new configuration key).
 
 ## Architecture impact
 
@@ -323,9 +323,9 @@ builds HTML from data, so a hostile cause cannot script the page. No new depende
 `quality.all`), plus the manual run below:
 
 ```bash
-./target/debug/network-monitor monitor --config ./network-monitor.toml --listen 127.0.0.1:8642
+./target/debug/uptime-monitor monitor --config ./uptime-monitor.toml --listen 127.0.0.1:8642
 # in another shell, with a target whose port is closed and one whose host black-holes:
-./target/debug/network-monitor query events --limit 5
+./target/debug/uptime-monitor query events --limit 5
 curl -s localhost:8642/ | grep -o '<button[^>]*class="cause"[^>]*>[^<]*</button>' | head
 curl -s localhost:8642/export/faults.csv.gz | gunzip | head -3
 curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' localhost:8642/export/disconnections.csv.gz

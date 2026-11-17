@@ -15,7 +15,7 @@ branch_recommended: false
 
 The repository gains a public landing page: one hand-written `site/index.html`, one `site/style.css`,
 three screenshots taken from the product's own simulation, two crawl files, and a GitHub Actions
-workflow that publishes them to `https://dashie.github.io/network-monitor/`. It describes what the
+workflow that publishes them to `https://dashie.github.io/uptime-monitor/`. It describes what the
 tool is, why it exists, the four checks it performs today and the one contract that admits more, how
 it keeps a history, and how to run it — in the project's own English and with no runtime of its own:
 no framework, no JavaScript, no external font, no tracker. The same change adopts the MIT licence,
@@ -31,7 +31,7 @@ questions).
 
 ## Why
 
-The tool is public (`dashie/network-monitor`) and has no entry point: the README is written for
+The tool is public (`dashie/uptime-monitor`) and has no entry point: the README is written for
 someone who already decided to care, and the page the binary serves cannot be shown to anyone who has
 not run it. A visitor arriving from a search or a link has to read Rust-quality prose in a repository
 listing to learn what the thing does, what it costs to run, and whether the next check they need is
@@ -63,7 +63,7 @@ recorded in Open questions, and not part of this plan.
   the deliberate limits; a FAQ; a footer with the links to the source and the documentation.
 - Every command in the quick start is copied from `README.md` or `docs/USER-GUIDE.md` and was executed
   while writing the page: no flag, no path and no output shown on the page is invented.
-- Three screenshots come from `network-monitor simulate` with a recorded seed, history, target list
+- Three screenshots come from `uptime-monitor simulate` with a recorded seed, history, target list
   and viewport, are committed under `site/assets/`, and are regenerable from the command in
   `docs/DEVELOPER-GUIDE.md`.
 - The page is under 600 KB in total and no single image is over 150 KB, measured with `du -ch`.
@@ -145,7 +145,7 @@ recorded in Open questions, and not part of this plan.
 - `docs/GLOSSARY.md`, `docs/ADR.md`, `docs/PRODUCT.md`, `CONTRIBUTING.md`, `NOTES.md` — no change.
 
 **No change**
-- `src/`, `tests/`, `assets/`, `Dockerfile`, `docker-compose.yml`, `network-monitor*.toml`: the
+- `src/`, `tests/`, `assets/`, `Dockerfile`, `docker-compose.yml`, `uptime-monitor*.toml`: the
   screenshots are taken from the running binary, the page ships nothing of it.
 
 ## Architecture impact
@@ -176,8 +176,8 @@ mention it.
 with an `id` the navigation points at:
 
 1. `<header>` — the mark (`assets/icon.svg`, copied by the workflow), the wordmark
-   `network-monitor`, and the anchors `Why`, `Checks`, `How it works`, `Screenshots`, `Quick start`,
-   `FAQ`, plus a `Source` button to `https://github.com/dashie/network-monitor`.
+   `uptime-monitor`, and the anchors `Why`, `Checks`, `How it works`, `Screenshots`, `Quick start`,
+   `FAQ`, plus a `Source` button to `https://github.com/dashie/uptime-monitor`.
 2. `#top` hero — one `<h1>`, one sentence, two buttons (`Get the source` → GitHub, `Quick start` →
    `#quick-start`), and the line `macOS · Linux · Windows · Docker`. No image above the fold.
 3. `#why` — six cards, each a short title, two sentences, and no adjective that the code cannot
@@ -221,9 +221,9 @@ the repository cannot support is dropped rather than qualified.
 | why · notification | One message per incident, and a recovery only once `up` has held for the stabilisation window | `docs/USER-GUIDE.md` *Telegram notifications* |
 | checks table | icmp (echo reply), tcp (connection established), dns (a record of the requested type resolves), http (the status falls inside the expectation) | `docs/USER-GUIDE.md` *ICMP*, *TCP*, *DNS*, *HTTP and HTTPS* |
 | how it works | TOML declares targets → each cycle probes with its own timeout → only a transition is persisted, with the cause of a fault → the page, the API, the CSV export and `query` read the same rows | `docs/PRODUCT.md` `FR-17`, `FR-24`, `docs/ARCHITECTURE.md` |
-| quick start · docker | `docker run -d --name network-monitor --cap-drop ALL --cap-add NET_RAW --network host -v network-monitor-data:/var/lib/network-monitor -v "$PWD/network-monitor.toml:/etc/network-monitor/config.toml:ro" network-monitor:dev monitor --config /etc/network-monitor/config.toml --listen 0.0.0.0:8642` | `docs/USER-GUIDE.md` *Container* |
-| quick start · source | `cargo build --release` then `sudo ./target/release/network-monitor monitor --config ./network-monitor.toml --listen 0.0.0.0:8642` | `README.md` *Quick start* |
-| quick start · look first | `./target/release/network-monitor simulate --listen 127.0.0.1:8660 --history 30d --seed 0` | `README.md` *Quick start* |
+| quick start · docker | `docker run -d --name uptime-monitor --cap-drop ALL --cap-add NET_RAW --network host -v uptime-monitor-data:/var/lib/uptime-monitor -v "$PWD/uptime-monitor.toml:/etc/uptime-monitor/config.toml:ro" uptime-monitor:dev monitor --config /etc/uptime-monitor/config.toml --listen 0.0.0.0:8642` | `docs/USER-GUIDE.md` *Container* |
+| quick start · source | `cargo build --release` then `sudo ./target/release/uptime-monitor monitor --config ./uptime-monitor.toml --listen 0.0.0.0:8642` | `README.md` *Quick start* |
+| quick start · look first | `./target/release/uptime-monitor simulate --listen 127.0.0.1:8660 --history 30d --seed 0` | `README.md` *Quick start* |
 | limits | IPv4 only; no redirects; `A`/`AAAA` over UDP only; `interface` on `icmp` and `tcp` only; the page has no authentication; the trust store is the one compiled in | `docs/USER-GUIDE.md` *Limits and deliberate choices* |
 | faq | what it is; no database server to run; what it costs to run; no hosted version and no account; nothing leaves the host except Telegram when enabled; `root` or `NET_RAW` for `icmp` only; a new check is a module behind the trait; released under the MIT licence, with a link to `LICENSE` on GitHub | `LICENSE`, `Cargo.toml` |
 
@@ -244,7 +244,7 @@ They show a generated history, never a real one.
 
    ```bash
    cargo build --release
-   ./target/release/network-monitor simulate --listen 127.0.0.1:8660 --history 30d --seed 3 \
+   ./target/release/uptime-monitor simulate --listen 127.0.0.1:8660 --history 30d --seed 3 \
      --fault-rate 6 \
      --target 'icmp:1.1.1.1,label=edge-router north' \
      --target 'tcp:9.9.9.9:443,label=primary-endpoint' \
@@ -268,14 +268,14 @@ They show a generated history, never a real one.
 
 ### Step 4 — Add the files a crawler reads
 
-- `site/index.html`: `<title>` of at most 60 characters (`network-monitor — reachability monitoring
+- `site/index.html`: `<title>` of at most 60 characters (`uptime-monitor — reachability monitoring
   that records incidents`), a `meta description` of at most 160, `<link rel="canonical"
-  href="https://dashie.github.io/network-monitor/">`, `og:type=website`, `og:title`, `og:description`,
+  href="https://dashie.github.io/uptime-monitor/">`, `og:type=website`, `og:title`, `og:description`,
   `og:url`, `og:image` (absolute `…/assets/og.jpg`), `og:image:width/height`, `twitter:card=
   summary_large_image`, and a JSON-LD `SoftwareApplication` with `name`, `applicationCategory`
   (`DeveloperApplication`), `operatingSystem` (`macOS, Linux, Windows`), `offers` at price `0` and
   `isAccessibleForFree: true`.
-- `site/robots.txt`: `User-agent: *`, `Allow: /`, `Sitemap: https://dashie.github.io/network-monitor/sitemap.xml`.
+- `site/robots.txt`: `User-agent: *`, `Allow: /`, `Sitemap: https://dashie.github.io/uptime-monitor/sitemap.xml`.
 - `site/sitemap.xml`: one `<url>` — the canonical address, `lastmod` `2026-11-15`, `changefreq`
   `monthly`, `priority` `1.0`.
 
@@ -373,7 +373,7 @@ places; the quality gate is re-run after the manifest edit and stays green.
 
 ### Step 7 — Say it in the documents
 
-- `README.md`: a `Website: https://dashie.github.io/network-monitor/` line in the opening block, and a
+- `README.md`: a `Website: https://dashie.github.io/uptime-monitor/` line in the opening block, and a
   first bullet in `## Documentation` pointing at the page.
 - `AGENTS.md`: one row in the project-documents table —
   `| [site/index.html](./site/index.html) | The public landing page published on GitHub Pages | A
@@ -439,7 +439,7 @@ added, removed or upgraded by this plan.
 - [x] How is the page published? **Decided: a GitHub Actions workflow publishing an assembled `site/`
       directory**, because the repository's `/docs` folder holds the internal documents and
       "deploy from a branch → /docs" would publish them. Owner: maintainer.
-- [x] Which address? **Decided: the project subpath `https://dashie.github.io/network-monitor/`, with
+- [x] Which address? **Decided: the project subpath `https://dashie.github.io/uptime-monitor/`, with
       relative links**, so a custom domain later touches six lines and no markup. Owner: maintainer.
 - [x] Which images? **Decided: three real screenshots from `simulate`** — generated history, so no
       real data is published, and the same seed reproduces them. Owner: maintainer.
@@ -471,7 +471,7 @@ added, removed or upgraded by this plan.
 ### Decisions taken at implementation time
 
 - **Where the page lives.** `site/` at the root, published from the Actions workflow, at
-  `https://dashie.github.io/network-monitor/`. One level deep, so every link inside the page is
+  `https://dashie.github.io/uptime-monitor/`. One level deep, so every link inside the page is
   relative and the same tree works from a local server, a Pages preview and the live address.
   The only absolute addresses are the canonical link, `og:url`, the JSON-LD `url`, `sitemap.xml`
   and the footer links to GitHub.
@@ -484,13 +484,13 @@ added, removed or upgraded by this plan.
 
 ### Discoveries
 
-- **The release binary can be stale.** `target/release/network-monitor` predated the `simulate`
+- **The release binary can be stale.** `target/release/uptime-monitor` predated the `simulate`
   subcommand, so the verbatim quick-start command failed with `unrecognized subcommand`. A
   `cargo build --release` first is part of the recipe, not an optimisation.
-- **Running the documented `docker run` against the real `$PWD/network-monitor.toml` sent a real
+- **Running the documented `docker run` against the real `$PWD/uptime-monitor.toml` sent a real
   Telegram message.** The example configuration in the repository has the channel enabled; mounting it
   made the container report one transition and deliver it ("[example-health] notification sent"). The
-  container was stopped immediately and the named volume `network-monitor-data` was left in place. The
+  container was stopped immediately and the named volume `uptime-monitor-data` was left in place. The
   recipe on the page is the one from the user guide and is correct, but anyone rehearsing it should
   mount a copy with the `[telegram]` section removed.
 - **Docker host networking does not expose a published port to the macOS host.** With
@@ -542,7 +542,7 @@ added, removed or upgraded by this plan.
 
 ### Extensions
 
-- **`.gitignore` also ignores the event database** — `network-monitor.db`, `-shm` and `-wal`,
+- **`.gitignore` also ignores the event database** — `uptime-monitor.db`, `-shm` and `-wal`,
   requested by the maintainer after the implementation, to prevent a local run from leaving an
   untracked database at the root. The plan listed `.gitignore` for `_site/` only; the two additions
   share the file and its intent (keep local artefacts out of a commit), so they were folded into the
@@ -655,7 +655,7 @@ too (819, 480, 580 and 780 px against viewports of 844, 500, 600 and 800). Opene
    `how-it-works`, `screenshots`, `quick-start`, `faq`) and every local reference answers `200`. Of the
    external references, four answer `200` (the repository, the API contract, the user guide, the
    extension recipe) and two answer `404` **for a reason that is expected in this change**:
-   `https://dashie.github.io/network-monitor/` does not exist until the Pages source is switched, and
+   `https://dashie.github.io/uptime-monitor/` does not exist until the Pages source is switched, and
    `…/blob/main/LICENSE` does not exist until this change is committed.
 5. **The names in the brief.** Case-insensitive search over `site/`, this plan, the workflow and the
    four edited documents: no occurrence. `git diff` confirms the change introduces none. Over the whole

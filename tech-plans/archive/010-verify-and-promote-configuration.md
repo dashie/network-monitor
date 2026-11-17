@@ -19,10 +19,10 @@ target list, the interfaces, the database path, the listening address, the notif
 channels, and the raw-socket privilege are only exercised after the process has started.
 This plan adds three things for the operator who changes a configuration on a running host:
 
-1. `network-monitor check` — a real dry run that verifies everything that can be verified
+1. `uptime-monitor check` — a real dry run that verifies everything that can be verified
    while the live instance keeps running, writes nothing to the event database, and exits
    non-zero when the configuration would not start.
-2. `network-monitor monitor --config <main> --try <candidate>` — the process starts with the
+2. `uptime-monitor monitor --config <main> --try <candidate>` — the process starts with the
    candidate; if the candidate does not pass the same verification it never replaces anything
    and the monitor runs with `<main>`; once every target has completed its first probe
    without a local failure, the candidate is promoted to `<main>` atomically and the file it
@@ -64,7 +64,7 @@ configuration that is known to have worked.
 
 ## Goals
 
-- `network-monitor check` exits `0` when the configuration would start, and non-zero when it
+- `uptime-monitor check` exits `0` when the configuration would start, and non-zero when it
   would not, naming the offending key or file on stdout, without starting a probe loop and
   without modifying the event database.
 - `check` reports, in one run: target list presence, every target's interface, the event
@@ -280,7 +280,7 @@ detail }` entries and renders one line per check:
 ```text
 ok    targets            7 target(s)
 ok    interface          icmp://1.1.1.1 eth0
-ok    database           ./tmp/network-monitor.db (schema 5)
+ok    database           ./tmp/uptime-monitor.db (schema 5)
 warn  listen             0.0.0.0:8642 is in use — the running monitor?
 fail  channel telegram   Unauthorized
 ```
@@ -300,7 +300,7 @@ target-less config fails on `targets`, an unknown interface fails naming the int
 missing database warns, a bad listen address fails, an in-use address warns, and a report
 holding only `ok`/`warn` lines is not failed.
 
-### Step 3 — Expose `network-monitor check`
+### Step 3 — Expose `uptime-monitor check`
 
 In `src/cli.rs` add `Command::Check { listen: Option<String>, probe: bool }` with
 `--listen <ADDRESS:PORT>` and `--probe`; in `src/main.rs` resolve the configuration exactly
@@ -309,7 +309,7 @@ line. Move `validate_interfaces` out of the `Monitor` arm so both arms share it.
 no store for writing, starts no worker, sends no notification, and leaves the working
 directory as it found it (asserted by the test).
 
-**Verify:** `cargo run -- check --config ./network-monitor.toml` prints the report and exits
+**Verify:** `cargo run -- check --config ./uptime-monitor.toml` prints the report and exits
 `0`; `cargo run -- check --config /tmp/bad.toml` with an unknown interface exits `1` and names
 it; `git status --short` shows no new database file.
 
@@ -442,7 +442,7 @@ the `FR-13` amendment in `docs/PRODUCT.md`; the components, the Configuration se
 **Verify:** every option documented in `docs/USER-GUIDE.md` exists in `src/cli.rs` with the
 same name and default (`grep -n "try\|probe\|listen\|fallback" src/cli.rs`),
 `docs/ARCHITECTURE.md` states `INV-15` with the test that enforces it, and
-`git check-ignore -v network-monitor.toml.active` names the new pattern.
+`git check-ignore -v uptime-monitor.toml.active` names the new pattern.
 
 ### Step 9 — Bump the version
 
@@ -487,35 +487,35 @@ passes with no new warnings.
 - **Quality gate:** `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo
   test`.
 - **Manual, on the monitoring host:**
-  1. `network-monitor check --config ./network-monitor.toml --listen 0.0.0.0:8642` while the
+  1. `uptime-monitor check --config ./uptime-monitor.toml --listen 0.0.0.0:8642` while the
      service runs: every line is `ok` except a `warn` for the busy address.
   2. Break the file deliberately — an unknown interface, a revoked token, a target-less file
      — and confirm one `fail` line naming it and exit `1`.
-  3. `network-monitor monitor --config ./network-monitor.toml --try ./next.toml --listen
+  3. `uptime-monitor monitor --config ./uptime-monitor.toml --try ./next.toml --listen
      0.0.0.0:8642` with a good candidate: one `INFO` promotion line, `next.toml` copied over
-     `network-monitor.toml`, the previous file present as
-     `network-monitor.toml.<timestamp>.bak`, and one `CONFIG` message on the channels.
+     `uptime-monitor.toml`, the previous file present as
+     `uptime-monitor.toml.<timestamp>.bak`, and one `CONFIG` message on the channels.
   4. Repeat with a candidate whose interface does not exist: one `ERROR`, one `WARN`, the
      monitor running the old configuration, both files unchanged.
   5. Leave `--try ./next.toml` in the unit file and remove `next.toml`: the start is normal,
      one `INFO` line says no candidate is pending, and the exit code is `0`. Restart again
-     with `next.toml` present and identical to `network-monitor.toml`: one `INFO` line,
+     with `next.toml` present and identical to `uptime-monitor.toml`: one `INFO` line,
      no new `.bak`, so a permanent flag stays quiet.
-  6. With the service running, break `network-monitor.toml` in place — a typo, a missing
+  6. With the service running, break `uptime-monitor.toml` in place — a typo, a missing
      `]]`: one `WARN` says the reload was rejected and monitoring continues, and
-     `network-monitor.toml.active` still holds the configuration that works. Copy it back
-     with `cp network-monitor.toml.active network-monitor.toml`: the reload applies it
+     `uptime-monitor.toml.active` still holds the configuration that works. Copy it back
+     with `cp uptime-monitor.toml.active uptime-monitor.toml`: the reload applies it
      within a second, with no restart.
   7. Restart with the broken file still in place and no options: the start fails and the error
-     names `network-monitor.toml.active` and its age. Add `--fallback-to-active`: the
+     names `uptime-monitor.toml.active` and its age. Add `--fallback-to-active`: the
      process starts, logs one `WARN`, and monitors the snapshot content.
   8. Make an edit the monitor accepts (change `interval_ms`) and wait one interval: the new
-     interval applies, and `network-monitor.toml.active` is byte-identical to what the
+     interval applies, and `uptime-monitor.toml.active` is byte-identical to what the
      process started from, so a later incident falls back to the start configuration and a
      restart is what refreshes the snapshot.
-- **Rollback:** restore `network-monitor.toml.<timestamp>.bak` (a deployment) or
-  `network-monitor.toml.active` (the last configuration that started) over
-  `network-monitor.toml` and restart; the reload picks the file up with no other change. If
+- **Rollback:** restore `uptime-monitor.toml.<timestamp>.bak` (a deployment) or
+  `uptime-monitor.toml.active` (the last configuration that started) over
+  `uptime-monitor.toml` and restart; the reload picks the file up with no other change. If
   the feature misbehaves, the code rollback is one revert: `check`, `--try`, and
   `--fallback-to-active` are additive, and no existing key, file, or command changes meaning.
 
@@ -555,7 +555,7 @@ passes with no new warnings.
 
 - [x] Step 1 — channel `verify` contract and implementations
 - [x] Step 2 — `src/check.rs` pipeline and report
-- [x] Step 3 — `network-monitor check` in CLI and dispatch
+- [x] Step 3 — `uptime-monitor check` in CLI and dispatch
 - [x] CP-1 — dry run usable on its own (confirmed by the full suite under autopilot)
 - [x] Step 4 — `monitor --try` candidate decision table and fallback
 - [x] Step 5 — promotion after the first probe round
@@ -596,7 +596,7 @@ passes with no new warnings.
   targets are still checked — because the plan promises every declared channel in one run.
   The line order still makes the first `fail` the condition that would stop the start.
 
-### Step 3 — `network-monitor check`
+### Step 3 — `uptime-monitor check`
 
 - **Decision:** `check` prints only the report on stdout and writes no `INFO initializing`
   lines, so the command stays pipeable. Diagnostics of the channels go through the existing
@@ -610,14 +610,14 @@ passes with no new warnings.
 The implementer could not wait for an interactive confirmation because the session runs in
 autopilot mode. The full suite was run and passed before continuing:
 `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test` (all green,
-0 failed). `check` was also run against `./network-monitor.toml`, with and without
+0 failed). `check` was also run against `./uptime-monitor.toml`, with and without
 `--probe`; the run printed the expected report and, under `--probe`, failed on the two ICMP
 targets for the missing `CAP_NET_RAW` while the other probes reported their verdicts.
 
 ### Step 4 — `monitor --try`
 
 - **Decision:** `--try` requires an explicit `--config`, even when a default
-  `network-monitor.toml` exists, because the promotion needs a destination named on purpose.
+  `uptime-monitor.toml` exists, because the promotion needs a destination named on purpose.
   The check runs before any file is read, so `--try` alone is a usage error in every
   directory.
 - **Decision:** the candidate is read into bytes once and every later question (parse,
@@ -695,7 +695,7 @@ privileged ICMP tests remain ignored as before.
 |---|---|---|---|---|
 | 1 | blocker | `src/main.rs` (`load_start`) | `monitor --fallback-to-active` falls back only when the main file cannot be loaded or resolved. A main file that parses and resolves but fails pre-flight verification — an interface that does not exist, no targets, a channel that cannot verify — stops the process instead of starting from the snapshot. Step 7 requires the fallback when the main file "cannot be read, parsed, resolved, or pre-flight verified", and FR-32 states the same. Evidence: a main with `interface = "does-not-exist0"` and a valid `main.toml.active` exits `1` with `error: interface 'does-not-exist0' … the last configuration that worked is main.toml.active (0s ago)` and never reads the snapshot. | open |
 | 2 | minor | `tests/monitor_e2e.rs` | The file is outside `## Affected modules`; the only change is the mechanical call-site update to `monitor::run(…, monitor::Start::default())` after the planned `Start` signature change. No assertion changed. | open |
-| 3 | minor | `src/main.rs` (`main_config_path`) | When the configuration is the implicit default and `network-monitor.toml` does not exist, the recovery hint is skipped even when `network-monitor.toml.active` does exist; a start that fails on `no targets configured` prints no snapshot path or age. Step 7 asks every pre-probe failure to name the snapshot when it exists. Evidence: a directory holding only `network-monitor.toml.active` exits `1` with `error: no targets configured; …` and no hint. | open |
+| 3 | minor | `src/main.rs` (`main_config_path`) | When the configuration is the implicit default and `uptime-monitor.toml` does not exist, the recovery hint is skipped even when `uptime-monitor.toml.active` does exist; a start that fails on `no targets configured` prints no snapshot path or age. Step 7 asks every pre-probe failure to name the snapshot when it exists. Evidence: a directory holding only `uptime-monitor.toml.active` exits `1` with `error: no targets configured; …` and no hint. | open |
 
 ### Gap analysis
 - Goals: 15/16 achieved; the `--fallback-to-active` goal is partial because the pre-flight condition of Step 7 is missing.
@@ -710,7 +710,7 @@ privileged ICMP tests remain ignored as before.
 
 ### Recommendations for future work
 - Run the `check` pipeline on the main configuration in `load_start` when `--fallback-to-active` is set (without `listen` and `probe`, as the candidate path does), and add CLI tests for an unknown interface and for a target-less main.
-- Derive the recovery-hint path from the default file name even when the file is absent, so the hint works when only `network-monitor.toml.active` remains.
+- Derive the recovery-hint path from the default file name even when the file is absent, so the hint works when only `uptime-monitor.toml.active` remains.
 
 ### Review round 1 — findings closed
 
@@ -726,7 +726,7 @@ privileged ICMP tests remain ignored as before.
   outside `## Affected modules`; the only change is the mechanical call-site update to
   `monitor::Start` after the planned signature change, with no assertion changed.
 - **Finding 3 (minor, recovery hint):** covered by the same `main_config_path` change: a
-  start that fails with only `network-monitor.toml.active` present now names the snapshot
+  start that fails with only `uptime-monitor.toml.active` present now names the snapshot
   and its age. **Verified:** new CLI test
   `a_failure_with_only_a_snapshot_names_it_and_its_age`.
 - **Decision:** the pre-flight fallback excludes `--listen` (a start argument, not
@@ -746,7 +746,7 @@ privileged ICMP tests remain ignored as before.
 |---|---|---|---|---|
 | — | — | — | No open findings. | closed |
 
-Round 1 findings: #1 (blocker, pre-flight fallback) **closed** — `load_start` now runs the `check` pipeline and falls back on the first `fail`; manually reproduced: with the flag the process keeps running from `main.toml.active`, without it it exits 1 and names the snapshot. #2 (minor, scope note) **closed** — recorded in Implementation Notes; the file's diff is only the forced `monitor::Start` call-site update. #3 (minor, recovery hint) **closed** — `main_config_path` returns the default name when absent; manually reproduced: `network-monitor.toml.active` is named with its age.
+Round 1 findings: #1 (blocker, pre-flight fallback) **closed** — `load_start` now runs the `check` pipeline and falls back on the first `fail`; manually reproduced: with the flag the process keeps running from `main.toml.active`, without it it exits 1 and names the snapshot. #2 (minor, scope note) **closed** — recorded in Implementation Notes; the file's diff is only the forced `monitor::Start` call-site update. #3 (minor, recovery hint) **closed** — `main_config_path` returns the default name when absent; manually reproduced: `uptime-monitor.toml.active` is named with its age.
 
 ### Gap analysis
 - Goals: 16/16 achieved. All `check`, candidate, promotion, swap-back, snapshot and fallback goals are observable and verified.

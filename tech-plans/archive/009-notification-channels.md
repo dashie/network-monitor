@@ -155,7 +155,7 @@ scope boundary: anything outside it requires explicit user permission.
 - `docs/DEVELOPER-GUIDE.md` — the file-only exception, a new "Adding a notification channel"
   recipe, the test list.
 - `README.md`, `AGENTS.md` (the project-document table), `NOTES.md` (a writable path inside the
-  container), `network-monitor.sample.toml`, `site/index.html`.
+  container), `uptime-monitor.sample.toml`, `site/index.html`.
 - `Cargo.toml` — version `0.8.0`, applied at close through `version_bump: minor`; no new
   dependency, so `Cargo.lock` changes only in the package version (maybe).
 
@@ -422,7 +422,7 @@ chat_id = "-1001234567890"
 [[notification]]
 name = "audit"
 type = "logfile"
-filename = "/var/log/network-monitor/audit.log"
+filename = "/var/log/uptime-monitor/audit.log"
 format = "jsonl"
 level = "info"
 
@@ -495,13 +495,13 @@ orphan channel, two channels on one destination and a level that hides events, l
 `What the tool does` summary stays at three lines); `docs/NOTIFICATIONS.md` renamed
 from `docs/TELEGRAM-NOTIFICATIONS.md` and extended to the three channels;
 `docs/DEVELOPER-GUIDE.md` (exception text, "Adding a notification channel"); `README.md`,
-`AGENTS.md`, `NOTES.md`, `network-monitor.sample.toml`, `site/index.html`.
+`AGENTS.md`, `NOTES.md`, `uptime-monitor.sample.toml`, `site/index.html`.
 
 **Verify:** every field of `FileNotification`, the root `notify` key and the target `notify` key
 appear in the user guide; `grep -rn "TELEGRAM-NOTIFICATIONS" --include="*.md" --include="*.toml"
 --include="*.html" .` returns nothing outside `tech-plans/archive`; `grep -rn "\[telegram\]"
 docs README.md site` mentions only the legacy alias; every key in
-`network-monitor.sample.toml` appears in the user-guide tables.
+`uptime-monitor.sample.toml` appears in the user-guide tables.
 
 ### Step 13 — Run the quality gate
 
@@ -654,7 +654,7 @@ used to resume a session.
 - **The config types of step 9 were defined before step 5's runner**, because `notify::start`
   takes `&NotificationConfig`. Resolution, validation and `to_toml` were completed with step 9.
 - **The runbook was moved with `mv`**, not `git mv`: the profile keeps Git writes off.
-- **`network-monitor.toml` (the untracked local copy) still names the old runbook.** It is not
+- **`uptime-monitor.toml` (the untracked local copy) still names the old runbook.** It is not
   a tracked repository file and was deliberately left untouched; `git grep` over tracked files
   finds no stale reference.
 
@@ -673,7 +673,7 @@ used to resume a session.
 - Documentation: `docs/USER-GUIDE.md`, `docs/PRODUCT.md`, `docs/ARCHITECTURE.md`,
   `docs/ADR.md` (ADR-0033, ADR-0027 superseded), `docs/GLOSSARY.md`,
   `docs/NOTIFICATIONS.md` (renamed), `docs/DEVELOPER-GUIDE.md`, `README.md`, `AGENTS.md`,
-  `NOTES.md`, `network-monitor.sample.toml`, `site/index.html`.
+  `NOTES.md`, `uptime-monitor.sample.toml`, `site/index.html`.
 
 ## Review Notes
 
@@ -739,7 +739,7 @@ outside itself, and `What the tool does` is three lines.
 - Scope: in scope. No out-of-scope file.
 - Deviations: steps 3–5 compiled as one unit, the step-9 configuration types defined before the
   step-5 runner, `mv` instead of `git mv` (Git writes are off), and the untracked local
-  `network-monitor.toml` left untouched. All recorded in Implementation Notes and acceptable.
+  `uptime-monitor.toml` left untouched. All recorded in Implementation Notes and acceptable.
 - Additions: none beyond the plan.
 - Deferred: `Cargo.toml` `0.8.0` (`version_bump: minor`) belongs to `spec-close`; nothing else.
 
