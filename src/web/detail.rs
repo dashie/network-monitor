@@ -95,6 +95,7 @@ pub fn target_page(
     super::templates::load_template("detail")
         .replace("{title}", &title)
         .replace("{brand}", &super::templates::brand())
+        .replace("{print_name}", &escape(&name))
         .replace("{identity}", &identity)
         .replace("{state}", target.state.as_str())
         .replace("{held}", &held)
@@ -239,7 +240,7 @@ fn bars(days: &[DailyDrops]) -> String {
 /// covers the last 24 hours instead, tagged so nobody reads it as a full day.
 fn days_table(days: &[DailyDrops], segments: &[TimelineSegment], now_ms: i64) -> String {
     let mut output = String::from(
-        "<h2>Day by day</h2>\n<table class=\"days\" role=\"table\">\n\
+        "<h2 class=\"days-title\">Day by day</h2>\n<table class=\"days\" role=\"table\">\n\
          <thead role=\"rowgroup\"><tr role=\"row\">\
          <th role=\"columnheader\">day (UTC)</th>\
          <th role=\"columnheader\" class=\"num\">faults</th>\
@@ -338,7 +339,7 @@ fn run_hint_24h(count: u32) -> String {
 mod tests {
     use super::*;
     use crate::history::TargetState;
-    use crate::web::templates::stylesheet;
+    use crate::web::templates::{script, stylesheet};
 
     /// A fixed instant, so the age of the current `up` state is deterministic.
     const NOW: i64 = 10_000_000;
@@ -1064,10 +1065,19 @@ mod tests {
             NOW,
             DEFAULT_PERIOD_DAYS,
         );
+        let crumbs = rendered
+            .find("<p class=\"crumbs\">")
+            .expect("the toolbar states the target");
+        let crumbs = &rendered[crumbs..];
+        let crumbs = &crumbs[..crumbs.find("</p>").expect("the toolbar closes")];
         assert_eq!(
-            rendered.matches(">1.1.1.1<").count(),
+            crumbs.matches(">1.1.1.1<").count(),
             1,
-            "one address, with no empty label beside it"
+            "one address in the toolbar, with no empty label beside it"
+        );
+        assert!(
+            rendered.contains("<h1>1.1.1.1</h1>"),
+            "the print header states the same address a second time"
         );
         assert!(!rendered.contains("class=\"target-label\""));
         assert!(
@@ -1102,5 +1112,189 @@ mod tests {
             "the shared script localises the instants of the page"
         );
         assert!(!rendered.contains("times are UTC"));
+    }
+
+    #[test]
+    fn the_masthead_offers_a_print_control() {
+        let rendered = target_page(
+            &target(),
+            &[day(0, 1, 60_000)],
+            &[],
+            &[],
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+        );
+        let start = rendered
+            .find("<header class=\"masthead\">")
+            .expect("the masthead");
+        let masthead = &rendered[start..];
+        let masthead = &masthead[..masthead.find("</header>").expect("the masthead closes")];
+        assert!(
+            masthead.contains(
+                "<button type=\"button\" class=\"print-button\" id=\"print-page\">Print</button>"
+            ),
+            "the print control sits in the masthead: {masthead}"
+        );
+        assert!(
+            masthead.find("class=\"brand\"").unwrap_or(0)
+                < masthead.find("print-button").unwrap_or(0),
+            "the control follows the identity block"
+        );
+    }
+
+    #[test]
+    fn the_printed_header_states_the_target_and_the_period() {
+        let rendered = target_page(&target(), &[day(0, 1, 60_000)], &[], &[], NOW, 30);
+        assert!(rendered.contains("<header class=\"print-head\">"));
+        assert!(rendered.contains("<h1>cloudflare</h1>"));
+        assert!(rendered.contains("Last 30 days · Disconnections per day"));
+
+        let longer = target_page(&target(), &[day(0, 1, 60_000)], &[], &[], NOW, 90);
+        assert!(longer.contains("Last 90 days · Disconnections per day"));
+    }
+
+    #[test]
+    fn the_printed_header_escapes_the_target_name() {
+        let mut hostile = target();
+        hostile.label = Some("<script>alert(1)</script>".to_string());
+        let rendered = target_page(
+            &hostile,
+            &[day(0, 1, 1_000)],
+            &[],
+            &[],
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+        );
+        assert!(rendered.contains("<h1>&lt;script&gt;alert(1)&lt;/script&gt;</h1>"));
+        assert!(!rendered.contains("<h1><script>"));
+    }
+
+    #[test]
+    fn the_recent_faults_are_a_section_the_print_sheet_can_drop() {
+        let rendered = target_page(
+            &target(),
+            &[day(0, 1, 60_000)],
+            &[],
+            &[],
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+        );
+        let section = rendered
+            .find("<section class=\"recent\">")
+            .expect("the recent faults are a section");
+        let list = rendered.find("Last 10 faults").expect("the fault list");
+        let close = rendered[section..]
+            .find("</section>")
+            .expect("the section closes")
+            + section;
+        assert!(
+            section < list && list < close,
+            "the fault list sits inside the section the sheet drops"
+        );
+    }
+
+    #[test]
+    fn the_chart_and_the_table_keep_their_titles() {
+        let rendered = target_page(
+            &target(),
+            &[day(0, 1, 60_000)],
+            &[],
+            &[],
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+        );
+        assert!(rendered.contains("<h2 class=\"chart-title\">Disconnections per day</h2>"));
+        assert!(rendered.contains("<h2 class=\"days-title\">Day by day</h2>"));
+    }
+
+    #[test]
+    fn the_print_control_has_a_thin_border_and_a_small_radius() {
+        let style = stylesheet();
+        let start = style.find(".print-button {").expect("the control's rule");
+        let rule = &style[start..];
+        let rule = &rule[..rule.find('}').expect("the rule closes")];
+        assert!(
+            rule.contains("border: 1px solid var(--rule);"),
+            "the control carries a thin border: {rule}"
+        );
+        assert!(
+            rule.contains("border-radius: 6px;"),
+            "the radius stays small: {rule}"
+        );
+        assert!(
+            !rule.contains("border-radius: 999px;"),
+            "the control is not a pill: {rule}"
+        );
+    }
+
+    #[test]
+    fn the_print_sheet_keeps_only_the_name_the_chart_and_the_table() {
+        let style = stylesheet();
+        let start = style.find("@media print {").expect("the print sheet");
+        let block = &style[start..];
+        for selector in [
+            ".masthead",
+            ".paused",
+            ".toolbar",
+            ".stats",
+            ".recent",
+            "footer",
+            ".print-button",
+            "h2.chart-title",
+        ] {
+            assert!(
+                block.contains(&format!("html.target-page {selector}")),
+                "the sheet hides {selector} on the target page alone"
+            );
+        }
+        assert!(
+            block.contains("html.target-page .print-head { display: block;"),
+            "the sheet shows its own header instead"
+        );
+        assert!(block.contains("html.target-page th { position: static;"));
+        assert!(block.contains("html.target-page tr { break-inside: avoid; }"));
+        assert!(block.contains("html.target-page svg"));
+        assert!(block.contains("print-color-adjust: exact;"));
+        assert!(
+            !block.contains("@page"),
+            "no page-level rule reaches the timeline"
+        );
+    }
+
+    #[test]
+    fn the_print_sheet_is_scoped_to_the_target_page() {
+        let rendered = target_page(
+            &target(),
+            &[day(0, 1, 60_000)],
+            &[],
+            &[],
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+        );
+        assert!(
+            rendered.contains("<html lang=\"en\" class=\"target-page\">"),
+            "the print rules name this page's document"
+        );
+    }
+
+    #[test]
+    fn the_print_header_is_hidden_on_screen() {
+        let style = stylesheet();
+        let screen = &style[..style.find("@media print {").expect("the print sheet")];
+        assert!(
+            screen.contains(".print-head { display: none; }"),
+            "the header lives only on paper"
+        );
+    }
+
+    #[test]
+    fn the_print_control_opens_the_browser_dialog() {
+        let script = script();
+        assert!(script.contains("getElementById('print-page')"));
+        assert!(script.contains("window.print()"));
+        assert!(
+            !script.contains("getElementById('print')"),
+            "the id never shadows window.print"
+        );
     }
 }

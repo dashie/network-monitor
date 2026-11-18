@@ -674,6 +674,11 @@ is showing, on the left of the line, and carries the control that changes it, on
   three. A figure inside a widget never breaks.
   The table lower down follows them: on the same narrow window each day states its date with
   its fault count beside it, and the down time with the average `up` run under them.
+  A `Print` control sits at the right end of the masthead and opens the browser print dialog on
+  the page already open. The printed sheet states the target name and the selected period, then
+  the bar chart of the faults per day and the day-by-day table, and nothing else: the identity
+  block, the widgets, the last faults, the navigation and the footer stay on the screen. The
+  instants are already localised by the browser, so the paper carries your time zone.
 - `Download History` — the whole history as a gzipped CSV, from `/export/faults.csv.gz`, named
   `faults-YYYYMMDD.csv.gz`. On a target page the same link downloads **only that target's**
   history (`/export/faults.csv.gz?target=<key>`) and the file is named after it —

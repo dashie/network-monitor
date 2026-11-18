@@ -303,6 +303,36 @@ fn serves_the_page_with_a_band_per_state() {
 }
 
 #[test]
+fn the_detail_page_offers_a_print_sheet_of_the_target() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    let (status, detail) = server.get("/target?target=1.1.1.1");
+    assert_eq!(status, 200);
+    assert!(
+        detail.contains(
+            "<button type=\"button\" class=\"print-button\" id=\"print-page\">Print</button>"
+        ),
+        "the masthead offers the print control"
+    );
+    assert!(
+        detail.contains("<header class=\"print-head\">"),
+        "the page carries the header only a print shows"
+    );
+    assert!(
+        detail.contains("Last 30 days · Disconnections per day"),
+        "the printed header states the period and the chart it covers"
+    );
+
+    let (status, timeline) = server.get("/");
+    assert_eq!(status, 200);
+    assert!(
+        !timeline.contains("print-button") && !timeline.contains("print-head"),
+        "the timeline is not a report of one target"
+    );
+}
+
+#[test]
 fn a_window_can_be_requested_in_the_url() {
     let (_directory, database) = seeded_database();
     let server = start(&database);
@@ -1052,8 +1082,8 @@ fn every_page_opens_with_the_same_brand_block() {
             .find(r#"<a class="brand" href="/">"#)
             .expect("a brand block");
         let rest = &html[start..];
-        let end = rest.find("</header>").expect("the end of the brand block");
-        rest[..end].trim_end().to_string()
+        let end = rest.find("</a>").expect("the end of the brand block") + "</a>".len();
+        rest[..end].to_string()
     };
     assert_eq!(
         brand(&page),

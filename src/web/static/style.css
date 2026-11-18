@@ -50,6 +50,24 @@ h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
   text-transform: uppercase;
   opacity: 0.55;
 }
+/* The print control sits at the right end of the masthead, on the same centre line as the
+   identity block: a thin border and a small radius, the quiet weight of a toolbar action. */
+.print-button {
+  padding: 4px 12px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+.print-button:hover { border-color: currentColor; }
+/* The printed header exists only on paper: the screen already states the target in the
+   toolbar and the identity block, which a print does not carry. */
+.print-head { display: none; }
 /* The detail page states what it shows on the one line of its toolbar: the way back to
    the list, then the target, the second after a dot. The masthead stays exactly what it is
    on every other page — the mark, the name, and the tagline — because the page it belongs
@@ -453,4 +471,39 @@ td.down { color: #c62828; }
   /* The row is as tall as its two lines now, so the height that kept the wide grid even goes. */
   tr.fault { height: auto; }
   table.faults .ongoing { display: inline; }
+}
+
+/* The printed sheet is the target alone: its name and period, the bar chart, and the
+   day-by-day table. Every control, the widgets, the fault list and the manual are of the
+   screen, not of the paper. A page printed under a dark preference stays black on white.
+   The rules name the target page, so printing the timeline keeps the page it has today. */
+@media print {
+  html.target-page body {
+    padding: 0;
+    color: #000000;
+    background: #ffffff;
+    color-scheme: light;
+  }
+  html.target-page main { max-width: none; }
+  html.target-page .masthead,
+  html.target-page .paused,
+  html.target-page .toolbar,
+  html.target-page .stats,
+  html.target-page .recent,
+  html.target-page footer,
+  html.target-page .print-button,
+  html.target-page h2.chart-title {
+    display: none;
+  }
+  html.target-page .print-head { display: block; margin: 0 0 12px; }
+  html.target-page .print-head h1 { font-size: 20px; }
+  html.target-page .print-head p { margin: 2px 0 0; font-size: 12px; opacity: 0.65; }
+  /* A printed table does not scroll, and no row is split across two sheets. */
+  html.target-page th { position: static; background: none; }
+  html.target-page tr { break-inside: avoid; }
+  /* The bars and the axis labels are data, not decoration: print them as drawn. */
+  html.target-page svg {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
 }

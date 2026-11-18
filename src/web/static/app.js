@@ -14,6 +14,13 @@ if (chart !== null) {
   }, true);
 }
 
+// The print control of the target page opens the browser dialog on the page already open,
+// so the sheet is the page the browser holds, with the instants already localised. The id
+// is not `print`, so the element never shadows `window.print` through the global named
+// access of an id.
+const printPage = document.getElementById('print-page');
+if (printPage !== null) printPage.addEventListener('click', () => window.print());
+
 // Opens the standard message of a fault under its own row, one fault at a time. The button
 // carries `aria-expanded` and the message lives in a real row, so the table stays a table
 // for a screen reader; a browser without JavaScript keeps the `title`. The open fault is

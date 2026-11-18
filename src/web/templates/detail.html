@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="target-page">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -17,6 +17,11 @@
 <main>
 <header class="masthead">
 {brand}
+<button type="button" class="print-button" id="print-page">Print</button>
+</header>
+<header class="print-head">
+<h1>{print_name}</h1>
+<p>Last {period} · Disconnections per day</p>
 </header>
 <div class="paused" id="paused" role="status" hidden>
 <svg class="paused-mark" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
@@ -37,9 +42,9 @@
 <div class="stat"><b>{down_ms}</b><span>down time in the last {period}</span></div>
 <div class="stat" title="{avg_up_hint}"><b>{avg_up}</b><span>avg up run in {period} · max {longest}</span></div>
 </div>
-<h2>Disconnections per day</h2>
+<h2 class="chart-title">Disconnections per day</h2>
 {bars}
-{recent}
+<section class="recent">{recent}</section>
 {table}
 <footer>
 <hr>

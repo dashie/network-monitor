@@ -1451,6 +1451,21 @@ mod tests {
     }
 
     #[test]
+    fn the_timeline_offers_no_print_control() {
+        let window = Window {
+            from_ms: 0,
+            to_ms: 7_200_000,
+        };
+        let rendered = page(&[timeline()], &[], &no_streaks(), window);
+        assert!(!rendered.contains("print-button"));
+        assert!(!rendered.contains("print-head"));
+        assert!(
+            !rendered.contains("target-page"),
+            "the print sheet names only the target page"
+        );
+    }
+
+    #[test]
     fn spans_are_formatted_compactly() {
         assert_eq!(format_span(0), "0s");
         assert_eq!(format_span(45_000), "45s");
