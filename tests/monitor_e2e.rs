@@ -146,6 +146,124 @@ fn a_restart_continues_from_the_stored_state() {
     assert_eq!(events[0].state, TargetState::Down);
 }
 
+#[test]
+fn a_long_restart_writes_the_gap_before_the_first_probe() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("events.db");
+    let expected = database.clone();
+
+    let first = test_config_gap(&database, 5_000);
+    let stop = Shutdown::new();
+    let running = stop.clone();
+    let prober: Arc<dyn Probe> = Arc::new(FakeProbe::always(up()));
+    let store = Arc::new(Mutex::new(Store::open_rw(&database).unwrap()));
+    let handle = thread::spawn(move || {
+        monitor::run(
+            &first,
+            prober,
+            store,
+            &running,
+            None,
+            monitor::Start::default(),
+        )
+    });
+    wait_for_events(&expected, 1, Duration::from_secs(5));
+    stop.request();
+    handle.join().unwrap().unwrap();
+
+    {
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute(
+                "UPDATE monitor_liveness
+                 SET last_seen_ms = last_seen_ms - 60000, stopped_at_ms = NULL",
+                [],
+            )
+            .unwrap();
+    }
+
+    let second = test_config_gap(&database, 5_000);
+    let stop = Shutdown::new();
+    let running = stop.clone();
+    let prober: Arc<dyn Probe> = Arc::new(FakeProbe::always(down()));
+    let store = Arc::new(Mutex::new(Store::open_rw(&database).unwrap()));
+    let handle = thread::spawn(move || {
+        monitor::run(
+            &second,
+            prober,
+            store,
+            &running,
+            None,
+            monitor::Start::default(),
+        )
+    });
+    wait_for_events(&expected, 3, Duration::from_secs(5));
+    stop.request();
+    handle.join().unwrap().unwrap();
+
+    let reader = Store::open_ro(&expected).unwrap();
+    let events = reader.events(&EventFilter::default()).unwrap();
+    let chain: Vec<(&str, &str)> = events
+        .iter()
+        .rev()
+        .map(|event| (event.previous_state.as_str(), event.state.as_str()))
+        .collect();
+    assert_eq!(
+        chain,
+        vec![("unknown", "up"), ("up", "unknown"), ("unknown", "down")]
+    );
+}
+
+#[test]
+fn a_clean_stop_sets_the_stop_instant() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("events.db");
+    let expected = database.clone();
+    let config = test_config(&database);
+
+    let stop = Shutdown::new();
+    let running = stop.clone();
+    let prober: Arc<dyn Probe> = Arc::new(FakeProbe::always(up()));
+    let store = Arc::new(Mutex::new(Store::open_rw(&database).unwrap()));
+    let handle = thread::spawn(move || {
+        monitor::run(
+            &config,
+            prober,
+            store,
+            &running,
+            None,
+            monitor::Start::default(),
+        )
+    });
+    wait_for_events(&expected, 1, Duration::from_secs(5));
+    stop.request();
+    handle.join().unwrap().unwrap();
+
+    let reader = Store::open_ro(&expected).unwrap();
+    let liveness = reader.liveness().unwrap().expect("the row is written");
+    assert_eq!(liveness.stopped_at_ms, Some(liveness.last_seen_ms));
+}
+
+fn test_config_gap(database: &std::path::Path, gap_after_ms: u64) -> Config {
+    Config::resolve(
+        Some(FileConfig {
+            interval_ms: Some(30),
+            timeout_ms: Some(500),
+            database: Some(database.to_string_lossy().into_owned()),
+            retention_days: None,
+            gap_after_ms: Some(gap_after_ms),
+            targets: Some(vec![FileTarget {
+                ip: Some("127.0.0.1".to_string()),
+                label: Some("loop-test".to_string()),
+                ..FileTarget::default()
+            }]),
+            ..FileConfig::default()
+        }),
+        Overrides::default(),
+    )
+    .unwrap()
+}
+
 /// Poll the database from another connection, exactly as `query` does.
 fn wait_for_events(database: &std::path::Path, expected: usize, timeout: Duration) {
     let deadline = Instant::now() + timeout;

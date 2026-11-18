@@ -25,6 +25,10 @@ needed, so the manual can be read and distributed on its own.
 changes, so history grows with incidents, not probes. A target is one check — ICMP, TCP, DNS,
 or HTTP — with its own key; it is `unknown`, `up`, or `down`, and a local failure changes nothing.
 
+When the monitor itself was stopped for longer than `gap_after_ms`, the return is recorded as an
+`unknown` stretch instead of a fault: the last known state is closed as `unknown`, and the first
+probe after the restart records what it sees.
+
 ## Install
 
 ### Requirements
@@ -172,6 +176,7 @@ and `.gitignore` excludes `*.active` and `*.bak` so a working copy cannot commit
 | `database` | `./uptime-monitor.db` | SQLite file; a relative path is relative to this file. Keep it on a local filesystem. Ignored by `simulate`, which reads and writes no database |
 | `listen` | none | `ADDRESS:PORT`, the page address `monitor` binds when `--listen` is absent; `--listen` wins. Without either, no page is served. `serve` and `simulate` ignore this key |
 | `retention_days` | `0` | Delete events older than this; `0` keeps everything |
+| `gap_after_ms` | `60000` | Monitor downtime recorded as `unknown`; `0` disables gap recording and the live `unknown`, and a non-zero value below `5000` is refused |
 | `notify` | empty | Channel names enabled for global events and as the default for every target; see [Notifications](#notifications) |
 
 ### Common target keys
@@ -433,7 +438,9 @@ no target event.
 
 - The monitor starts: one `READY` message as soon as every target is being probed, stating the
   configuration file it read, the keys of the targets it started, and the address of the page
-  when it serves one.
+  when it serves one. After a monitor absence longer than `gap_after_ms` it also states the
+  `Gap:` line — the start and end of the unobserved span and how many targets were marked
+  `unknown` — and the webhook JSON carries the same facts as a `gap` member.
 - A target stops answering: one `DOWN` message at once, with the cause as a code and a sentence.
 - A target answers again: one `UP` message only after `up` has held continuously for
   `stabilize_seconds`. A target that drops again inside that window produces no message at all,
@@ -464,8 +471,11 @@ Targets: 2
 - icmp://192.168.1.1
 - tcp://1.1.1.1:443
 Web: http://0.0.0.0:8642/
+Gap: 2025-11-24T15:00:00.000Z to 2025-11-24T16:00:00.000Z (2 target(s) marked unknown)
 2025-11-24T16:00:00.000Z
 ```
+
+The `Gap:` line appears only when the previous run was absent long enough to be recorded.
 
 An `UP` message is the first and the last line; a target without a label shows only its key;
 only a `DOWN` carries a cause.
@@ -491,6 +501,7 @@ listed in [Troubleshooting](#troubleshooting), later in this guide.
 | `--timeout-ms <n>` | Probe timeout, overrides the file |
 | `--database <path>` | Event database |
 | `--retention-days <n>` | Retention window |
+| `--gap-after-ms <n>` | Monitor downtime recorded as `unknown`; `0` disables, `5000` is the minimum non-zero value |
 | `--target <spec>` | Target list, replaces the file list; repeatable |
 | `--log-level <level>` | `error`, `warn`, `info`, `debug` |
 | `--compression <mode>` | `auto` (default) gzips the HTML pages and the JSON answers when the client accepts it; `off` sends them plain, for a proxy that compresses |
@@ -670,6 +681,14 @@ is showing, on the left of the line, and carries the control that changes it, on
   before this version, `/export/disconnections.csv.gz`, still answers and redirects to the
   whole history.
 - `/healthz` — `ok` while the process runs.
+
+**A stale monitor is shown as `unknown`.** When the liveness record is older than
+`gap_after_ms`, every lane's current state and the tail of the timeline from the last alive
+instant are grey `unknown`, on both the list and the detail page, and the up-run statistics
+stop at that boundary. A fault that was open ends at the gap start rather than at the next
+observation; if the target is still down when the monitor returns, a new fault starts at the
+restart. The gap is therefore never counted as down time — only the measured part of a fault
+is. This is derived at read time, so `serve` shows it without writing to the database.
 
 **Selecting a fault opens its cause underneath the row** — one fault at a time, and the code
 opens it too. The message is drawn as part of that row and not as a fault of its own: the two
@@ -943,6 +962,12 @@ import reads plain `http://` URLs; download an `https` archive with `curl` first
    Keep the old volume until the history is verified. A configuration or database path stated
    explicitly keeps working under any name; only the defaults change.
 
+7. **From 0.15 to 0.16** the schema becomes version 4: the first `monitor` or `import` adds the
+   single-row `monitor_liveness` table and keeps every event. An older binary refuses a
+   version-4 database, so the documented pre-upgrade backup is the rollback. A database
+   without a liveness record — the first start after the upgrade included — claims no gap;
+   recording starts from that run.
+
 `serve` and `query` never write, so they open a 0.2 database as it is: its rows state no cause
 until a `monitor` or an `import` has upgraded the file. That also means the page runs against a
 snapshot, a backup, or a volume mounted read-only.
@@ -1107,6 +1132,9 @@ rotation is one more file to follow and no line disappears from the stream.
 | A `WARN notification attempt 1/5 failed` line repeats five times | The channel is unreachable or rejecting the call. The reason on the line names the answer without the secret; `--log-level debug` adds nothing, because a failed send is always a warning. Other channels are unaffected, and so is the event history — read it with `query events`. |
 | A log file channel writes nothing | The event is below the channel's `level` (`error` hides warnings and information), or the directory of `filename` does not exist. The tool creates the file, never its directory. |
 | The process refuses to start with `cannot open …/audit.log for append` | The file or its directory is not writable by the process user. Create the directory and grant write access; a channel that cannot open is fatal at startup. |
+| A grey `unknown` band appears after a restart | The monitor was absent longer than `gap_after_ms` (60 s by default). The last state is closed as `unknown` at the last moment it was alive, and the first probe after the restart records the observed state. The band is not down time. Set `gap_after_ms = 0` to disable gap recording and live `unknown`. |
+| A target down before and after a restart shows two faults | By design: the first fault ends at the gap start, and the second starts when the monitor sees the target down after the restart. The unobserved span is not counted as down time. |
+| The page shows `unknown` while the monitor is running | The liveness record is older than `gap_after_ms`: the process has not refreshed it, or a second process is writing the database. Check that `monitor` is running against the same file. |
 | No `UP` message arrives after an outage while the page shows the target up | The recovery is still inside the stable `up` window (`stabilize_seconds`, 60 s by default). Wait for the window to close; a drop inside it cancels the message by design. |
 
 ## Limits and deliberate choices
@@ -1117,6 +1145,10 @@ rotation is one more file to follow and no line disappears from the stream.
 - DNS supports `A` and `AAAA` over UDP on port 53, no DNSSEC, no DoT/DoH.
 - `interface` is supported on `icmp` and `tcp` only.
 - The page has no authentication and no write path.
+- The liveness heartbeat writes one row at most once every 15 seconds while the monitor runs.
+  `gap_after_ms = 0` turns both the heartbeat and the live `unknown` off.
+- A restart can create a second fault when a target was down before and after the gap: the
+  split rule trades a higher fault count for down time that stays a lower bound.
 - The trust store is the one compiled into the binary.
 - Notification channels are Telegram, a webhook, and a log file; no mail, MQTT, Slack-specific
   payload or command hook. A log file channel rotates by size (`max_bytes`/`max_files`), with no

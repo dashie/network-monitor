@@ -38,6 +38,10 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "DAYS")]
     pub retention_days: Option<u64>,
 
+    /// Minimum monitor downtime recorded as unknown; 0 disables
+    #[arg(long, global = true, value_name = "MILLISECONDS")]
+    pub gap_after_ms: Option<u64>,
+
     /// Target as [method:]address[,key=value]… — `1.1.1.1`, `tcp:1.1.1.1:443`,
     /// `dns:example.com@9.9.9.9`, `http:https://example.com/`; repeatable, replaces the
     /// file list
@@ -289,6 +293,7 @@ impl Cli {
             || self.timeout_ms.is_some()
             || self.database.is_some()
             || self.retention_days.is_some()
+            || self.gap_after_ms.is_some()
             || !self.targets.is_empty()
     }
 
@@ -316,6 +321,7 @@ impl Cli {
                 _ => None,
             },
             retention_days: self.retention_days,
+            gap_after_ms: self.gap_after_ms,
             targets,
         })
     }
@@ -431,6 +437,7 @@ mod tests {
             vec!["--timeout-ms", "1", "manual"],
             vec!["--database", "x.db", "manual"],
             vec!["--retention-days", "1", "manual"],
+            vec!["--gap-after-ms", "60000", "manual"],
             vec!["--target", "1.1.1.1", "manual"],
         ] {
             assert!(parse(&args).uses_configuration(), "args: {args:?}");
@@ -469,6 +476,8 @@ mod tests {
             "/tmp/x.db",
             "--retention-days",
             "7",
+            "--gap-after-ms",
+            "90000",
             "--target",
             "1.1.1.1,interface=eth1",
         ]);
@@ -477,6 +486,7 @@ mod tests {
         assert_eq!(overrides.timeout_ms, Some(500));
         assert_eq!(overrides.database, Some(PathBuf::from("/tmp/x.db")));
         assert_eq!(overrides.retention_days, Some(7));
+        assert_eq!(overrides.gap_after_ms, Some(90_000));
         let targets = overrides.targets.unwrap();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].interface.as_deref(), Some("eth1"));

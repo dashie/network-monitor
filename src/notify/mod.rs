@@ -33,7 +33,7 @@ use queue::Queue;
 
 pub use channel::{Payload, SendError};
 pub use message::Message;
-pub use message::{Cause, Event, Kind, TargetRef};
+pub use message::{Cause, Event, GapSummary, Kind, TargetRef};
 
 /// How often the delivery thread wakes to close a stabilisation window.
 const IDLE_POLL: Duration = Duration::from_secs(1);

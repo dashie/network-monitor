@@ -7,13 +7,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
 use crate::config::{Config, Overrides, Target};
 use crate::logging;
-use crate::notify::{self, Cause, Message, Notifier, TargetRef};
+use crate::notify::{self, Cause, GapSummary, Message, Notifier, TargetRef};
 use crate::probe::{Probe, ProbeError, Verdict};
 use crate::promote::Candidate;
 use crate::reload::{self, Change, Watcher};
@@ -127,6 +127,7 @@ struct Supervisor {
     retention_days: Arc<AtomicU64>,
     first_round: Arc<FirstRound>,
     workers: Vec<Worker>,
+    last_heartbeat: Instant,
 }
 
 impl Supervisor {
@@ -205,6 +206,26 @@ impl Supervisor {
         failure
     }
 
+    /// Refresh the liveness row when the heartbeat period has elapsed.
+    fn heartbeat(&mut self) {
+        let Some(period) = heartbeat_period(self.config.gap_after) else {
+            return;
+        };
+        if self.last_heartbeat.elapsed() < period {
+            return;
+        }
+        self.last_heartbeat = Instant::now();
+        let gap_after_ms = self.config.gap_after.as_millis() as u64;
+        let result = self
+            .store
+            .lock()
+            .map_err(|_| ())
+            .and_then(|store| store.heartbeat(now_ms(), gap_after_ms).map_err(|_| ()));
+        if result.is_err() {
+            logging::warn(None, "cannot refresh the monitor liveness record; retrying");
+        }
+    }
+
     /// Adopt `next`: stop the workers, keep the new configuration, start them again.
     fn swap(&mut self, next: Config, detail: &str) -> Result<(), RunError> {
         self.stop_workers();
@@ -212,6 +233,12 @@ impl Supervisor {
         self.retention_days
             .store(self.config.retention_days, Ordering::Relaxed);
         self.start_workers()?;
+        let gap_after_ms = self.config.gap_after.as_millis() as u64;
+        self.store
+            .lock()
+            .map_err(|_| RunError::Lock)?
+            .heartbeat(now_ms(), gap_after_ms)?;
+        self.last_heartbeat = Instant::now();
         logging::info(None, detail);
         Ok(())
     }
@@ -359,6 +386,20 @@ impl Supervisor {
     }
 }
 
+/// How often to refresh the liveness row: a quarter of the threshold, bounded between
+/// one and fifteen seconds; `None` when the feature is disabled.
+fn heartbeat_period(gap_after: Duration) -> Option<Duration> {
+    if gap_after.is_zero() {
+        None
+    } else {
+        Some(
+            (gap_after / 4)
+                .max(Duration::from_secs(1))
+                .min(Duration::from_secs(15)),
+        )
+    }
+}
+
 /// The message every chosen channel receives once the monitor is ready, so a start is
 /// visible where the incidents are: the configuration it read, the targets it started,
 /// and the address of the page when it serves one.
@@ -410,6 +451,21 @@ pub fn run_with_notifier(
     } = start;
     config.require_targets().map_err(|_| RunError::NoTargets)?;
 
+    let keys: Vec<String> = config.targets.iter().map(Target::key).collect();
+    let gap = {
+        let mut store = store.lock().map_err(|_| RunError::Lock)?;
+        store.begin_run(now_ms(), config.gap_after.as_millis() as u64, &keys)?
+    };
+    if let Some(gap) = &gap {
+        logging::warn(
+            None,
+            &format!(
+                "monitor was absent from {} to {}; {} target(s) marked unknown",
+                gap.from_ms, gap.to_ms, gap.targets
+            ),
+        );
+    }
+
     logging::info(
         None,
         &format!(
@@ -443,10 +499,16 @@ pub fn run_with_notifier(
         retention_days,
         first_round: Arc::clone(&first_round),
         workers: Vec::new(),
+        last_heartbeat: Instant::now(),
     };
     supervisor.start_workers()?;
 
     if let Some(startup) = startup {
+        let startup = startup.with_gap(gap.as_ref().map(|gap| GapSummary {
+            from_ms: gap.from_ms,
+            to_ms: gap.to_ms,
+            targets: gap.targets,
+        }));
         channel.send(startup);
     }
 
@@ -463,6 +525,7 @@ pub fn run_with_notifier(
             failure = Some(error);
             break;
         }
+        supervisor.heartbeat();
         if let (Some(watcher), Some(path)) = (watcher.as_mut(), watched_path.as_ref()) {
             if let Some(change) = watcher.poll() {
                 if let Err(error) = supervisor.apply(change, path) {
@@ -515,6 +578,20 @@ pub fn run_with_notifier(
 
     supervisor.stop_workers();
     let _ = retention.join();
+    match supervisor.store.lock() {
+        Ok(store) => {
+            if let Err(error) = store.end_run(now_ms()) {
+                logging::warn(
+                    None,
+                    &format!("cannot record the clean stop in the liveness record: {error}"),
+                );
+            }
+        }
+        Err(_) => logging::warn(
+            None,
+            "cannot record the clean stop: the event store is unavailable",
+        ),
+    }
     logging::info(None, "monitor stopped");
 
     match failure {

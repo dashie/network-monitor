@@ -20,7 +20,8 @@ fn show_config_prints_the_effective_configuration_without_a_file() {
         .stdout(predicate::str::contains("interval_ms = 5000"))
         .stdout(predicate::str::contains("timeout_ms = 2000"))
         .stdout(predicate::str::contains("database = \"uptime-monitor.db\""))
-        .stdout(predicate::str::contains("retention_days = 0"));
+        .stdout(predicate::str::contains("retention_days = 0"))
+        .stdout(predicate::str::contains("gap_after_ms = 60000"));
 }
 
 #[test]
@@ -349,6 +350,33 @@ fn show_config_renders_one_shape_per_method() {
         .stdout(predicate::str::contains("expect_status"))
         .stdout(predicate::str::contains("method = \"icmp\""))
         .stdout(predicate::str::contains("ip = \"1.1.1.1\""));
+}
+
+#[test]
+fn the_gap_threshold_flag_is_printed_and_validated() {
+    let directory = tempfile::tempdir().unwrap();
+
+    monitor(directory.path())
+        .args(["--show-config", "--gap-after-ms", "120000"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("gap_after_ms = 120000"));
+
+    monitor(directory.path())
+        .args(["--show-config", "--gap-after-ms", "1000"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("gap_after_ms"));
+}
+
+#[test]
+fn init_and_manual_reject_the_gap_flag() {
+    let directory = tempfile::tempdir().unwrap();
+
+    monitor(directory.path())
+        .args(["init", "--gap-after-ms", "60000"])
+        .assert()
+        .failure();
 }
 
 #[test]

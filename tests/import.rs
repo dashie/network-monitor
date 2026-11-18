@@ -186,6 +186,48 @@ fn the_cause_of_a_fault_survives_the_round_trip() {
 }
 
 #[test]
+fn an_unknown_row_is_a_gap_marker_and_round_trips() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let restored = directory.path().join("restored.db");
+    let file = directory.path().join("history.csv");
+    std::fs::write(
+        &file,
+        "target,label,interface,state,occurred_at,rtt_us\n\
+         icmp://1.1.1.1,probe,eth0,down,2026-11-14T08:00:00.000Z,\n\
+         icmp://1.1.1.1,probe,eth0,unknown,2026-11-14T08:30:00.000Z,\n\
+         icmp://1.1.1.1,probe,eth0,down,2026-11-14T09:00:00.000Z,\n\
+         icmp://1.1.1.1,probe,eth0,up,2026-11-14T09:30:00.000Z,12000\n",
+    )
+    .expect("the archive is written");
+
+    let report = import::run(
+        &restored,
+        file.to_str().unwrap(),
+        import::Options::default(),
+    )
+    .expect("the import succeeds");
+
+    assert_eq!(report.events, 4);
+    assert_eq!(
+        report.skipped, 0,
+        "an unknown row is a gap marker, not a broken row"
+    );
+    let chain: Vec<String> = chain_of(&restored)
+        .into_iter()
+        .map(|(_, previous, state)| format!("{previous} -> {state}"))
+        .collect();
+    assert_eq!(
+        chain,
+        vec![
+            "unknown -> down",
+            "down -> unknown",
+            "unknown -> down",
+            "down -> up",
+        ]
+    );
+}
+
+#[test]
 fn an_archive_written_before_causes_still_imports() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let restored = directory.path().join("restored.db");

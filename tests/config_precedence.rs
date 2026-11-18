@@ -106,6 +106,51 @@ fn a_partial_file_keeps_the_defaults_for_the_missing_keys() {
 }
 
 #[test]
+fn the_gap_threshold_comes_from_the_file_and_the_flag_wins() {
+    let file = || FileConfig {
+        gap_after_ms: Some(30_000),
+        targets: Some(vec![FileTarget {
+            ip: Some("1.1.1.1".to_string()),
+            ..FileTarget::default()
+        }]),
+        ..FileConfig::default()
+    };
+
+    let config = Config::resolve(Some(file()), parse(&[]).overrides().unwrap()).unwrap();
+    assert_eq!(config.gap_after.as_millis(), 30_000);
+
+    let config = Config::resolve(
+        Some(file()),
+        parse(&["--gap-after-ms", "120000"]).overrides().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(config.gap_after.as_millis(), 120_000);
+
+    let config = Config::resolve(
+        Some(file()),
+        parse(&["--gap-after-ms", "0"]).overrides().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(config.gap_after.as_millis(), 0);
+}
+
+#[test]
+fn a_gap_threshold_below_the_minimum_is_refused_unless_zero() {
+    let config = Config::resolve(
+        None,
+        parse(&["--gap-after-ms", "4999"]).overrides().unwrap(),
+    );
+    let error = config.unwrap_err().to_string();
+    assert!(error.contains("gap_after_ms"), "error: {error}");
+}
+
+#[test]
+fn the_default_gap_threshold_is_one_minute() {
+    let config = Config::resolve(None, parse(&[]).overrides().unwrap()).unwrap();
+    assert_eq!(config.gap_after.as_millis(), 60_000);
+}
+
+#[test]
 fn the_merge_is_the_same_without_a_file() {
     let cli = parse(&["--interval-ms", "1234"]);
     let config = Config::resolve(None, cli.overrides().unwrap()).unwrap();

@@ -1,7 +1,7 @@
 ---
 title: Record monitor downtime as unknown and show the indeterminate period
 date: 2026-11-17
-status: draft
+status: done
 type: feature
 impact: high
 area: store, monitor, web, query, import, notify
@@ -611,24 +611,99 @@ class of information as the event history the tool already stores.
 
 ## Implementation checklist
 
-- [ ] Step 1 — `gap_after_ms` key, flag, defaults, validation, sample config
-- [ ] Step 2 — schema v4 `monitor_liveness`, `begin_run`/`heartbeat`/`end_run`
-- [ ] Step 3 — monitor begin, heartbeat, reload, clean stop
-- [ ] Step 4 — startup notification gap summary
-- [ ] Step 5 — live `unknown` in states, find_target and timeline
-- [ ] Step 6 — verify and test split faults at the gap
-- [ ] Step 7 — import accepts `unknown`
-- [ ] Step 8 — documentation, ADR, runbook, sample and landing page
-- [ ] Step 9 — quality gate and manual TCP acceptance
+- [x] Step 1 — `gap_after_ms` key, flag, defaults, validation, sample config
+- [x] Step 2 — schema v4 `monitor_liveness`, `begin_run`/`heartbeat`/`end_run`
+- [x] Step 3 — monitor begin, heartbeat, reload, clean stop
+- [x] Step 4 — startup notification gap summary
+- [x] Step 5 — live `unknown` in states, find_target and timeline
+- [x] Step 6 — verify and test split faults at the gap
+- [x] Step 7 — import accepts `unknown`
+- [x] Step 8 — documentation, ADR, runbook, sample and landing page
+- [x] Step 9 — quality gate and manual TCP acceptance
 - [x] All open questions resolved
-- [ ] Quality suite passes (`cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`)
-- [ ] Documentation listed under Affected modules is updated
-- [ ] User guide (`docs/USER-GUIDE.md`) reflects user-visible behaviour and every configuration option, or the plan records why it needs no change
-- [ ] `## Implementation Notes` added or updated in this plan
+- [x] Quality suite passes (`cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`)
+- [x] Documentation listed under Affected modules is updated
+- [x] User guide (`docs/USER-GUIDE.md`) reflects user-visible behaviour and every configuration option, or the plan records why it needs no change
+- [x] `## Implementation Notes` added or updated in this plan
 
 ## Implementation Notes
 
-<!-- The implementer records progress, decisions taken during implementation, and any
-     deviation from the plan here. Keep this section current so a later session can
-     resume. -->
+- No `🔶 CHECKPOINT` blocks were present; the run never stopped for confirmation.
+- Step 1: `gap_after_ms` added to `FileConfig`, `Overrides` and `Config` (`gap_after:
+  Duration`), with `DEFAULT_GAP_AFTER_MS = 60_000`, `MIN_GAP_AFTER_MS = 5_000`, the
+  minimum and `i64::MAX` checks, the `--gap-after-ms` flag, the sample key, and the
+  precedence/default/refusal tests.
+- Step 2: schema version 4 adds `monitor_liveness` through the existing `TABLES` batch;
+  `Store` gained `has_liveness`, the `Liveness`/`MonitorGap` types, and
+  `begin_run`/`heartbeat`/`end_run`/`liveness`. The gap marker is placed at
+  `max(alive_until, newest_event + 1)` so it closes an open fault. Tests cover a first
+  run, a long gap, a short gap, `0`, a crash, a clean stop, the strict ordering, filtering
+  to configured targets, and a version-3 read-only file.
+- Step 3: the monitor calls `begin_run` before `Supervisor::start_workers`, refreshes on a
+  bounded heartbeat (quarter of the threshold, 1–15 s), refreshes again on reload without
+  recording a gap, and calls `end_run` after the workers and retention finish. A heartbeat
+  failure is one `WARN`. `tests/monitor_e2e.rs` gained the long-restart, clean-stop and
+  event-chain cases; `tests/reload.rs` proves a reloaded threshold is visible and records
+  no gap.
+- Step 4: `GapSummary` and `Event::Startup.gap`, `Message::with_gap`, the `Gap:` text line,
+  the `gap=` summary suffix and the `gap` JSON member. The no-gap document is unchanged
+  (asserted byte for byte).
+- Step 5: `states_at`, `find_target_at`, `stale_from` and the `stale_tail` helper applied
+  to both timeline readers. The detail page and the list page share the overlay; a
+  version-3 file has none.
+- Step 6: split-fault regression tests for the five required chains plus a pure/SQL drift
+  guard over the same chains, and a daily-down-time assertion that the gap is excluded.
+- Step 7: `Row::parse` accepts `unknown`; its row is a real marker. An import with
+  `down, unknown, down, up` produces the expected chain and `skipped == 0`.
+- Step 8: user guide, product, architecture, ADR-0041 (with the index row and an extension
+  note on ADR-0004), glossary, history-import runbook, notifications runbook, sample
+  configuration and landing page updated. The old manual SQL repair is kept as a
+  superseded historical note.
+- Step 9: the quality gate passed. The manual TCP acceptance check was run with a local
+  listener: the page and `query state` reported `unknown` while the liveness row was aged,
+  `query events` showed `up -> unknown` and then `unknown -> down/up`, and a clean stop
+  left `stopped_at_ms` equal to `last_seen_ms`.
+- Deviation: `timeline_of` applies the stale tail as well as `timeline`, because the
+  detail chart reads through it; the plan named only `timeline` but required the detail
+  page to show the same tail.
 
+
+## Review Notes
+
+- **Round**: 1
+- **Review date**: 2026-11-18
+- **Verdict**: PASS
+- **Self-review disclosure**: this round was performed in the same invocation as the
+  implementation (`spec-auto`), so it is not an independent review.
+- **Suggested commit**: `feat(store): record monitor downtime as unknown`
+- **Quality gate**: tests ✓ (509 lib + 217 integration, 0 failed) | lint ✓ (`cargo clippy --all-targets -- -D warnings`) | format ✓ (`cargo fmt --check`)
+- **Reviewed state**: `afd5c7211b8874e257e4c31bf6d44f23e5aa73ddb4b726eaee311b509d32b972`
+
+### Findings
+| # | Severity | Area | Finding | Status |
+|---|---|---|---|---|
+| 1 | minor | `src/notify/mod.rs` | `GapSummary` is re-exported by the module index, a file the plan's *Affected modules* does not name; the one-line change is required so `monitor` can map `MonitorGap` to it and stays inside the `notify` module boundary. | open |
+| 2 | nit | `docs/USER-GUIDE.md` | The gap note was split into a second paragraph so the opening description stays three lines. | fixed in review |
+
+### Gap analysis
+- Goals: 9/9 achieved — gap insertion, `gap_after_ms` key/flag/default/minimum, `--show-config`, stale live `unknown` (state, timeline tail, statistics boundary, detail page), split faults, `unknown` import, startup gap notification, preserved short-restart/reload/local-failure behaviour.
+- Scope: in scope. The diff matches *Affected modules*; `src/notify/mod.rs` is the one unlisted module index (finding 1). No unapproved file and no generated artefact remained.
+- Deviations: `timeline_of` also applies the stale tail, beyond the plan's explicit `timeline`, because the detail chart reads through it; recorded in Implementation Notes.
+- Additions: none.
+- Deferred: none. The `(maybe)` documentation items were all updated; `src/history.rs`, `src/query/mod.rs`, `src/web/*` needed no code change, as the plan predicted.
+
+### Known limitations
+- One monitor process per database, as before; the liveness row is single-writer.
+- A clock that moves backwards or far ahead can place the gap marker differently; the guard keeps it before `now` and strictly after the newest event.
+- A database upgraded from version 3 claims no gap on its first run, by design.
+
+### Recommendations for future work
+- Consider a `query liveness` command if operators need to inspect the record directly.
+
+## Closure
+
+- **Closed**: 2026-11-18
+- **Version**: 0.15.0 → 0.16.0
+- **Executed by**: opencode (`deepseek/deepseek-flash`)
+- **Tokens**: unknown
+- **Cost**: unknown

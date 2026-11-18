@@ -76,6 +76,14 @@ impl TargetRef {
     }
 }
 
+/// A monitor absence reported by the startup message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GapSummary {
+    pub from_ms: i64,
+    pub to_ms: i64,
+    pub targets: usize,
+}
+
 /// What a message reports: a target changing state, or the process itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
@@ -83,6 +91,7 @@ pub enum Event {
         config: Option<String>,
         targets: Vec<String>,
         web: Option<String>,
+        gap: Option<GapSummary>,
     },
     Shutdown,
     ConfigReload {
@@ -132,9 +141,18 @@ impl Message {
                 config,
                 targets,
                 web,
+                gap: None,
             },
             occurred_at_ms,
         )
+    }
+
+    /// Attach the monitor gap to a startup message; a non-startup message is unchanged.
+    pub fn with_gap(mut self, gap: Option<GapSummary>) -> Self {
+        if let Event::Startup { gap: slot, .. } = &mut self.event {
+            *slot = gap;
+        }
+        self
     }
 
     pub fn shutdown(occurred_at_ms: i64) -> Self {
@@ -215,6 +233,7 @@ impl Message {
                 config,
                 targets,
                 web,
+                gap,
             } => {
                 let mut text = String::from("READY uptime-monitor\n");
                 text.push_str(&format!(
@@ -226,6 +245,14 @@ impl Message {
                     text.push_str(&format!("- {target}\n"));
                 }
                 text.push_str(&format!("Web: {}\n", web.as_deref().unwrap_or("none")));
+                if let Some(gap) = gap {
+                    text.push_str(&format!(
+                        "Gap: {} to {} ({} target(s) marked unknown)\n",
+                        format_rfc3339(gap.from_ms),
+                        format_rfc3339(gap.to_ms),
+                        gap.targets
+                    ));
+                }
                 text.push_str(&instant);
                 text
             }
@@ -261,12 +288,22 @@ impl Message {
                 config,
                 targets,
                 web,
-            } => format!(
-                "READY uptime-monitor config={} targets={} web={}",
-                config.as_deref().unwrap_or("none"),
-                targets.len(),
-                web.as_deref().unwrap_or("none")
-            ),
+                gap,
+            } => {
+                let mut text = format!(
+                    "READY uptime-monitor config={} targets={} web={}",
+                    config.as_deref().unwrap_or("none"),
+                    targets.len(),
+                    web.as_deref().unwrap_or("none")
+                );
+                if let Some(gap) = gap {
+                    text.push_str(&format!(
+                        " gap={}..{} targets={}",
+                        gap.from_ms, gap.to_ms, gap.targets
+                    ));
+                }
+                text
+            }
             Event::Shutdown => "STOPPED uptime-monitor".to_string(),
             Event::ConfigReload { applied, detail } => {
                 if *applied {
@@ -317,6 +354,7 @@ impl Message {
                 config,
                 targets,
                 web,
+                gap,
             } => {
                 out.push_str(",\"startup\":{\"config\":");
                 out.push_str(&json::option_string(config));
@@ -330,6 +368,15 @@ impl Message {
                 );
                 out.push_str("],\"web\":");
                 out.push_str(&json::option_string(web));
+                if let Some(gap) = gap {
+                    out.push_str(",\"gap\":{\"from\":");
+                    out.push_str(&json::string(&format_rfc3339(gap.from_ms)));
+                    out.push_str(",\"to\":");
+                    out.push_str(&json::string(&format_rfc3339(gap.to_ms)));
+                    out.push_str(",\"targets\":");
+                    out.push_str(&gap.targets.to_string());
+                    out.push('}');
+                }
                 out.push('}');
             }
             Event::ConfigReload { applied, detail } => {
@@ -433,6 +480,45 @@ mod tests {
              Web: http://0.0.0.0:8642/\n\
              2025-11-24T16:00:00.000Z"
         );
+    }
+
+    #[test]
+    fn a_startup_gap_reaches_the_text_the_summary_and_the_json() {
+        let gap = GapSummary {
+            from_ms: AT_MS - 60_000,
+            to_ms: AT_MS,
+            targets: 2,
+        };
+        let message = startup().with_gap(Some(gap));
+
+        assert!(message
+            .text()
+            .contains("Gap: 2025-11-24T15:59:00.000Z to 2025-11-24T16:00:00.000Z (2 target(s) marked unknown)\n"));
+        assert!(message
+            .summary()
+            .ends_with(" gap=1763999940000..1764000000000 targets=2"));
+        assert!(message.json(None).contains(
+            "\"gap\":{\"from\":\"2025-11-24T15:59:00.000Z\",\
+                      \"to\":\"2025-11-24T16:00:00.000Z\",\"targets\":2}"
+        ));
+    }
+
+    #[test]
+    fn a_startup_without_a_gap_is_unchanged() {
+        let without = startup().with_gap(None);
+        assert_eq!(without.text(), startup().text());
+        assert_eq!(without.summary(), startup().summary());
+        assert_eq!(without.json(None), startup().json(None));
+    }
+
+    #[test]
+    fn a_gap_does_not_touch_a_non_startup_message() {
+        let message = down().with_gap(Some(GapSummary {
+            from_ms: 0,
+            to_ms: 1,
+            targets: 1,
+        }));
+        assert_eq!(message.event, down().event);
     }
 
     #[test]

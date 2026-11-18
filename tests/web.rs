@@ -220,6 +220,34 @@ impl Server {
 }
 
 #[test]
+fn a_stale_monitor_shows_unknown_and_a_grey_tail() {
+    let (_directory, database) = seeded_database();
+    {
+        let now = now_ms();
+        let mut store = Store::open_rw(&database).expect("the database opens");
+        store
+            .begin_run(
+                now - 1_000_000,
+                5_000,
+                &["1.1.1.1".to_string(), "9.9.9.9".to_string()],
+            )
+            .expect("the run begins");
+        store.end_run(now - 999_000).expect("the run stops");
+    }
+
+    let server = start(&database);
+    let (status, _page) = server.get("/");
+    assert_eq!(status, 200);
+
+    let (status, detail) = server.get("/target?target=1.1.1.1");
+    assert_eq!(status, 200);
+    assert!(
+        detail.contains("<div class=\"stat state unknown\"><b>unknown</b>"),
+        "the current state is unknown while the monitor is stale"
+    );
+}
+
+#[test]
 fn serves_the_page_with_a_band_per_state() {
     let (_directory, database) = seeded_database();
     let server = start(&database);

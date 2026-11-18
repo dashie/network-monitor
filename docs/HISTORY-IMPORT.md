@@ -256,15 +256,30 @@ docker -c qubo cp backups/events-<stamp>.db uptime-monitor:/var/lib/uptime-monit
 docker -c qubo start uptime-monitor
 ```
 
-## Reference: closing a measurement gap with an `unknown` row
+## Measurement gaps are recorded by the binary
 
 An imported chain carries its last state forward. When the source monitor stopped hours
 or days before the live monitor started, that carried state describes a stretch nobody
 measured: in this installation a stale `down` turned the 35 hours between the two chains
 into a day of down time that never happened.
 
-The import format has no `unknown`, so the marker is a row written once, with the
-monitor stopped:
+The binary now records that interval itself. A monitor that was absent longer than
+`gap_after_ms` (60 seconds by default) closes the last known state of every configured
+target as `unknown` at the last instant it was alive, and the first probe after the restart
+records the observed state. The stored marker is the same `down -> unknown` row the old
+manual procedure inserted, so the fault that was open ends at the gap start and the
+unobserved hours are not down time. In this installation it moved the 30-day down time of
+the target from `4d01h` to `2d14h`, all of it difference in unmeasured hours.
+
+`import` now accepts an `unknown` row, so an archive exported after a gap round-trips the
+marker. The export already writes every event, `unknown` included.
+
+The manual procedure below is kept only as a historical note, marked superseded: use it
+only for a database written by a binary older than the one that records gaps, and stop
+before the next live start, which would otherwise add its own marker.
+
+<details>
+<summary>Superseded: closing a measurement gap with a manual `unknown` row</summary>
 
 ```bash
 # stop, then edit the file in place
@@ -284,13 +299,7 @@ cat normalize.csv | docker -c qubo run --rm -i \
 docker -c qubo start uptime-monitor
 ```
 
-The marker is drawn grey like any `unknown` band, so the unmeasured hours stop counting
-as down instead of being carried forward. In this installation it moved the 30-day down
-time of the target from `4d01h` to `2d14h`, all of it difference in unmeasured hours.
-
-This is a repair, not a documented feature: nothing in the binary writes an `unknown`
-event. If it becomes routine, the honest fix is to let `import` accept an `unknown` state
-and let the export converter emit the marker.
+</details>
 
 ## Labels belong to the live configuration
 
@@ -304,9 +313,9 @@ for the period before the monitor started.
 
 - **Labels already set win.** The store fills a target's label only when it is empty, so
   `--label` names new targets and leaves existing ones alone.
-- **A measurement gap is not a state.** Where the export has no heartbeat the chain
-  continues with the last state it knows. If the first live event of a target repeats
-  the imported state, the importer folds it away and the page reports the state from the
-  last imported change instead of from the first live probe.
+- **A measurement gap is not a state.** The binary records its own absence as an `unknown`
+  event (see above); the import does not infer one from a source that wrote no marker. If the
+  first live event of a target repeats the imported state, the importer folds it away and the
+  page reports the state from the last imported change instead of from the first live probe.
 - **Retention still applies.** Import a history you want to keep with `retention_days`
   disabled, or accept that the next retention pass trims it.

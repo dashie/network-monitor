@@ -74,7 +74,7 @@ Trust boundaries: the database file is written only by the `monitor` process and
 ## 4. Solution strategy
 
 - **One binary, two verbs.** `monitor` and `query` share the configuration, the schema, and the process image. Deployment is one artifact; the query path opens the database read-only and cannot repair or migrate it.
-- **Event-only persistence with a current-state projection.** An append-only `events` table holds transitions; a `targets` table holds the current state and the last probe outcome. The writer updates both in one transaction, so a reader never sees a state that contradicts the latest event.
+- **Event-only persistence with a current-state projection.** An append-only `events` table holds transitions; a `targets` table holds the current state and the last probe outcome; a single-row `monitor_liveness` table states when the process was last alive, so a monitor gap and a stale reader are derived from the database. The writer updates the event and the projection in one transaction, so a reader never sees a state that contradicts the latest event.
 - **Layered configuration as data.** Defaults, file, and command line are merged into one immutable effective configuration before anything else runs; each layer is a pure function with a test. A relative path in the file is resolved against the file's directory, a relative flag path against the working directory (BR-11), and the rebasing happens once in `config::parse_at`.
 - **Probe behind a contract.** `Probe::probe(target, interface) -> Result<Verdict, ProbeError>` separates the transport from the decision. `Verdict::{Up, Down}` answers "the peer is silent"; `ProbeError::Local` answers "the host cannot probe". The type system keeps the two apart.
 - **Platform code isolated in one module.** Only `probe/interface` knows about `SO_BINDTODEVICE`, `IP_BOUND_IF`, and `IP_UNICAST_IF`; the rest of the code is platform-independent.
@@ -171,7 +171,7 @@ Rel(cli, hosts, "Sends echo requests", "ICMP")
 
 - **Input:** transitions from the monitor, retention commands, read queries.
 - **Output:** persisted rows, or `StoreError`.
-- **Guarantees:** a transition writes the event and the current state in one transaction; the schema is created and migrated by a writable open — version 2 adds `events.cause` and `events.cause_message` to a version 1 database, version 3 adds `targets.priority`, both keeping every row —, a read-only open reading an older database as it is; a database from a newer schema version is refused; the writer connection is the only writer in the process. A fault is read back as `Fault`: the code and the message of its cause are stored with the event as they were rendered, so history states what the probe reported at that moment.
+- **Guarantees:** a transition writes the event and the current state in one transaction; the schema is created and migrated by a writable open — version 2 adds `events.cause` and `events.cause_message` to a version 1 database, version 3 adds `targets.priority`, version 4 adds `monitor_liveness`, all keeping every row —, a read-only open reading an older database as it is; a database from a newer schema version is refused; the writer connection is the only writer in the process. `begin_run`, `heartbeat` and `end_run` own the single liveness row: the first records the gap of a start, the second refreshes it, the third closes it at a clean stop. A stale reader derives the `unknown` overlay from that row in `states_at`, `find_target_at` and both timeline readers; a file without the table has no overlay. A fault is read back as `Fault`: the code and the message of its cause are stored with the event as they were rendered, so history states what the probe reported at that moment.
 
 ### `query`
 
@@ -183,7 +183,7 @@ Rel(cli, hosts, "Sends echo requests", "ICMP")
 
 - **Input:** the effective configuration, a `Probe` implementation, a `Store`, a `Shutdown` handle, optionally the path to re-read, and a `Start` holding the startup `Message`, the optional candidate to promote, the main configuration to swap back to, and the active snapshot to publish.
 - **Output:** database writes, log lines, the startup `Message` handed to the notifier once every worker runs, the promotion or rejection notification, and a process exit status.
-- **Guarantees:** at most one in-flight probe per target; a transition is written at most once per cycle; shutdown on `SIGINT` or `SIGTERM` happens between two cycles, never inside a transaction; a reload is applied only when the new file parses and resolves to at least one target, and the database path in use never changes at runtime. The first outcome of every target of a start is reported once; the active snapshot is written once when no first probe was a local failure, a candidate is promoted once under the same condition with a rebased watcher, and a candidate whose first round holds a local failure is swapped back in place with no file touched (`INV-15`).
+- **Guarantees:** at most one in-flight probe per target; a transition is written at most once per cycle; the liveness row is written by `begin_run` before the first probe, refreshed on a bounded heartbeat, and closed by `end_run` after the workers stop; shutdown on `SIGINT` or `SIGTERM` happens between two cycles, never inside a transaction; a reload refreshes the liveness row but never calls `begin_run`, so it records no gap; a reload is applied only when the new file parses and resolves to at least one target, and the database path in use never changes at runtime. The first outcome of every target of a start is reported once; the active snapshot is written once when no first probe was a local failure, a candidate is promoted once under the same condition with a rebased watcher, and a candidate whose first round holds a local failure is swapped back in place with no file touched (`INV-15`).
 
 ### `check`
 
@@ -218,8 +218,9 @@ Rel(cli, hosts, "Sends echo requests", "ICMP")
 ### `notify`
 
 - **Input:** one `Message` for every recorded transition and every global event (start, stop,
-  reload, channel start), and the resolved `NotificationConfig`: the declared channels and the
-  routing lists.
+  reload, channel start) — a start `Message` may carry a `GapSummary`, rendered as a `Gap:`
+  text line, a `gap=` summary suffix and a `gap` member of the webhook JSON —, and the resolved
+  `NotificationConfig`: the declared channels and the routing lists.
 - **Output:** one rendering per channel a message routes to, or a `WARN` line when a delivery
   is lost; a channel that cannot open stops the start.
 - **Guarantees:** a channel is declared once and enabled by name, and two channels may not
@@ -321,7 +322,7 @@ Rel(cli, hosts, "Sends echo requests", "ICMP")
 
 ### Data model
 
-Two tables, owned exclusively by the `store` component. Timestamps are UTC epoch milliseconds.
+Three tables, owned exclusively by the `store` component. Timestamps are UTC epoch milliseconds.
 The key of a target is its canonical string — `icmp://1.1.1.1`, `tcp://1.1.1.1:443`,
 `dns://example.com@9.9.9.9`, `https://example.com/health` — so a method change or another
 port is another target. A writable open rewrites the bare addresses a previous version wrote
@@ -343,7 +344,7 @@ CREATE TABLE IF NOT EXISTS events (
     target         TEXT    NOT NULL,   -- canonical key: method scheme + endpoint
     interface      TEXT,               -- null when the default route was used
     previous_state TEXT    NOT NULL,   -- 'unknown' | 'up' | 'down'
-    state          TEXT    NOT NULL,   -- 'up' | 'down'
+    state          TEXT    NOT NULL,   -- 'unknown' | 'up' | 'down'
     occurred_at_ms INTEGER NOT NULL,   -- UTC epoch milliseconds
     rtt_us         INTEGER             -- null when state is 'down'
 );
@@ -361,12 +362,21 @@ CREATE TABLE IF NOT EXISTS targets (
     last_change_at_ms INTEGER NOT NULL,
     last_rtt_us       INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS monitor_liveness (
+    id            INTEGER PRIMARY KEY CHECK (id = 1),  -- exactly one row
+    started_at_ms INTEGER NOT NULL,   -- when the current run began
+    last_seen_ms  INTEGER NOT NULL,   -- refreshed by the heartbeat
+    gap_after_ms  INTEGER NOT NULL,   -- 0 disables the feature
+    stopped_at_ms INTEGER             -- set by a clean stop; null while running
+);
 ```
 
 - **Ownership:** only the `store` component reads or writes these tables. The `query` component goes through the same module, with a read-only connection.
 - **Priority:** the lane order of the page is configuration, and `serve` has no configuration: the monitor writes each target's `priority` into its `targets` row — on the event that creates the row, and again for every target it already knows when it starts or reloads —, so the page and the API order the lanes from the database alone.
 - **Retention:** the job deletes from `events` only. It never deletes a `targets` row, so a target keeps its current state and its last transition time.
-- **Migrations:** `schema_meta.version` is compared on open. A writable open migrates an older database forward step by step — version 3 adds `targets.priority`, and a file that lacks it is read in the order it always had —; a read-only open reads it as it is; a newer one is refused (BR-9).
+- **Liveness and gaps:** the single row is written before the first probe and refreshed by the heartbeat. A start whose previous row is older than `gap_after_ms` writes one `up|down -> unknown` event per configured target with a known state, strictly after that target's newest event, so the fault query closes an open fault at the gap start; the first probe then records `unknown -> up|down`. A reader whose argument instant is later than the alive instant by more than the threshold overlays `unknown` on the current state and the timeline tail. `gap_after_ms = 0` writes no gap and no overlay.
+- **Migrations:** `schema_meta.version` is compared on open. A writable open migrates an older database forward step by step — version 3 adds `targets.priority`, and a file that lacks it is read in the order it always had; version 4 adds `monitor_liveness`, and a file that lacks it has no liveness record —; a read-only open reads it as it is; a newer one is refused (BR-9).
 
 ## 6. Runtime view
 
@@ -384,7 +394,8 @@ participant "query" as Q
 
 Op -> Mon : monitor --config uptime-monitor.toml
 Mon -> St : open database, migrate, load current state
-loop every interval_ms, per target
+Mon -> St : begin_run (record a gap, upsert liveness)
+loop every interval_ms, per target, heartbeat when due
     Mon -> Pr : probe(target, interface)
     Pr -> Pr : open raw socket, bind interface, send echo, wait timeout_ms
     Pr --> Mon : Up(rtt) | Down | LocalError
@@ -397,8 +408,7 @@ end
 Q -> St : SELECT events WHERE target = ? (read-only, WAL)
 St --> Q : rows
 Op -> Mon : SIGTERM
-Mon -> St : finish cycle, close connection
-@enduml
+Mon -> St : stop workers, end_run, close connection
 ```
 
 Takeaway: the write path is one transaction per transition, and the read path never waits for the probing loop.
@@ -507,3 +517,4 @@ enforced or verified.
 - `INV-13`: The simulated mode probes nothing, reads and writes no database, and keeps nothing between requests: the same command replays the same history. Enforced by `sim` holding no file handle and no cache and by `probe::simulated_day` never calling the network, verified by `tests/simulate.rs` (a working directory left empty, two processes of the same seed answering the same bytes) and by the `sim` unit tests (a day is reproducible from its tuple and independent of the days before it).
 - `INV-14`: One event reaches a given channel destination at most once. A channel is its output destination — the normalised log filename, the canonical webhook URL, the Telegram `chat_id` — and two channels may not share one; a channel is enabled by name and never declared twice. Enforced by `config::resolve_notifications`, which refuses a duplicate destination, a duplicate name and an unknown name before the first probe, and by `main` reporting an orphan declaration — a channel no list enables — as one `WARN` line, and by one queue per declared channel; verified by the `config` unit tests, by `tests/cli.rs` and by `tests/notify.rs` and `tests/notify_channels.rs`.
 - `INV-15`: Neither the active configuration file nor the active snapshot is replaced or written unless every target of the start has probed once without a local failure, and the snapshot is written once per start — no accepted or rejected reload writes it. Enforced by the `FirstRound` gate the monitor shares with its workers and by `promote::commit` refusing a candidate whose bytes already equal the main file, verified by `tests/snapshot.rs` (a clean first round writes the snapshot, a local failure leaves the previous one alone, a reload changes nothing), by `src/promote.rs` (the backup, the atomic replace and the untouched main on failure) and by `tests/reload.rs` (a promotion is not replayed as a reload).
+- `INV-16`: No target state crosses a monitor gap without an `unknown` transition, and the liveness row is written before the first probe of a start. Enforced by `Store::begin_run`, which runs before `Supervisor::start_workers` and inserts one `unknown` event per configured target with a known state, and by the read overlay that `stale_from` derives; verified by the store `begin_run` tests, the split-fault regression tests, `tests/monitor_e2e.rs` (a long restart writes `up -> unknown -> down`) and `tests/web.rs` (the stale page shows `unknown`).

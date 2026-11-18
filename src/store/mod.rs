@@ -13,7 +13,7 @@ use std::time::Duration;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use thiserror::Error;
 
-use schema::{PRAGMAS, SCHEMA_META, SCHEMA_VERSION, TABLES};
+use schema::{LIVENESS_SCHEMA, PRAGMAS, SCHEMA_META, SCHEMA_VERSION, TABLES};
 
 /// The state of a target. `Unknown` before its first verdict (BR-2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -86,6 +86,23 @@ pub struct TargetStateRow {
     pub first_seen_at_ms: i64,
     pub last_change_at_ms: i64,
     pub last_rtt_us: Option<i64>,
+}
+
+/// The single-row liveness record of the monitor that writes this database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Liveness {
+    pub started_at_ms: i64,
+    pub last_seen_ms: i64,
+    pub gap_after_ms: u64,
+    pub stopped_at_ms: Option<i64>,
+}
+
+/// A monitor absence long enough to be recorded as an `unknown` transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MonitorGap {
+    pub from_ms: i64,
+    pub to_ms: i64,
+    pub targets: usize,
 }
 
 /// Filters for the event history.
@@ -264,6 +281,35 @@ pub fn timeline_segments(
     }
 
     segments
+}
+
+/// Truncate a timeline at the last alive instant and append the unobserved tail as
+/// `unknown`. A no-op when the whole window predates the stale boundary.
+fn stale_tail(
+    segments: Vec<TimelineSegment>,
+    alive_until: i64,
+    from_ms: i64,
+    to_ms: i64,
+) -> Vec<TimelineSegment> {
+    let mut result: Vec<TimelineSegment> = segments
+        .into_iter()
+        .filter(|segment| segment.from_ms < alive_until)
+        .map(|segment| TimelineSegment {
+            to_ms: segment.to_ms.min(alive_until),
+            ..segment
+        })
+        .filter(|segment| segment.to_ms > segment.from_ms)
+        .collect();
+
+    let tail_from = alive_until.max(from_ms);
+    if tail_from < to_ms {
+        result.push(TimelineSegment {
+            state: TargetState::Unknown,
+            from_ms: tail_from,
+            to_ms,
+        });
+    }
+    result
 }
 
 /// One disconnection reduced to the instants that describe it.
@@ -585,6 +631,9 @@ pub struct Store {
     /// Whether the file carries `targets.priority`. A read-only open of a database written
     /// before it orders the lanes by key, as it always did, instead of migrating the file.
     has_priority: bool,
+    /// Whether the file carries the `monitor_liveness` table. A read-only open of an older
+    /// database has no liveness record and reads no stale overlay.
+    has_liveness: bool,
 }
 
 /// A connection that cannot write, for every read-only entry point.
@@ -656,6 +705,7 @@ impl Store {
             connection,
             has_cause: true,
             has_priority: true,
+            has_liveness: true,
         };
         store.connection.execute_batch(PRAGMAS)?;
         store.migrate()?;
@@ -680,6 +730,7 @@ impl Store {
             connection,
             has_cause: version >= CAUSE_COLUMNS,
             has_priority: version >= PRIORITY_COLUMN,
+            has_liveness: version >= LIVENESS_SCHEMA,
         })
     }
 
@@ -803,6 +854,158 @@ impl Store {
             states.insert(target, state);
         }
         Ok(states)
+    }
+
+    /// Begin a monitor run: record a gap when the previous run was absent long enough,
+    /// then upsert the single liveness row.
+    ///
+    /// The synthetic `unknown` event is placed at the last instant the previous run was
+    /// alive for, or strictly after the newest event so the fault query closes the old
+    /// fault at it. Only targets whose stored state is already known are marked.
+    pub fn begin_run(
+        &mut self,
+        now_ms: i64,
+        gap_after_ms: u64,
+        targets: &[String],
+    ) -> Result<Option<MonitorGap>, StoreError> {
+        let transaction = self.connection.transaction()?;
+
+        let previous: Option<(i64, i64, Option<i64>)> = transaction
+            .query_row(
+                "SELECT last_seen_ms, gap_after_ms, stopped_at_ms
+                 FROM monitor_liveness WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+
+        let newest_event: Option<i64> =
+            transaction.query_row("SELECT MAX(occurred_at_ms) FROM events", [], |row| {
+                row.get(0)
+            })?;
+
+        let mut recorded = 0usize;
+        let mut gap_start = now_ms;
+        if let Some((last_seen_ms, _, stopped_at_ms)) = previous {
+            let alive_until = stopped_at_ms.unwrap_or(last_seen_ms);
+            gap_start = match newest_event {
+                Some(newest) if newest >= alive_until => alive_until.max(newest.saturating_add(1)),
+                _ => alive_until,
+            };
+            let absent_ms = now_ms.saturating_sub(alive_until);
+            if gap_after_ms > 0 && gap_start < now_ms && absent_ms > gap_after_ms as i64 {
+                let mut select = transaction.prepare(
+                    "SELECT target, interface, current_state FROM targets
+                     WHERE current_state IN ('up', 'down')",
+                )?;
+                let rows = select
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                drop(select);
+
+                for (target, interface, current_state) in rows {
+                    if !targets.iter().any(|key| key == &target) {
+                        continue;
+                    }
+                    transaction.execute(
+                        "INSERT INTO events
+                            (target, interface, previous_state, state, occurred_at_ms,
+                             rtt_us, cause, cause_message)
+                         VALUES (?1, ?2, ?3, 'unknown', ?4, NULL, NULL, NULL)",
+                        params![target, interface, current_state, gap_start],
+                    )?;
+                    transaction.execute(
+                        "UPDATE targets
+                         SET current_state = 'unknown',
+                             last_change_at_ms = ?2,
+                             last_rtt_us = NULL
+                         WHERE target = ?1",
+                        params![target, gap_start],
+                    )?;
+                    recorded += 1;
+                }
+            }
+        }
+
+        transaction.execute(
+            "INSERT INTO monitor_liveness
+                (id, started_at_ms, last_seen_ms, gap_after_ms, stopped_at_ms)
+             VALUES (1, ?1, ?1, ?2, NULL)
+             ON CONFLICT(id) DO UPDATE SET
+                started_at_ms = excluded.started_at_ms,
+                last_seen_ms  = excluded.last_seen_ms,
+                gap_after_ms  = excluded.gap_after_ms,
+                stopped_at_ms = NULL",
+            params![now_ms, gap_after_ms as i64],
+        )?;
+
+        transaction.commit()?;
+
+        if recorded > 0 {
+            Ok(Some(MonitorGap {
+                from_ms: gap_start,
+                to_ms: now_ms,
+                targets: recorded,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Refresh the liveness row while the monitor runs; upserts it when absent.
+    pub fn heartbeat(&self, now_ms: i64, gap_after_ms: u64) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO monitor_liveness
+                (id, started_at_ms, last_seen_ms, gap_after_ms, stopped_at_ms)
+             VALUES (1, ?1, ?1, ?2, NULL)
+             ON CONFLICT(id) DO UPDATE SET
+                last_seen_ms  = excluded.last_seen_ms,
+                gap_after_ms  = excluded.gap_after_ms,
+                stopped_at_ms = NULL",
+            params![now_ms, gap_after_ms as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Close the liveness row at a clean stop.
+    pub fn end_run(&self, now_ms: i64) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE monitor_liveness
+             SET last_seen_ms = ?1, stopped_at_ms = ?1
+             WHERE id = 1",
+            params![now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// The liveness record, or `None` on a file that has no table or no row.
+    pub fn liveness(&self) -> Result<Option<Liveness>, StoreError> {
+        if !self.has_liveness {
+            return Ok(None);
+        }
+        let row = self
+            .connection
+            .query_row(
+                "SELECT started_at_ms, last_seen_ms, gap_after_ms, stopped_at_ms
+                 FROM monitor_liveness WHERE id = 1",
+                [],
+                |row| {
+                    Ok(Liveness {
+                        started_at_ms: row.get(0)?,
+                        last_seen_ms: row.get(1)?,
+                        gap_after_ms: row.get::<_, i64>(2)? as u64,
+                        stopped_at_ms: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
     }
 
     /// Persist one transition and the resulting current state, atomically.
@@ -999,8 +1202,13 @@ impl Store {
         Ok(deleted)
     }
 
-    /// Current state of every target, ordered by address.
+    /// Current state of every target, ordered by address, read as of now.
     pub fn states(&self) -> Result<Vec<TargetStateRow>, StoreError> {
+        self.states_at(crate::time::now_ms())
+    }
+
+    /// Current state of every target as of `now_ms`, with the stale overlay applied.
+    pub fn states_at(&self, now_ms: i64) -> Result<Vec<TargetStateRow>, StoreError> {
         let mut statement = self.connection.prepare(&format!(
             "SELECT target, interface, label, current_state,
                     first_seen_at_ms, last_change_at_ms, last_rtt_us
@@ -1021,8 +1229,39 @@ impl Store {
             })
         })?;
 
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(StoreError::from)
+        let mut rows = rows.collect::<Result<Vec<_>, _>>()?;
+        if let Some(alive_until) = self.stale_from(now_ms)? {
+            for row in &mut rows {
+                if row.state != TargetState::Unknown {
+                    row.state = TargetState::Unknown;
+                    row.last_change_at_ms = alive_until;
+                    row.last_rtt_us = None;
+                }
+            }
+        }
+        Ok(rows)
+    }
+
+    /// The last instant the monitor proved it was alive, when it is now stale.
+    ///
+    /// `None` when the file has no liveness table or row, the feature is disabled, or
+    /// the record is recent enough.
+    fn stale_from(&self, at_ms: i64) -> Result<Option<i64>, StoreError> {
+        if !self.has_liveness {
+            return Ok(None);
+        }
+        let Some(liveness) = self.liveness()? else {
+            return Ok(None);
+        };
+        if liveness.gap_after_ms == 0 {
+            return Ok(None);
+        }
+        let alive_until = liveness.stopped_at_ms.unwrap_or(liveness.last_seen_ms);
+        if at_ms.saturating_sub(alive_until) > liveness.gap_after_ms as i64 {
+            Ok(Some(alive_until))
+        } else {
+            Ok(None)
+        }
     }
 
     /// The order of the lanes: the priority the configuration gave a target, lowest
@@ -1189,8 +1428,17 @@ impl Store {
         Ok(target)
     }
 
-    /// One entry per target, chosen by address or label.
+    /// One entry per target, chosen by address or label, read as of now.
     pub fn find_target(&self, needle: &str) -> Result<Option<TargetStateRow>, StoreError> {
+        self.find_target_at(needle, crate::time::now_ms())
+    }
+
+    /// One entry per target as of `now_ms`, with the stale overlay applied.
+    pub fn find_target_at(
+        &self,
+        needle: &str,
+        now_ms: i64,
+    ) -> Result<Option<TargetStateRow>, StoreError> {
         let row = self
             .connection
             .query_row(
@@ -1214,7 +1462,18 @@ impl Store {
                 },
             )
             .optional()?;
-        Ok(row)
+
+        let Some(mut row) = row else {
+            return Ok(None);
+        };
+        if let Some(alive_until) = self.stale_from(now_ms)? {
+            if row.state != TargetState::Unknown {
+                row.state = TargetState::Unknown;
+                row.last_change_at_ms = alive_until;
+                row.last_rtt_us = None;
+            }
+        }
+        Ok(Some(row))
     }
 
     /// Number of transitions to `down` and time spent down per UTC day, one entry per
@@ -1442,6 +1701,7 @@ impl Store {
                 });
         }
 
+        let alive_until = self.stale_from(to_ms)?;
         Ok(targets
             .into_iter()
             .map(|(target, label)| {
@@ -1450,8 +1710,13 @@ impl Store {
                     .copied()
                     .unwrap_or(TargetState::Unknown);
                 let points = transitions.get(&target).map(Vec::as_slice).unwrap_or(&[]);
+                let segments = timeline_segments(state_before, points, from_ms, to_ms);
+                let segments = match alive_until {
+                    Some(alive_until) => stale_tail(segments, alive_until, from_ms, to_ms),
+                    None => segments,
+                };
                 TargetTimeline {
-                    segments: timeline_segments(state_before, points, from_ms, to_ms),
+                    segments,
                     target,
                     label,
                 }
@@ -1512,10 +1777,15 @@ impl Store {
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
+        let segments = timeline_segments(state_before, &points, from_ms, to_ms);
+        let segments = match self.stale_from(to_ms)? {
+            Some(alive_until) => stale_tail(segments, alive_until, from_ms, to_ms),
+            None => segments,
+        };
         Ok(TargetTimeline {
             target: target.to_string(),
             label,
-            segments: timeline_segments(state_before, &points, from_ms, to_ms),
+            segments,
         })
     }
 }
@@ -1836,6 +2106,442 @@ mod tests {
             .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION, "a writing open migrates the file");
+    }
+
+    fn insert_known_target(store: &mut Store, target: &str, state: TargetState, at: i64) {
+        store
+            .record_transition(&event(target, TargetState::Unknown, state, at))
+            .unwrap();
+    }
+
+    #[test]
+    fn a_first_run_records_the_liveness_row_without_a_gap() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+
+        let gap = store.begin_run(1_000, 60_000, &["icmp://1.1.1.1".to_string()]);
+        assert!(gap.unwrap().is_none());
+        let liveness = store.liveness().unwrap().unwrap();
+        assert_eq!(liveness.started_at_ms, 1_000);
+        assert_eq!(liveness.last_seen_ms, 1_000);
+        assert_eq!(liveness.gap_after_ms, 60_000);
+        assert!(liveness.stopped_at_ms.is_none());
+    }
+
+    #[test]
+    fn a_long_absence_writes_one_unknown_event_and_marks_the_projection() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        store
+            .begin_run(1_000, 5_000, &["icmp://1.1.1.1".to_string()])
+            .unwrap();
+        insert_known_target(&mut store, "icmp://1.1.1.1", TargetState::Up, 1_000);
+        store.end_run(2_000).unwrap();
+
+        let gap = store
+            .begin_run(100_000, 5_000, &["icmp://1.1.1.1".to_string()])
+            .unwrap()
+            .expect("the absence is long enough");
+        assert_eq!(gap.from_ms, 2_000, "a clean stop is the last alive instant");
+        assert_eq!(gap.to_ms, 100_000);
+        assert_eq!(gap.targets, 1);
+
+        let events = store.events(&EventFilter::default()).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].state, TargetState::Unknown);
+        assert_eq!(events[0].previous_state, TargetState::Up);
+        assert_eq!(events[0].occurred_at_ms, 2_000);
+        assert!(events[0].rtt_us.is_none());
+
+        let state = store
+            .find_target_at("icmp://1.1.1.1", 100_001)
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.state, TargetState::Unknown);
+        assert_eq!(state.last_change_at_ms, 2_000);
+        assert!(state.last_rtt_us.is_none());
+    }
+
+    #[test]
+    fn a_short_absence_records_no_gap() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        store
+            .begin_run(1_000, 5_000, &["icmp://1.1.1.1".to_string()])
+            .unwrap();
+        insert_known_target(&mut store, "icmp://1.1.1.1", TargetState::Up, 1_000);
+        store.end_run(2_000).unwrap();
+
+        let gap = store
+            .begin_run(4_000, 5_000, &["icmp://1.1.1.1".to_string()])
+            .unwrap();
+        assert!(gap.is_none());
+        assert_eq!(store.events(&EventFilter::default()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_zero_threshold_disables_gap_recording() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        store
+            .begin_run(1_000, 0, &["icmp://1.1.1.1".to_string()])
+            .unwrap();
+        insert_known_target(&mut store, "icmp://1.1.1.1", TargetState::Up, 1_000);
+        store.end_run(2_000).unwrap();
+
+        let gap = store
+            .begin_run(100_000, 0, &["icmp://1.1.1.1".to_string()])
+            .unwrap();
+        assert!(gap.is_none());
+        assert_eq!(store.events(&EventFilter::default()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_crash_uses_the_last_heartbeat_as_the_last_alive_instant() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        store
+            .begin_run(1_000, 5_000, &["icmp://1.1.1.1".to_string()])
+            .unwrap();
+        insert_known_target(&mut store, "icmp://1.1.1.1", TargetState::Down, 1_000);
+        store.heartbeat(5_000, 5_000).unwrap();
+
+        let gap = store
+            .begin_run(100_000, 5_000, &["icmp://1.1.1.1".to_string()])
+            .unwrap()
+            .expect("the absence is long enough");
+        assert_eq!(gap.from_ms, 5_000);
+    }
+
+    #[test]
+    fn the_gap_marker_is_strictly_after_the_newest_event() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        store
+            .begin_run(1_000, 5_000, &["icmp://1.1.1.1".to_string()])
+            .unwrap();
+        insert_known_target(&mut store, "icmp://1.1.1.1", TargetState::Down, 10_000);
+        store.end_run(10_000).unwrap();
+
+        let gap = store
+            .begin_run(100_000, 5_000, &["icmp://1.1.1.1".to_string()])
+            .unwrap()
+            .expect("the absence is long enough");
+        assert_eq!(gap.from_ms, 10_001);
+    }
+
+    #[test]
+    fn only_configured_targets_with_a_known_state_are_marked() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        store
+            .begin_run(1_000, 5_000, &["icmp://1.1.1.1".to_string()])
+            .unwrap();
+        insert_known_target(&mut store, "icmp://1.1.1.1", TargetState::Up, 1_000);
+        insert_known_target(&mut store, "icmp://8.8.8.8", TargetState::Down, 1_000);
+        store.end_run(2_000).unwrap();
+
+        let gap = store
+            .begin_run(100_000, 5_000, &["icmp://1.1.1.1".to_string()])
+            .unwrap()
+            .expect("the absence is long enough");
+        assert_eq!(gap.targets, 1);
+        let untouched = store
+            .find_target_at("icmp://8.8.8.8", 2_500)
+            .unwrap()
+            .unwrap();
+        assert_eq!(untouched.state, TargetState::Down);
+    }
+
+    #[test]
+    fn a_version_three_file_has_no_liveness_record_and_is_not_written() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("events.db");
+        {
+            let mut store = Store::open_rw(&path).unwrap();
+            insert_known_target(&mut store, "icmp://1.1.1.1", TargetState::Up, 1_000);
+            store
+                .connection
+                .execute_batch(
+                    "DROP TABLE monitor_liveness;
+                     UPDATE schema_meta SET version = 3;",
+                )
+                .unwrap();
+        }
+
+        let reader = Store::open_ro(&path).unwrap();
+        assert!(reader.liveness().unwrap().is_none());
+        assert_eq!(
+            reader.states_at(100_000).unwrap()[0].state,
+            TargetState::Up,
+            "an older file has no stale overlay"
+        );
+        let version: i64 = reader
+            .connection
+            .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 3, "a read-only open writes nothing at all");
+    }
+
+    fn stale_store(directory: &tempfile::TempDir) -> Store {
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        let key = "icmp://1.1.1.1".to_string();
+        store
+            .begin_run(0, 5_000, std::slice::from_ref(&key))
+            .unwrap();
+        insert_known_target(&mut store, &key, TargetState::Up, 1_000);
+        store.end_run(2_000).unwrap();
+        store
+    }
+
+    #[test]
+    fn a_stale_reader_reports_every_target_as_unknown() {
+        let directory = tempdir().unwrap();
+        let store = stale_store(&directory);
+
+        let fresh = store.states_at(4_000).unwrap();
+        assert_eq!(fresh[0].state, TargetState::Up);
+
+        let stale = store.states_at(100_000).unwrap();
+        assert_eq!(stale[0].state, TargetState::Unknown);
+        assert_eq!(stale[0].last_change_at_ms, 2_000);
+        assert!(stale[0].last_rtt_us.is_none());
+    }
+
+    #[test]
+    fn a_stale_find_target_reports_unknown() {
+        let directory = tempdir().unwrap();
+        let store = stale_store(&directory);
+
+        let fresh = store
+            .find_target_at("icmp://1.1.1.1", 4_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(fresh.state, TargetState::Up);
+
+        let stale = store
+            .find_target_at("icmp://1.1.1.1", 100_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stale.state, TargetState::Unknown);
+    }
+
+    #[test]
+    fn a_stale_timeline_truncates_the_last_state_and_adds_the_grey_tail() {
+        let directory = tempdir().unwrap();
+        let store = stale_store(&directory);
+
+        let timeline = store.timeline(0, 100_000).unwrap();
+        let segments = &timeline[0].segments;
+        assert_eq!(
+            segments.last().unwrap().state,
+            TargetState::Unknown,
+            "segments: {segments:?}"
+        );
+        assert_eq!(segments.last().unwrap().from_ms, 2_000);
+        assert_eq!(segments.last().unwrap().to_ms, 100_000);
+        assert!(segments
+            .iter()
+            .all(|segment| segment.state != TargetState::Up || segment.to_ms <= 2_000));
+
+        let detail = store.timeline_of("icmp://1.1.1.1", 0, 100_000).unwrap();
+        assert_eq!(detail.segments.last().unwrap().state, TargetState::Unknown);
+    }
+
+    #[test]
+    fn a_stale_timeline_whose_boundary_precedes_the_window_is_all_unknown() {
+        let directory = tempdir().unwrap();
+        let store = stale_store(&directory);
+
+        let timeline = store.timeline(50_000, 100_000).unwrap();
+        let segments = &timeline[0].segments;
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].state, TargetState::Unknown);
+        assert_eq!(segments[0].from_ms, 50_000);
+        assert_eq!(segments[0].to_ms, 100_000);
+    }
+
+    #[test]
+    fn a_zero_threshold_never_reports_the_live_unknown() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        let key = "icmp://1.1.1.1".to_string();
+        store.begin_run(0, 0, std::slice::from_ref(&key)).unwrap();
+        insert_known_target(&mut store, &key, TargetState::Up, 1_000);
+        store.end_run(2_000).unwrap();
+
+        assert_eq!(store.states_at(100_000).unwrap()[0].state, TargetState::Up);
+        assert_eq!(
+            store.timeline(0, 100_000).unwrap()[0]
+                .segments
+                .last()
+                .unwrap()
+                .state,
+            TargetState::Up
+        );
+    }
+
+    fn faults_of(chain: &[(TargetState, TargetState, i64)]) -> Vec<Fault> {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        for (previous, state, at) in chain {
+            store
+                .record_transition(&event("icmp://1.1.1.1", *previous, *state, *at))
+                .unwrap();
+        }
+        store.faults(&FaultFilter::default()).unwrap()
+    }
+
+    #[test]
+    fn a_gap_splits_the_fault_it_interrupts() {
+        let faults = faults_of(&[
+            (TargetState::Unknown, TargetState::Down, 1_000),
+            (TargetState::Down, TargetState::Unknown, 2_000),
+            (TargetState::Unknown, TargetState::Up, 3_000),
+        ]);
+        assert_eq!(faults.len(), 1);
+        assert_eq!(faults[0].started_at_ms, 1_000);
+        assert_eq!(faults[0].ended_at_ms, Some(2_000));
+    }
+
+    #[test]
+    fn a_target_still_down_after_a_gap_starts_a_second_fault() {
+        let faults = faults_of(&[
+            (TargetState::Unknown, TargetState::Down, 1_000),
+            (TargetState::Down, TargetState::Unknown, 2_000),
+            (TargetState::Unknown, TargetState::Down, 3_000),
+            (TargetState::Down, TargetState::Up, 4_000),
+        ]);
+        assert_eq!(faults.len(), 2);
+        assert_eq!(
+            (faults[1].started_at_ms, faults[1].ended_at_ms),
+            (1_000, Some(2_000))
+        );
+        assert_eq!(
+            (faults[0].started_at_ms, faults[0].ended_at_ms),
+            (3_000, Some(4_000))
+        );
+    }
+
+    #[test]
+    fn a_fault_after_a_gap_stays_open() {
+        let faults = faults_of(&[
+            (TargetState::Unknown, TargetState::Down, 1_000),
+            (TargetState::Down, TargetState::Unknown, 2_000),
+            (TargetState::Unknown, TargetState::Down, 3_000),
+        ]);
+        assert_eq!(faults.len(), 2);
+        assert_eq!(faults[1].ended_at_ms, Some(2_000));
+        assert_eq!(faults[0].started_at_ms, 3_000);
+        assert_eq!(faults[0].ended_at_ms, None);
+    }
+
+    #[test]
+    fn a_gap_before_a_new_down_does_not_create_an_extra_fault() {
+        let faults = faults_of(&[
+            (TargetState::Unknown, TargetState::Up, 1_000),
+            (TargetState::Up, TargetState::Unknown, 2_000),
+            (TargetState::Unknown, TargetState::Down, 3_000),
+            (TargetState::Down, TargetState::Up, 4_000),
+        ]);
+        assert_eq!(faults.len(), 1);
+        assert_eq!(
+            (faults[0].started_at_ms, faults[0].ended_at_ms),
+            (3_000, Some(4_000))
+        );
+    }
+
+    #[test]
+    fn a_gap_between_two_faults_leaves_both_unchanged() {
+        let faults = faults_of(&[
+            (TargetState::Unknown, TargetState::Down, 1_000),
+            (TargetState::Down, TargetState::Up, 2_000),
+            (TargetState::Unknown, TargetState::Unknown, 3_000),
+            (TargetState::Unknown, TargetState::Down, 4_000),
+            (TargetState::Down, TargetState::Up, 5_000),
+        ]);
+        assert_eq!(faults.len(), 2);
+        assert_eq!(
+            (faults[1].started_at_ms, faults[1].ended_at_ms),
+            (1_000, Some(2_000))
+        );
+        assert_eq!(
+            (faults[0].started_at_ms, faults[0].ended_at_ms),
+            (4_000, Some(5_000))
+        );
+    }
+
+    #[test]
+    fn the_gap_is_not_counted_as_down_time() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        for (previous, state, at) in [
+            (TargetState::Unknown, TargetState::Down, 1_000),
+            (TargetState::Down, TargetState::Unknown, 2_000),
+            (TargetState::Unknown, TargetState::Up, 6_000),
+        ] {
+            store
+                .record_transition(&event("icmp://1.1.1.1", previous, state, at))
+                .unwrap();
+        }
+        let days = store.daily_drops(None, 0, DAY_MS, i64::MAX).unwrap();
+        assert_eq!(days[0].drops, 1);
+        assert_eq!(days[0].down_ms, 1_000, "down from 1000 to the gap at 2000");
+    }
+
+    /// Both readers agree on every chain that crosses a monitor gap.
+    #[test]
+    fn the_split_fault_rule_agrees_between_both_readers() {
+        let chains: Vec<Vec<(TargetState, TargetState, i64)>> = vec![
+            vec![
+                (TargetState::Unknown, TargetState::Down, 1_000),
+                (TargetState::Down, TargetState::Unknown, 2_000),
+                (TargetState::Unknown, TargetState::Up, 3_000),
+            ],
+            vec![
+                (TargetState::Unknown, TargetState::Down, 1_000),
+                (TargetState::Down, TargetState::Unknown, 2_000),
+                (TargetState::Unknown, TargetState::Down, 3_000),
+                (TargetState::Down, TargetState::Up, 4_000),
+            ],
+            vec![
+                (TargetState::Unknown, TargetState::Up, 1_000),
+                (TargetState::Up, TargetState::Unknown, 2_000),
+                (TargetState::Unknown, TargetState::Down, 3_000),
+                (TargetState::Down, TargetState::Up, 4_000),
+            ],
+            vec![
+                (TargetState::Unknown, TargetState::Down, 1_000),
+                (TargetState::Down, TargetState::Up, 2_000),
+                (TargetState::Unknown, TargetState::Unknown, 3_000),
+                (TargetState::Unknown, TargetState::Down, 4_000),
+                (TargetState::Down, TargetState::Up, 5_000),
+            ],
+        ];
+
+        for chain in chains {
+            let directory = tempdir().unwrap();
+            let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+            let mut history = Vec::new();
+            for (previous, state, at) in chain {
+                let record = event("icmp://1.1.1.1", previous, state, at);
+                store.record_transition(&record).unwrap();
+                history.push(record);
+            }
+
+            let mut from_pure: Vec<_> = fault_episodes(&history)
+                .into_iter()
+                .map(|episode| (episode.started_at_ms, episode.ended_at_ms))
+                .collect();
+            from_pure.reverse();
+            let from_sql: Vec<_> = store
+                .faults(&FaultFilter::default())
+                .unwrap()
+                .into_iter()
+                .map(|fault| (fault.started_at_ms, fault.ended_at_ms))
+                .collect();
+            assert_eq!(from_pure, from_sql);
+        }
     }
 
     /// The export of a detail page covers one target and nothing else.

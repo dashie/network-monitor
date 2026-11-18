@@ -219,6 +219,48 @@ fn a_new_target_starts_monitoring_without_a_restart() {
 }
 
 #[test]
+fn a_reloaded_gap_threshold_is_visible_and_records_no_gap() {
+    let (_directory, config_path, database) = temp_paths();
+    let write = |gap_after_ms: u64| {
+        let text = format!(
+            "interval_ms = 30\ntimeout_ms = 500\ndatabase = \"{}\"\nretention_days = 0\ngap_after_ms = {gap_after_ms}\n\n[[targets]]\nip = \"127.0.0.1\"\n",
+            database.display()
+        );
+        std::fs::write(&config_path, text).expect("the test writes the configuration file");
+    };
+    write(5_000);
+
+    let running = start(&config_path, &database);
+    wait_for_events(&database, 1, Duration::from_secs(5));
+
+    write(120_000);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(reader) = Store::open_ro(&database) {
+            if reader
+                .liveness()
+                .ok()
+                .flatten()
+                .is_some_and(|liveness| liveness.gap_after_ms == 120_000)
+            {
+                break;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the reloaded threshold becomes visible"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let reader = Store::open_ro(&database).unwrap();
+    let events = reader.events(&EventFilter::default()).unwrap();
+    assert_eq!(events.len(), 1, "a reload never records a gap");
+    running.stop();
+}
+
+#[test]
 fn an_invalid_file_keeps_the_previous_configuration_and_the_monitor() {
     let (_directory, config_path, database) = temp_paths();
     write_config(&config_path, &database, 30, &["127.0.0.1"]);

@@ -4,7 +4,10 @@
 //! "Data ownership" in docs/ARCHITECTURE.md).
 
 /// Schema version written to `schema_meta` by this binary.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
+
+/// The schema version that added the single-row `monitor_liveness` table.
+pub const LIVENESS_SCHEMA: i64 = 4;
 
 /// Connection pragmas: WAL for concurrent readers, `NORMAL` sync for throughput,
 /// and a busy timeout so a reader never fails on a short write lock.
@@ -45,5 +48,13 @@ CREATE TABLE IF NOT EXISTS targets (
     first_seen_at_ms  INTEGER NOT NULL,
     last_change_at_ms INTEGER NOT NULL,
     last_rtt_us       INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS monitor_liveness (
+    id            INTEGER PRIMARY KEY CHECK (id = 1),
+    started_at_ms INTEGER NOT NULL,
+    last_seen_ms  INTEGER NOT NULL,
+    gap_after_ms  INTEGER NOT NULL,
+    stopped_at_ms INTEGER
 );
 ";

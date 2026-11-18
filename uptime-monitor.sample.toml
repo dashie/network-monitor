@@ -43,6 +43,10 @@ interval_ms = 5000
 # `timeout_ms`.
 timeout_ms = 2000
 
+# Minimum monitor downtime recorded as unknown. The last known state is closed as
+# unknown and the first probe after the gap records the observed state. 0 disables.
+gap_after_ms = 60000
+
 # The page the monitor serves when --listen is absent. Without this key and without
 # --listen, no page is served. `serve` and `simulate` ignore this key and keep their
 # own --listen flag.

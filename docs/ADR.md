@@ -18,7 +18,7 @@ the tool was renamed (ADR-0040); the decisions themselves are unchanged.
 | ADR-0001 | Adopt the documentation and repository baseline | accepted | 2026-11-08 | Adopt the standard documents and record the intake assumptions |
 | ADR-0002 | Implement in Rust as a single static binary | accepted | 2026-11-08 | Rust stable, `rusqlite` bundled, per-platform static builds |
 | ADR-0003 | Probe with raw ICMP sockets instead of the system `ping` | accepted | 2026-11-08 | In-process raw ICMP with native interface binding |
-| ADR-0004 | Persist transitions only, in embedded SQLite with WAL | accepted | 2026-11-08 | Two tables, event-only writes, concurrent reads |
+| ADR-0004 | Persist transitions only, in embedded SQLite with WAL | accepted; a third table is added by ADR-0041 | 2026-11-08 | Two tables at the time, event-only writes, concurrent reads |
 | ADR-0005 | Mirror every configuration option as a command-line flag | accepted | 2026-11-08 | Precedence `cli > file > default`, effective configuration printed on demand |
 | ADR-0006 | Ship one binary with `monitor` and `query` subcommands | accepted | 2026-11-08 | Single artifact; query opens the database read-only |
 | ADR-0007 | Reload the configuration file while monitoring runs | accepted | 2026-11-08 | Poll the file every second and apply a valid change without a restart |
@@ -55,6 +55,7 @@ the tool was renamed (ADR-0040); the decisions themselves are unchanged.
 | ADR-0038 | Resolve a configuration file's relative paths against the file | accepted | 2026-11-17 | File paths use the file's directory, flag paths use the working directory, absolute paths are unchanged; rebasing happens once in `config::parse_at` |
 | ADR-0039 | Let the configuration file state the listen address | accepted | 2026-11-17 | Top-level `listen`; `monitor` binds it when the flag is absent, `check` verifies it, `serve`/`simulate` ignore it; a changed value needs a restart |
 | ADR-0040 | Rename the tool to uptime-monitor | accepted | 2026-11-17 | `uptime-monitor` names the tool, the binary, the crate, the config and database defaults, and the deployment; a hard cut with no alias and no storage change |
+| ADR-0041 | Record monitor downtime as unknown instead of carrying the last state | accepted | 2026-11-17 | A single-row `monitor_liveness` table (schema 4); a start after a gap writes `up\|down -> unknown` at the last alive instant; a stale reader overlays `unknown`; a fault splits at the gap so the unobserved span is not down time |
 | ADR-0043 | Derive a regular series from the timeline instead of storing samples | accepted | 2026-11-18 | `GET /api/v1/timeseries` projects one lane onto an epoch grid of `step` seconds; half-open window, paging over samples, `unknown` before the first event and after `now`; no new table |
 | ADR-0044 | Accept relative and zoned instants on the JSON API through chrono/chrono-tz | accepted | 2026-11-18 | `now`, signed relative instants, dates and date-times without an offset, and `tz` (fixed offset or IANA name); exact `s`/`m`/`h`, calendar `d`/`w`/`mo`/`y`; UTC default; embedded tzdata |
 | ADR-0045 | Stream a large series as JSON Lines with the meta on the first line | accepted | 2026-11-18 | `GET /api/v1/timeseries/stream`, `application/x-ndjson`: `{"meta": …}` first, then one sample object per line; same parameters and errors; chunked and gzip like every data route |
@@ -135,7 +136,7 @@ Open a raw ICMP socket in-process, bind it to the interface with the platform op
 
 ## ADR-0004 — Persist transitions only, in embedded SQLite with WAL
 
-**Status:** accepted · **Date:** 2026-11-08
+**Status:** accepted; the data model gains a third table for liveness in [ADR-0041](#adr-0041--record-monitor-downtime-as-unknown-instead-of-carrying-the-last-state) · **Date:** 2026-11-08
 
 ### Context
 
@@ -2121,3 +2122,69 @@ The route is a separate path rather than content negotiation on the same path: a
 - **Server-Sent Events:** rejected — SSE is a long-lived event protocol with its own framing, reconnection, and `EventSource` constraints; this is a finite document, and NDJSON is the smaller, standard answer.
 - **A typed envelope per line (`{"type": "meta"}` / `{"type": "sample"}`):** rejected — it costs bytes on every sample for a discriminator the first-line convention already supplies.
 - **Meta as the last line:** rejected — a consumer would not learn the total until the end, and could not tell whether the first line was a sample.
+
+
+## ADR-0041 — Record monitor downtime as unknown instead of carrying the last state
+
+**Status:** accepted · **Date:** 2026-11-17
+
+### Context
+
+The database recorded transitions only, and the first probe after a restart was compared
+against the last stored state. Nothing recorded how long the process had been absent, so a
+restart could paint hours in which nothing was measured as `up`, or move the start of a real
+outage to the restart. `docs/HISTORY-IMPORT.md` documented the production cost of this and a
+manual SQL repair: an `unknown` row at the last measured instant closes the open fault, because
+the fault query closes a fault at the next event of any state.
+
+### Decision
+
+Keep a single-row `monitor_liveness` table, owned by `store` like the other tables. The monitor
+upserts it before the first probe of a run, refreshes it on a bounded heartbeat, and closes it
+at a clean stop.
+
+1. `gap_after_ms` is a global key and `--gap-after-ms` its flag; the default is `60000`, `0`
+   disables the feature, and a non-zero value below `5000` is refused.
+2. A start whose previous row is older than the threshold writes one `up|down -> unknown` event
+   at the last instant the previous run was alive for every configured target whose stored state
+   is `up` or `down`. The event is placed strictly after the target's newest event, so the
+   existing fault query closes an open fault at the gap start. The first probe then records
+   `unknown -> up|down`.
+3. A reader whose argument instant is later than the alive instant by more than the threshold
+   overlays `unknown`: the current state, the timeline tail, the up-run statistics at that
+   boundary, and the detail page. `serve` still opens the file read-only.
+4. A fault that spans a gap ends at the gap start. If the target is still down after the
+   restart, a new fault starts at the first observation. The unobserved interval is therefore
+   never counted as down time.
+5. `import` accepts `unknown` rows, so the marker round-trips through an export.
+
+The existing `unknown` token is reused; no new state is introduced.
+
+### Consequences
+
+- The schema becomes version 4. An older binary refuses a version-4 database, so the documented
+  pre-upgrade backup is the rollback.
+- A restart can create an extra fault when a target is down before and after the gap, in
+  exchange for down time that stays a lower bound.
+- The heartbeat costs at most one row update every 15 seconds, and nothing when the threshold is
+  `0`.
+- The liveness row is single-writer, following the existing single-writer assumption; two
+  monitor processes on one database are still unsupported.
+- A database with no liveness record — including the first start after the upgrade — claims no
+  gap.
+- A reload never calls `begin_run`, so it records no gap; it refreshes the threshold so readers
+  see a changed value at once.
+
+### Alternatives considered
+
+- **A historical `gaps` table or a read-time gap overlay:** rejected — it adds a second source of
+  gap truth and a new read path, while the `unknown` events already express the same interval
+  and are understood by older readers.
+- **A clean-stop marker only:** rejected — a crash is the common case and would produce no gap,
+  which is the defect being fixed.
+- **One incident across the gap with an upper-bound duration:** rejected — it would count the
+  unobserved interval as down time, which the runbook exists to prevent.
+- **A separate `indeterminate` state token:** rejected — it changes every reader, the export and
+  the import, and the grey `unknown` band already says "not measured".
+- **Retroactive gap detection for a database with no liveness record:** rejected — no previous
+  liveness exists, so no gap can be claimed.

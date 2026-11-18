@@ -27,6 +27,10 @@ pub const DEFAULT_TIMEOUT_MS: u64 = 2_000;
 pub const DEFAULT_DATABASE: &str = "uptime-monitor.db";
 pub const DEFAULT_RETENTION_DAYS: u64 = 0;
 pub const DEFAULT_STABILIZE_SECONDS: u64 = 60;
+/// The default monitor downtime recorded as unknown: one minute.
+pub const DEFAULT_GAP_AFTER_MS: u64 = 60_000;
+/// The smallest non-zero downtime that is recorded as unknown.
+pub const MIN_GAP_AFTER_MS: u64 = 5_000;
 
 /// The default of a `logfile` channel: append for ever, as before rotation existed.
 pub const DEFAULT_MAX_BYTES: u64 = 0;
@@ -56,6 +60,8 @@ pub struct FileConfig {
     /// The address the monitor serves the page on when `--listen` is absent.
     pub listen: Option<String>,
     pub retention_days: Option<u64>,
+    /// Minimum monitor downtime recorded as unknown; `0` disables.
+    pub gap_after_ms: Option<u64>,
     pub telegram: Option<FileTelegram>,
     /// The channels enabled for global events and for every target that does not
     /// state its own list.
@@ -441,6 +447,8 @@ pub struct Config {
     /// The page address when the monitor should serve one; `None` opens no socket.
     pub listen: Option<String>,
     pub retention_days: u64,
+    /// Minimum monitor downtime recorded as unknown; zero disables the feature.
+    pub gap_after: Duration,
     pub notify: NotificationConfig,
     pub targets: Vec<Target>,
 }
@@ -672,6 +680,7 @@ pub struct Overrides {
     pub database: Option<PathBuf>,
     pub listen: Option<String>,
     pub retention_days: Option<u64>,
+    pub gap_after_ms: Option<u64>,
     pub targets: Option<Vec<TargetSpec>>,
 }
 
@@ -803,6 +812,20 @@ impl Config {
             .or(file.retention_days)
             .unwrap_or(DEFAULT_RETENTION_DAYS);
 
+        let gap_after_ms = overrides
+            .gap_after_ms
+            .or(file.gap_after_ms)
+            .unwrap_or(DEFAULT_GAP_AFTER_MS);
+        if gap_after_ms != 0 && gap_after_ms < MIN_GAP_AFTER_MS {
+            return Err(invalid(
+                "gap_after_ms",
+                format!("must be 0 or at least {MIN_GAP_AFTER_MS}"),
+            ));
+        }
+        if gap_after_ms > i64::MAX as u64 {
+            return Err(invalid("gap_after_ms", "is too large"));
+        }
+
         let file_targets = file.targets;
         let specs = match overrides.targets {
             Some(specs) => specs,
@@ -847,6 +870,7 @@ impl Config {
             database,
             listen,
             retention_days,
+            gap_after: Duration::from_millis(gap_after_ms),
             notify,
             targets,
         })
@@ -875,6 +899,7 @@ impl Config {
             #[serde(skip_serializing_if = "Option::is_none")]
             listen: Option<String>,
             retention_days: u64,
+            gap_after_ms: u64,
             notify: Vec<String>,
             notification: Vec<SerializableNotification>,
             targets: Vec<SerializableTarget>,
@@ -1035,6 +1060,7 @@ impl Config {
             database: self.database.to_string_lossy().into_owned(),
             listen: self.listen.clone(),
             retention_days: self.retention_days,
+            gap_after_ms: self.gap_after.as_millis() as u64,
             notify: self.notify.global.clone(),
             notification,
             targets,
@@ -1569,7 +1595,23 @@ mod tests {
         assert_eq!(config.timeout, Duration::from_millis(DEFAULT_TIMEOUT_MS));
         assert_eq!(config.database, PathBuf::from(DEFAULT_DATABASE));
         assert_eq!(config.retention_days, DEFAULT_RETENTION_DAYS);
+        assert_eq!(
+            config.gap_after,
+            Duration::from_millis(DEFAULT_GAP_AFTER_MS)
+        );
         assert!(config.targets.is_empty());
+    }
+
+    #[test]
+    fn a_gap_below_the_minimum_is_refused_and_zero_disables_it() {
+        let mut refused = overrides();
+        refused.gap_after_ms = Some(MIN_GAP_AFTER_MS - 1);
+        let error = Config::resolve(None, refused).unwrap_err().to_string();
+        assert!(error.contains("gap_after_ms"), "error: {error}");
+
+        let mut disabled = overrides();
+        disabled.gap_after_ms = Some(0);
+        assert!(Config::resolve(None, disabled).unwrap().gap_after.is_zero());
     }
 
     #[test]

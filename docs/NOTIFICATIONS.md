@@ -162,7 +162,31 @@ tail -F /var/log/uptime-monitor/audit.log
 document per line, the webhook body plus `"logger":"<logger>"`. `level` is the most verbose
 level admitted, so `error` hides warnings and information.
 
-## 5. Verify
+## 5. A startup after a monitor gap
+
+When the monitor was absent longer than `gap_after_ms` (60 seconds by default), the `READY`
+message also states the gap. The Telegram and log-file text add one line after `Web:`:
+
+```text
+Gap: 2025-11-24T15:00:00.000Z to 2025-11-24T16:00:00.000Z (2 target(s) marked unknown)
+```
+
+The one-line log summary appends `gap=<from>..<to> targets=<n>`, and the webhook document
+adds one member inside `startup`; the schema stays `1`, and a start without a gap is byte for
+byte what it always was:
+
+```json
+{"schema":1,"event":"startup","occurred_at":"2025-11-24T16:00:00.000Z",
+ "startup":{"config":"…","targets":["…"],"web":"…",
+            "gap":{"from":"2025-11-24T15:00:00.000Z","to":"2025-11-24T16:00:00.000Z","targets":2}}}
+```
+
+The gap means those targets are `unknown` until their first probe after the restart. The first
+observation is then reported under the normal policy: a `DOWN` at once, an `UP` after
+`stabilize_seconds`. Set `gap_after_ms = 0` to keep the startup message unchanged and to disable
+the gap record.
+
+## 6. Verify
 
 ```bash
 uptime-monitor --show-config | grep -A4 '\[\[notification\]\]'   # secrets read <redacted>
@@ -171,7 +195,8 @@ uptime-monitor --show-config | grep -A4 '\[\[notification\]\]'   # secrets read 
 | Check | Expected |
 |---|---|
 | Start | One `CHANNEL` line per channel — the log file, the chat, the webhook — and one `READY` on the channels the root list enables |
-| First probe after the restart | One `UP` per answering target, after `stabilize_seconds` |
+| First start after a monitor gap | The `READY` carries the `Gap:` line (and the `gap` member) when the absence exceeded `gap_after_ms` |
+| First probe after the restart | One `UP` per answering target, after `stabilize_seconds`; a `DOWN` at once under the normal policy |
 | `tcp` target on a closed port | One `DOWN` at once, with `TCP.REFUSED` and the instant |
 | Port reopened | One `UP` after the window, no message before |
 | Drop and recovery inside the window | No message |

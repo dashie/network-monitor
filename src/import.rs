@@ -324,9 +324,6 @@ impl Row {
         }
 
         let state = TargetState::parse(fields[3].trim())?;
-        if state == TargetState::Unknown {
-            return None;
-        }
 
         let rtt_us = match fields[5].trim() {
             "" => None,
@@ -636,13 +633,20 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_row_is_parsed_as_a_gap_marker() {
+        let row = Row::parse("1.1.1.1,,,unknown,2026-11-08T00:00:00.000Z,")
+            .expect("an unknown row is a gap marker");
+        assert_eq!(row.state, TargetState::Unknown);
+        assert!(row.rtt_us.is_none());
+    }
+
+    #[test]
     fn broken_rows_are_rejected() {
         for line in [
             "",
             "1.1.1.1",
             "1.1.1.1,,,down,not-a-date,",
             ",,,down,2026-11-08T00:00:00.000Z,",
-            "1.1.1.1,,,unknown,2026-11-08T00:00:00.000Z,",
             "1.1.1.1,,,sideways,2026-11-08T00:00:00.000Z,",
             "1.1.1.1,,,up,2026-11-08T00:00:00.000Z,lento",
         ] {

@@ -316,6 +316,12 @@ sudo ./target/release/uptime-monitor monitor --config ./uptime-monitor.toml \
           <code>down</code>, and only a change is recorded.</p>
       </details>
       <details>
+        <summary>What happens to the history while the monitor is stopped?</summary>
+        <p>A restart after a long absence is shown as a grey <code>unknown</code> stretch rather than
+          carrying the last state forward: the unobserved time is never counted as down time. The
+          threshold is <code>gap_after_ms</code>, 60 seconds by default.</p>
+      </details>
+      <details>
         <summary>Do I have to run a database server?</summary>
         <p>No. The history is one SQLite file next to the binary, in WAL mode, so it can be read while
           the monitor writes.</p>
