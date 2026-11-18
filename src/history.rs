@@ -50,6 +50,18 @@ pub trait History: Send {
     /// One lane per target over `[from_ms, to_ms)`.
     fn timeline(&self, from_ms: i64, to_ms: i64) -> Result<Vec<TargetTimeline>, HistoryError>;
 
+    /// One target's lane over `[from_ms, to_ms)`, without reading the others.
+    ///
+    /// The segments are the ones `timeline` would return for this target. An unknown target
+    /// answers one lane with no segment, so a caller that already resolved the key never has
+    /// to handle a missing lane.
+    fn timeline_of(
+        &self,
+        target: &str,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<TargetTimeline, HistoryError>;
+
     /// Faults bucketed per UTC day, for one target or for all of them.
     fn daily_drops(
         &self,

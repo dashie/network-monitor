@@ -718,8 +718,8 @@ cause columns existed — six columns, ending after `rtt_us` — imports with no
 
 ## REST API
 
-The same server publishes the history as JSON under `/api/v1`: the targets, the faults, and
-the per-day totals. It is read-only, needs no authentication — anyone who can open the page can
+The same server publishes the history as JSON under `/api/v1`: the targets, the faults, the
+per-day totals, and a regular time series of one target. It is read-only, needs no authentication — anyone who can open the page can
 read it — and it answers on the address given to `--listen`. The contract is served by the
 binary itself: `GET /api/v1/openapi.json` is an OpenAPI 3.1 document naming every route,
 parameter, and property.
@@ -735,27 +735,43 @@ disagree with it.
 | `GET /api/v1/targets` | Every target, ordered by key |
 | `GET /api/v1/faults` | The faults, newest first |
 | `GET /api/v1/faults/daily` | Faults, down time, and `up` runs per UTC day, oldest first |
+| `GET /api/v1/timeseries` | One target's state on a regular grid, oldest first |
+| `GET /api/v1/timeseries/stream` | The same grid as JSON Lines, the meta on the first line |
 | `GET /api/v1/openapi.json` | The OpenAPI document of the routes above |
 | `GET /api/v1/docs` | The routes above, rendered as a reference in the browser |
 
 | Parameter | Routes | Accepted | Default |
 |---|---|---|---|
-| `target` | faults, daily | canonical key (`icmp://1.1.1.1`) or label | every target |
-| `from` | faults, daily | RFC 3339 UTC (`2026-11-14T00:00:00Z`) or epoch milliseconds, inclusive, inside the calendar domain below | none on faults; 30 days before `to` on daily |
-| `to` | faults, daily | the same two forms, exclusive, inside the same domain | none on faults; now on daily |
-| `limit` | all | `1` to `1000` | `100` |
+| `target` | faults, daily, timeseries, stream | canonical key (`icmp://1.1.1.1`) or label; **required** on timeseries and its stream | every target on faults and daily; none on timeseries and its stream |
+| `from` | faults, daily, timeseries, stream | `now`, a relative instant such as `-1h` or `-2d`, epoch milliseconds, or a date/date-time with an optional offset, inclusive, inside the calendar domain below | none on faults; 30 days before `to` on daily; one hour before `to` on timeseries |
+| `to` | faults, daily, timeseries, stream | the same forms, exclusive, inside the same domain | none on faults; now on daily and timeseries |
+| `step` | timeseries, stream | seconds `1` to `86400`, or a duration such as `30s`, `2m`, `1h`, or `1d` | `5` |
+| `tz` | faults, daily, timeseries, stream | `UTC`, a fixed offset such as `+02:00`, or an IANA name such as `Europe/Rome` | `UTC` |
+| `ts` | timeseries, stream | bare or `true` adds the `ts` field, `false` omits it | absent (no `ts`) |
+| `limit` | all (timeseries and its stream: `1` to `100000`) | `1` to `1000`; on the timeseries and its stream `1` to `100000` | `100`, `1000` on the timeseries and its stream |
 | `offset` | all | `0` or more | `0` |
 
+`now` is the instant of the request. A relative instant starts with `-` (past) or `+` (future)
+and a number with a unit: `s`, `m`, and `h` are exact, while `d`, `w`, `mo`, and `y` step the
+calendar in `tz`, so `-1d` is the same local time on the previous day even across a daylight
+saving change. A prefix `+` in a URL must be written `%2B`, as in `from=%2B30m`. An absolute
+value may be a date (`2026-11-14`), a date and time (`2026-11-14T22:00`), or a date and time with
+seconds (`2026-11-14T22:00:00` or `2026-11-14T22:00:00.500`), with an optional `Z` or `+02:00`
+suffix. A value without a suffix is read in `tz`, or in UTC when `tz` is absent; a suffix wins
+over `tz`.
+
 An instant lies between `1970-01-01T00:00:00Z` and `2100-01-01T00:00:00Z`, both bounds
-accepted, in either form; a value outside is `400 INVALID_PARAMETER`, naming the parameter and
-both bounds. `to` may be in the future — that is how a whole month or year is asked for:
-`from=2026-11-01T00:00:00Z&to=2026-12-01T00:00:00Z` is November 2026 on any day of November, and
-the days after today state `0` faults, `0` down time and no `up` run, because the time that has
-not happened yet is not measured.
+accepted; a value outside is `400 INVALID_PARAMETER`, naming the parameter and both bounds. A
+later local time that a zone skips when daylight saving starts is `400`; a local time the zone
+repeats takes its earlier occurrence. `to` may be in the future — that is how a whole month or
+year is asked for: `from=2026-11-01T00:00:00Z&to=2026-12-01T00:00:00Z` is November 2026 on any day
+of November, and the days after today state `0` faults, `0` down time and no `up` run, because
+the time that has not happened yet is not measured. A timeseries states `unknown` for the same
+instants.
 
 A parameter the route does not accept, a parameter given twice, a value out of range, and a
 `from` that is not earlier than `to` answer `400` and name the parameter, so a typo is never read
-as a default. An empty `target=` is the same as naming none.
+as a default. An empty `target=` is the same as naming none, except on the timeseries where `target` is required and an empty value answers `400`.
 
 Every answer is an object, and the records sit in `data`:
 
@@ -789,6 +805,25 @@ Every answer is an object, and the records sit in `data`:
 
 `meta.total` is how many records match the filters, whatever the page holds, so a client pages
 by adding `limit` to `offset` until it reaches the total.
+
+`/api/v1/timeseries` samples one target every `step` — seconds, or a duration such as `2m` or `1h`: each record is
+`{"t": 1763449860000, "v": "up"}`, where `t` is the epoch in milliseconds and `v` is `up`, `down`,
+or `unknown`. Adding `ts` (bare or `ts=true`) also states `ts`, the same instant in RFC 3339,
+localised in `tz` when one is given: `{"t": 1763449860000, "ts": "2026-11-18T08:11:00.000+01:00", "v": "up"}`.
+The target is stated once in `meta.filters.target` and is not repeated in every record. The first sample is the first
+epoch multiple of `step` not earlier than `from`, and no sample reaches `to`; `limit` and `offset`
+count samples, so a page never costs more than its samples even when the window is years wide.
+`meta` states the `step` and, inside `filters`, the `tz` the request spelled. A target with no
+event before the window states `unknown`, and an instant after `now` is always `unknown`.
+
+`/api/v1/timeseries/stream` answers the same page as JSON Lines (`Content-Type:
+application/x-ndjson`): the first line is `{"meta": {…}}` with the same facts, and every line
+after it is one sample object, `{"t": 1763449860000, "v": "up"}`, terminated by a newline. No
+array is opened and no comma separates the lines, so a client reads a sample as soon as its
+line arrives; `limit` may therefore reach `100000`. `ts`, `tz`, `step`, `offset`, the window,
+and the errors are the ones of the non-streaming route. A refusal is the usual JSON error object
+with its HTTP status before any line is written; a failure after the first line closes the
+stream and stays in the log.
 
 `/api/v1/faults/daily` covers the last 30 days unless `from` names an earlier instant, so a
 longer history is asked for explicitly; every record states its `target`, or `null` when the
@@ -836,6 +871,9 @@ curl -s '127.0.0.1:8642/api/v1/targets'
 curl -s '127.0.0.1:8642/api/v1/faults?target=cloudflare-dns&from=2026-11-01T00:00:00Z&limit=50'
 curl -s '127.0.0.1:8642/api/v1/faults/daily?to=2026-11-15T00:00:00Z'
 curl -s '127.0.0.1:8642/api/v1/faults/daily?target=icmp://1.1.1.1&from=2026-07-01T00:00:00Z'
+curl -s '127.0.0.1:8642/api/v1/timeseries?target=cloudflare-dns&from=-6h&to=now&step=60'
+curl -s '127.0.0.1:8642/api/v1/timeseries?target=icmp://1.1.1.1&from=2026-11-14T00:00:00&to=2026-11-15T00:00:00&tz=Europe/Rome'
+curl -sN '127.0.0.1:8642/api/v1/timeseries/stream?target=cloudflare-dns&from=-6h&step=60&ts'
 ```
 
 The answers are gzipped when the client advertises `gzip` and `--compression` is `auto`, state

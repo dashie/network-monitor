@@ -10,8 +10,10 @@
 mod daily;
 mod docs;
 mod faults;
+mod instant;
 mod openapi;
 mod targets;
+mod timeseries;
 
 use std::io::{self, Write};
 use std::net::TcpStream;
@@ -21,10 +23,12 @@ use flate2::write::GzEncoder;
 use crate::history::{History, HistoryError, HistorySource};
 use crate::json;
 use crate::logging;
-use crate::time::{format_rfc3339, now_ms, parse_rfc3339};
+use crate::time::{format_rfc3339, now_ms};
 use crate::web::{begin_chunked, end_chunked, Chunked, VARY};
 
 const JSON: &str = "application/json; charset=utf-8";
+/// One JSON value per line, the streaming form of a large answer.
+const NDJSON: &str = "application/x-ndjson; charset=utf-8";
 
 /// A dashboard on another origin may read the history the page already publishes.
 const CORS: &str = "Access-Control-Allow-Origin: *\r\n";
@@ -88,6 +92,8 @@ pub fn handle(
         "/api/v1/targets" => targets::route(stream, query, source, reply),
         "/api/v1/faults" => faults::route(stream, query, source, reply),
         "/api/v1/faults/daily" => daily::route(stream, query, source, reply),
+        "/api/v1/timeseries" => timeseries::route(stream, query, source, reply),
+        "/api/v1/timeseries/stream" => timeseries::stream_route(stream, query, source, reply),
         // The reference owns the prefix: the page and the two files it loads.
         _ if path.starts_with("/api/v1/docs") => docs::route(stream, path, reply),
         _ => fail(stream, 404, "NOT_FOUND", None, "no such route", reply),
@@ -112,13 +118,28 @@ pub(super) struct Meta<'a> {
     pub(super) from: Option<i64>,
     pub(super) to: Option<i64>,
     pub(super) generated_at: i64,
+    /// The grid of the timeseries route; `None` on every other route.
+    pub(super) step: Option<u32>,
+    /// The zone the request chose; `None` when it named none, which reads as UTC.
+    pub(super) tz: Option<&'a str>,
 }
 
 impl Meta<'_> {
+    /// The same facts as one object, for the first line of a JSON Lines answer.
+    pub(super) fn line(&self) -> String {
+        format!("{{{}}}", self.json().trim())
+    }
+
     pub(super) fn json(&self) -> String {
+        let step = self
+            .step
+            .map_or_else(String::new, |step| format!("\"step\": {step}, "));
+        let tz = self
+            .tz
+            .map_or_else(String::new, |tz| format!(", \"tz\": {}", json::string(tz)));
         format!(
-            "  \"meta\": {{\"limit\": {}, \"offset\": {}, \"total\": {}, \
-             \"filters\": {{\"target\": {}, \"from\": {}, \"to\": {}}}, \"generatedAt\": {}}}",
+            "  \"meta\": {{{step}\"limit\": {}, \"offset\": {}, \"total\": {}, \
+             \"filters\": {{\"target\": {}, \"from\": {}, \"to\": {}{tz}}}, \"generatedAt\": {}}}",
             self.limit,
             self.offset,
             self.total,
@@ -162,27 +183,34 @@ impl Body<'_> {
     }
 }
 
+/// Write the head and pick the body writer every streamed answer shares.
+fn begin_body<'a>(stream: &'a mut TcpStream, reply: Reply, content_type: &str) -> Body<'a> {
+    let encoding = if reply.gzip {
+        "Content-Encoding: gzip\r\n"
+    } else {
+        ""
+    };
+    let extra = format!("{}{VARY}{encoding}", reply.extra);
+    begin_chunked(stream, content_type, &extra);
+
+    if !reply.include_body {
+        Body::Head
+    } else if reply.gzip {
+        Body::Gzip(Box::new(GzEncoder::new(
+            Chunked { stream },
+            flate2::Compression::default(),
+        )))
+    } else {
+        Body::Plain(Chunked { stream })
+    }
+}
+
 impl<'a> Envelope<'a> {
     pub(super) fn begin(stream: &'a mut TcpStream, reply: Reply) -> Envelope<'a> {
-        let encoding = if reply.gzip {
-            "Content-Encoding: gzip\r\n"
-        } else {
-            ""
-        };
-        let extra = format!("{}{VARY}{encoding}", reply.extra);
-        begin_chunked(stream, JSON, &extra);
-
-        let body = if !reply.include_body {
-            Body::Head
-        } else if reply.gzip {
-            Body::Gzip(Box::new(GzEncoder::new(
-                Chunked { stream },
-                flate2::Compression::default(),
-            )))
-        } else {
-            Body::Plain(Chunked { stream })
-        };
-        Envelope { body, records: 0 }
+        Envelope {
+            body: begin_body(stream, reply, JSON),
+            records: 0,
+        }
     }
 
     /// Write one rendered record, opening or continuing the `data` array.
@@ -206,6 +234,28 @@ impl<'a> Envelope<'a> {
         self.body.write(",\n")?;
         self.body.write(&meta.json())?;
         self.body.write("\n}\n")?;
+        self.body.finish()
+    }
+}
+
+/// A streamed answer written as JSON Lines: one object per chunk, each terminated by `\n`.
+pub(super) struct Lines<'a> {
+    body: Body<'a>,
+}
+
+impl<'a> Lines<'a> {
+    pub(super) fn begin(stream: &'a mut TcpStream, reply: Reply) -> Lines<'a> {
+        Lines {
+            body: begin_body(stream, reply, NDJSON),
+        }
+    }
+
+    /// Write one line of the document, as one chunk.
+    pub(super) fn line(&mut self, text: &str) -> io::Result<()> {
+        self.body.write(&format!("{text}\n"))
+    }
+
+    pub(super) fn finish(self) -> io::Result<()> {
         self.body.finish()
     }
 }
@@ -324,18 +374,37 @@ pub(super) struct Params {
     pub(super) to: Option<i64>,
     pub(super) limit: u32,
     pub(super) offset: u32,
+    /// The grid of the timeseries route, in seconds.
+    pub(super) step: u32,
+    /// The zone the request named, as it spelled it; `None` when it named none.
+    pub(super) tz: Option<String>,
+    /// The zone every local value was read in and the timeseries renders `ts` in.
+    pub(super) zone: instant::Zone,
+    /// Whether the timeseries states `ts` next to the numeric `t`.
+    pub(super) ts: bool,
 }
 
-impl Params {
-    pub(super) fn parse(query: &str, accepted: &[&str]) -> Result<Self, Rejection> {
-        let mut params = Params {
-            target: None,
-            from: None,
-            to: None,
-            limit: DEFAULT_LIMIT,
-            offset: 0,
-        };
+/// How many seconds one timeseries sample covers when the request names no `step`.
+const DEFAULT_STEP: u32 = 5;
+/// The longest step a request may ask for: one sample per day.
+const MAX_STEP: u32 = 86_400;
 
+impl Params {
+    pub(super) fn parse(query: &str, accepted: &[&str], now: i64) -> Result<Self, Rejection> {
+        Self::parse_with(query, accepted, now, DEFAULT_LIMIT, MAX_LIMIT)
+    }
+
+    /// The same parse, for a route whose page is wider than the default one.
+    pub(super) fn parse_with(
+        query: &str,
+        accepted: &[&str],
+        now: i64,
+        default_limit: u32,
+        max_limit: u32,
+    ) -> Result<Self, Rejection> {
+        // The zone must be known before `from` and `to` are read, whatever order the query
+        // spells its parameters in: collect the pairs first, then resolve them.
+        let mut pairs: Vec<(&str, String)> = Vec::new();
         let mut seen: Vec<&str> = Vec::new();
         for pair in query.split('&') {
             if pair.is_empty() {
@@ -343,7 +412,7 @@ impl Params {
             }
             let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
             if !accepted.contains(&name) {
-                return Err(Rejection::unknown_parameter(name));
+                return Err(Rejection::unknown_parameter(name, accepted));
             }
             if seen.contains(&name) {
                 return Err(Rejection::parameter(
@@ -352,16 +421,48 @@ impl Params {
                 ));
             }
             seen.push(name);
-            match name {
-                "target" => params.target = Some(super::decode(value)),
-                "from" => params.from = Some(parse_instant(name, value)?),
-                "to" => params.to = Some(parse_instant(name, value)?),
+            pairs.push((name, super::decode(value)));
+        }
+
+        let tz_value = pairs
+            .iter()
+            .find(|(name, _)| *name == "tz")
+            .map(|(_, value)| value.as_str());
+        let zone = instant::parse_zone(tz_value)?;
+        let tz = tz_value.map(|value| {
+            if value.trim().is_empty() {
+                "UTC".to_string()
+            } else {
+                value.to_string()
+            }
+        });
+
+        let mut params = Params {
+            target: None,
+            from: None,
+            to: None,
+            limit: default_limit,
+            offset: 0,
+            step: DEFAULT_STEP,
+            tz,
+            zone,
+            ts: false,
+        };
+
+        for (name, value) in &pairs {
+            match *name {
+                "target" => params.target = Some(value.clone()),
+                "from" => params.from = Some(instant::parse_instant(name, value, zone, now)?),
+                "to" => params.to = Some(instant::parse_instant(name, value, zone, now)?),
                 "limit" => {
-                    params.limit = parse_number(name, value, 1, u64::from(MAX_LIMIT))? as u32
+                    params.limit = parse_number(name, value, 1, u64::from(max_limit))? as u32;
                 }
                 "offset" => {
-                    params.offset = parse_number(name, value, 0, u64::from(u32::MAX))? as u32
+                    params.offset = parse_number(name, value, 0, u64::from(u32::MAX))? as u32;
                 }
+                "step" => params.step = parse_step(value)?,
+                "ts" => params.ts = parse_flag(name, value)?,
+                "tz" => {}
                 _ => unreachable!("every accepted name is handled"),
             }
         }
@@ -375,32 +476,46 @@ impl Params {
     }
 }
 
-/// An RFC 3339 UTC instant, or epoch milliseconds, inside the accepted calendar domain.
-fn parse_instant(name: &str, value: &str) -> Result<i64, Rejection> {
-    let millis = match value.parse::<i64>() {
-        Ok(millis) => millis,
-        Err(_) => parse_rfc3339(value).ok_or_else(|| {
-            Rejection::parameter(
-                name,
-                format!(
-                    "{name} must be an RFC 3339 UTC instant such as 2026-11-14T22:00:00.000Z, \
-                     or epoch milliseconds"
-                ),
-            )
-        })?,
-    };
-    if !(DOMAIN_MIN_MS..=DOMAIN_MAX_MS).contains(&millis) {
-        return Err(Rejection::parameter(
+/// A parameter that is true when it is given bare or with `true`, and false with `false`.
+fn parse_flag(name: &str, value: &str) -> Result<bool, Rejection> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "true" | "1" => Ok(true),
+        "false" | "0" => Ok(false),
+        _ => Err(Rejection::parameter(
             name,
-            format!(
-                "{name} must be an RFC 3339 UTC instant between {} and {}, \
-                 or epoch milliseconds in that range",
-                format_rfc3339(DOMAIN_MIN_MS),
-                format_rfc3339(DOMAIN_MAX_MS),
-            ),
-        ));
+            format!("{name} must be true or false, or given without a value"),
+        )),
     }
-    Ok(millis)
+}
+
+/// The grid of the timeseries: a number of seconds, or a number with `s`, `m`, `h`, or `d`.
+fn parse_step(value: &str) -> Result<u32, Rejection> {
+    let invalid = || {
+        Rejection::parameter(
+            "step",
+            format!(
+                "step must be a number of seconds between 1 and {MAX_STEP}, or a duration such \
+                 as 5s, 30s, 2m, 1h, or 1d"
+            ),
+        )
+    };
+    let (number, unit) = if let Some(rest) = value.strip_suffix('s') {
+        (rest, 1)
+    } else if let Some(rest) = value.strip_suffix('m') {
+        (rest, 60)
+    } else if let Some(rest) = value.strip_suffix('h') {
+        (rest, 3_600)
+    } else if let Some(rest) = value.strip_suffix('d') {
+        (rest, 86_400)
+    } else {
+        (value, 1)
+    };
+    let amount: u64 = number.parse().map_err(|_| invalid())?;
+    let seconds = amount.checked_mul(unit).ok_or_else(invalid)?;
+    if !(1..=u64::from(MAX_STEP)).contains(&seconds) {
+        return Err(invalid());
+    }
+    Ok(seconds as u32)
 }
 
 fn parse_number(name: &str, value: &str, min: u64, max: u64) -> Result<u64, Rejection> {
@@ -472,13 +587,25 @@ impl Rejection {
         }
     }
 
-    pub(super) fn unknown_parameter(name: &str) -> Self {
+    pub(super) fn unknown_parameter(name: &str, accepted: &[&str]) -> Self {
+        let names: Vec<String> = accepted.iter().map(|name| format!("'{name}'")).collect();
+        let list = match names.len() {
+            0 => String::new(),
+            1 => names[0].clone(),
+            _ => format!(
+                "{} and {}",
+                names[..names.len() - 1].join(", "),
+                names[names.len() - 1]
+            ),
+        };
         Self::parameter(
             name,
-            format!(
-                "unknown parameter '{name}'; the route accepts target, from, to, limit, and offset"
-            ),
+            format!("unknown parameter '{name}'; the route accepts {list}"),
         )
+    }
+
+    pub(super) fn missing_required(name: &str) -> Self {
+        Self::parameter(name, format!("{name} is required on this route"))
     }
 
     pub(super) fn range() -> Self {
@@ -516,9 +643,11 @@ impl Rejection {
 mod tests {
     use super::*;
 
+    const NOW: i64 = 1_794_693_600_000;
+
     /// The parse without its `Rejection`, which carries no `Debug` and needs none.
     fn parsed(name: &str, value: &str) -> Option<i64> {
-        parse_instant(name, value).ok()
+        instant::parse_instant(name, value, instant::Zone::Utc, NOW).ok()
     }
 
     /// The two bounds are the dates the failure message and the documents state: a wrong literal
@@ -533,10 +662,19 @@ mod tests {
     fn an_instant_inside_the_domain_is_accepted_in_both_forms() {
         assert_eq!(parsed("from", "0"), Some(DOMAIN_MIN_MS));
         assert_eq!(parsed("from", "4102444800000"), Some(DOMAIN_MAX_MS));
-        assert_eq!(
-            parsed("from", "2026-11-14T22:00:00.000Z"),
-            Some(1_794_693_600_000)
-        );
+        assert_eq!(parsed("from", "2026-11-14T22:00:00.000Z"), Some(NOW));
+    }
+
+    #[test]
+    fn the_step_reads_seconds_or_a_suffixed_duration() {
+        assert_eq!(parse_step("5").ok().unwrap(), 5);
+        assert_eq!(parse_step("30s").ok().unwrap(), 30);
+        assert_eq!(parse_step("2m").ok().unwrap(), 120);
+        assert_eq!(parse_step("1h").ok().unwrap(), 3_600);
+        assert_eq!(parse_step("1d").ok().unwrap(), 86_400);
+        for value in ["0", "0m", "86401", "2d", "1mo", "5x", "", "m"] {
+            assert!(parse_step(value).is_err(), "{value} is not a valid step");
+        }
     }
 
     #[test]
@@ -547,7 +685,7 @@ mod tests {
             ("from", "1900-01-01T00:00:00.000Z"),
             ("to", "2100-01-02T00:00:00.000Z"),
         ] {
-            match parse_instant(name, value) {
+            match instant::parse_instant(name, value, instant::Zone::Utc, NOW) {
                 Ok(millis) => panic!("{name}={value} is outside the domain but parsed as {millis}"),
                 Err(rejection) => {
                     assert_eq!(rejection.code, "INVALID_PARAMETER", "{name}={value}");

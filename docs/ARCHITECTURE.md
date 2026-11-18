@@ -250,7 +250,7 @@ Rel(cli, hosts, "Sends echo requests", "ICMP")
 
 - **Input:** the window, the filter and the target a page, an API route or an export asks about.
 - **Output:** the domain rows of the read surface — `TargetStateRow`, `TargetTimeline`, `DailyDrops`, `Fault`, `EventRow`, `ExportedEvent` — or a `HistoryError` stating why the answer cannot be built.
-- **Guarantees:** the surface never names a database. `HistorySource` lives for the process and hands out one `History` per request, which keeps a read transaction short and lets test doubles substitute a source with no file; the methods mirror the questions the surface asks and not the shape of a table, so a source is free to hold rows, generate them, or fetch them elsewhere. The types of the contract are re-exported here, so a consumer of the page depends on this module and on nothing behind it.
+- **Guarantees:** the surface never names a database. `HistorySource` lives for the process and hands out one `History` per request, which keeps a read transaction short and lets test doubles substitute a source with no file; the methods mirror the questions the surface asks and not the shape of a table, so a source is free to hold rows, generate them, or fetch them elsewhere; `timeline_of` answers one lane, so the timeseries route never reads the targets it does not answer. The types of the contract are re-exported here, so a consumer of the page depends on this module and on nothing behind it.
 
 ### `sim`
 
@@ -274,26 +274,31 @@ Rel(cli, hosts, "Sends echo requests", "ICMP")
 - **Guarantees:** the history is read per request and nothing is written — the database source
   opens the file read-only, the simulated one opens nothing —; an
   array is never the root of an answer; every parameter is validated against the closed set the
-  route declares and bound as a SQL parameter, `limit` never exceeding 1 000, so one request
-  cannot ask for the whole history; `meta` states the filters it resolved and the total matching
+  route declares and bound as a SQL parameter, `limit` never exceeding 1 000 on the list routes and 100 000 on the
+  streamed timeseries, so one request cannot ask for the whole history; `meta` states the filters it resolved and the total matching
   rows, so a client pages without guessing; the page and the API share `web::respond_compressed`,
   the same `no-store`, `Vary`, and `HEAD` behaviour, and `json`, the one escaper of the binary;
-  a date is read with `time::parse_rfc3339` or as epoch milliseconds; the fault records and the
+  `from` and `to` are read by `web::api::instant` in the grammar `FR-38` states — `now`, a signed relative instant, epoch milliseconds, or a local date or date-time with an optional offset, read in the `tz` zone when it names none — and every resolved instant still lies inside the fixed calendar domain; the fault records and the
   day totals come from the same store queries the page reads, and a day total applies the rule
   of `FR-17` — runs split at midnight, the UTC day still running stating the last 24 hours —, a
   day at either edge of the window counting only the part inside it (the rule `Page` states once
   and every read is clipped by), and states the target it belongs to, or `null` when the answer
-  aggregates every target.
+  aggregates every target. `GET /api/v1/timeseries` projects one target's segments onto the epoch grid of
+  `step` seconds through `History::timeline_of`, so a page costs the events of that page rather
+  than the width of the window, and an instant after `now` is `unknown`; the same plan is
+  written by `/api/v1/timeseries/stream` as JSON Lines (`application/x-ndjson`) through
+  `web::api::Lines` — the `meta` object on the first line, one sample object per following
+  line — so a consumer reads a sample as soon as its line arrives and no array is opened.
   A data answer is streamed: `web::api::Envelope` writes the head, one record per chunk, then
   `meta`, through the `Chunked` writer the CSV export already uses, so no answer builds the JSON
   text in memory and none states a `Content-Length`; `/api/v1/faults` walks keyset pages of 200
   faults (`FaultFilter::after_ms`/`after_id`), the first read honouring the request's `offset`,
   so its memory is one page whatever `limit` says, while `/api/v1/targets` is bounded by the
-  number of targets and `/api/v1/faults/daily` by the days of the page it answers, which `limit`
-  caps at 1 000 — the window may be as wide as the domain allows (47 482 days at most), because
+  number of targets, `/api/v1/timeseries` by `limit` samples (up to 100 000, each written as its own chunk), and
+  `/api/v1/faults/daily` by the days of the page it answers, which `limit` caps at 1 000 — the window may be as wide as the domain allows (47 482 days at most), because
   the route reads only the days it returns and starts its timeline at the page whenever the page
   lies in the future; an accepted instant lies in the fixed calendar domain
-  `1970-01-01T00:00:00Z … 2100-01-01T00:00:00Z`, validated once in `parse_instant` and refused with `400` outside it, and the day walks of
+  `1970-01-01T00:00:00Z … 2100-01-01T00:00:00Z`, validated once in `web::api::instant::parse_instant` and refused with `400` outside it, and the day walks of
   `web::stats` and `store` saturate and stop when they cannot advance, so no input reaches an
   expression that can panic and no input can make a walk loop; a window may end in the future,
   and an open disconnection ends at the end of the window but never later than the present, so

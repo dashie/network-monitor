@@ -536,6 +536,26 @@ impl History for SimulatedHistory {
         Ok(timelines)
     }
 
+    fn timeline_of(
+        &self,
+        target: &str,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<TargetTimeline, HistoryError> {
+        Ok(match self.target_of(target) {
+            Some(configured) => TargetTimeline {
+                target: configured.key(),
+                label: configured.label.clone(),
+                segments: self.segments_of(configured, from_ms, to_ms),
+            },
+            None => TargetTimeline {
+                target: target.to_string(),
+                label: None,
+                segments: Vec::new(),
+            },
+        })
+    }
+
     fn daily_drops(
         &self,
         target: Option<&str>,

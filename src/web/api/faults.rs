@@ -13,7 +13,12 @@ use super::{
 
 /// The faults, newest first, streamed one keyset page at a time.
 pub(super) fn route(stream: &mut TcpStream, query: &str, source: &dyn HistorySource, reply: Reply) {
-    let params = match Params::parse(query, &["target", "from", "to", "limit", "offset"]) {
+    let now = now_ms();
+    let params = match Params::parse(
+        query,
+        &["target", "from", "to", "limit", "offset", "tz"],
+        now,
+    ) {
         Ok(params) => params,
         Err(rejection) => return reject(stream, rejection, reply),
     };
@@ -37,8 +42,6 @@ pub(super) fn route(stream: &mut TcpStream, query: &str, source: &dyn HistorySou
         Ok(total) => total,
         Err(error) => return reject(stream, Rejection::failed(&error), reply),
     };
-
-    let now = now_ms();
     let meta = Meta {
         limit: params.limit,
         offset: params.offset,
@@ -47,8 +50,9 @@ pub(super) fn route(stream: &mut TcpStream, query: &str, source: &dyn HistorySou
         from: params.from,
         to: params.to,
         generated_at: now,
+        step: None,
+        tz: params.tz.as_deref(),
     };
-
     let mut envelope = Envelope::begin(stream, reply);
     if let Err(error) = walk(store.as_ref(), &params, target.as_deref(), &mut envelope) {
         return truncated(error);

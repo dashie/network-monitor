@@ -15,11 +15,16 @@ use super::{
 
 /// Faults and down time per UTC day, oldest first, with the `up` runs of each day.
 pub(super) fn route(stream: &mut TcpStream, query: &str, source: &dyn HistorySource, reply: Reply) {
-    let params = match Params::parse(query, &["target", "from", "to", "limit", "offset"]) {
+    let now = now_ms();
+    let params = match Params::parse(
+        query,
+        &["target", "from", "to", "limit", "offset", "tz"],
+        now,
+    ) {
         Ok(params) => params,
         Err(rejection) => return reject(stream, rejection, reply),
     };
-    let now = now_ms().clamp(DOMAIN_MIN_MS, DOMAIN_MAX_MS);
+    let now = now.clamp(DOMAIN_MIN_MS, DOMAIN_MAX_MS);
     let to = params.to.unwrap_or(now);
     // The default window stops at the oldest accepted instant instead of running off the end of
     // the domain, so a `to` at the lower bound states an empty window rather than an underflow.
@@ -89,6 +94,8 @@ pub(super) fn route(stream: &mut TcpStream, query: &str, source: &dyn HistorySou
         from: Some(from),
         to: Some(to),
         generated_at: now,
+        step: None,
+        tz: params.tz.as_deref(),
     };
 
     let mut envelope = Envelope::begin(stream, reply);

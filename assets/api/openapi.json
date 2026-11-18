@@ -42,7 +42,8 @@
           { "$ref": "#/components/parameters/From" },
           { "$ref": "#/components/parameters/To" },
           { "$ref": "#/components/parameters/Limit" },
-          { "$ref": "#/components/parameters/Offset" }
+          { "$ref": "#/components/parameters/Offset" },
+          { "$ref": "#/components/parameters/Tz" }
         ],
         "responses": {
           "200": {
@@ -70,7 +71,8 @@
           { "$ref": "#/components/parameters/From" },
           { "$ref": "#/components/parameters/To" },
           { "$ref": "#/components/parameters/Limit" },
-          { "$ref": "#/components/parameters/Offset" }
+          { "$ref": "#/components/parameters/Offset" },
+          { "$ref": "#/components/parameters/Tz" }
         ],
         "responses": {
           "200": {
@@ -78,6 +80,71 @@
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/DayTotalEnvelope" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/UnknownTarget" },
+          "500": { "$ref": "#/components/responses/Failed" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/timeseries": {
+      "get": {
+        "operationId": "listTimeSeriesSamples",
+        "summary": "One target's state on a regular grid, oldest first",
+        "description": "Samples one target's timeline every `step` seconds. A sample states the state that held at its instant, `up`, `down` or `unknown` as `v`, next to `t` in epoch milliseconds; when the request asks with `ts` or `ts=true` it also states `ts`, localised in `tz`. An instant after `now` is `unknown` because unelapsed time is not measured. Samples lie on the epoch grid of `step`: `from <= at < to` and `at` is a multiple of `step * 1000`. The window is the last hour when the request names no `from`, and `to` defaults to `now`. `target` is required. `limit` and `offset` count samples, and only the timeline the page needs is read, so the cost follows `limit`, not the width of the window.",
+        "parameters": [
+          { "$ref": "#/components/parameters/TargetRequired" },
+          { "$ref": "#/components/parameters/From" },
+          { "$ref": "#/components/parameters/To" },
+          { "$ref": "#/components/parameters/Step" },
+          { "$ref": "#/components/parameters/LimitWide" },
+          { "$ref": "#/components/parameters/Offset" },
+          { "$ref": "#/components/parameters/Tz" },
+          { "$ref": "#/components/parameters/Ts" }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of samples",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TimeSeriesEnvelope" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/UnknownTarget" },
+          "500": { "$ref": "#/components/responses/Failed" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/api/v1/timeseries/stream": {
+      "get": {
+        "operationId": "streamTimeSeriesSamples",
+        "summary": "One target's state as JSON Lines, the meta first",
+        "description": "The same page as `/api/v1/timeseries`, written as JSON Lines (`application/x-ndjson`): the first line is `{\"meta\": {...}}`, then every following line is one sample object `{\"t\": ..., \"v\": ...}`, each terminated by a newline. No array is opened, so a client consumes a record as soon as its line arrives. The parameters, the grid, the paging, and the errors are those of `/api/v1/timeseries`; a refusal before the first line is the usual JSON error object with the HTTP status, and a failure after it closes the stream and stays in the log.",
+        "parameters": [
+          { "$ref": "#/components/parameters/TargetRequired" },
+          { "$ref": "#/components/parameters/From" },
+          { "$ref": "#/components/parameters/To" },
+          { "$ref": "#/components/parameters/Step" },
+          { "$ref": "#/components/parameters/LimitWide" },
+          { "$ref": "#/components/parameters/Offset" },
+          { "$ref": "#/components/parameters/Tz" },
+          { "$ref": "#/components/parameters/Ts" }
+        ],
+        "responses": {
+          "200": {
+            "description": "The meta object on the first line, then one sample per line",
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string",
+                  "description": "One JSON object per line: `{\"meta\": {...}}` first, then `{\"t\": <epoch ms>, \"v\": <state>}` records"
+                }
               }
             }
           },
@@ -112,19 +179,54 @@
         "description": "Canonical key (`icmp://1.1.1.1`) or the label of a target. An unknown value answers `404 UNKNOWN_TARGET`.",
         "schema": { "type": "string" }
       },
+      "TargetRequired": {
+        "name": "target",
+        "in": "query",
+        "required": true,
+        "description": "Canonical key (`icmp://1.1.1.1`) or the label of a target; required on this route. An unknown value answers `404 UNKNOWN_TARGET` and a missing one answers `400 INVALID_PARAMETER`.",
+        "schema": { "type": "string" }
+      },
       "From": {
         "name": "from",
         "in": "query",
         "required": false,
-        "description": "Start of the window, inclusive: an RFC 3339 UTC instant such as `2026-11-14T22:00:00.000Z`, or epoch milliseconds. An instant lies between `1970-01-01T00:00:00Z` and `2100-01-01T00:00:00Z`, both accepted; a value outside answers `400 INVALID_PARAMETER`.",
+        "description": "Start of the window, inclusive. Accepted forms: `now`; a relative instant such as `-1h`, `-2d`, `-1mo` or `-1y` (`s`, `m`, `h` are exact, `d`, `w`, `mo`, `y` step the calendar in `tz`); epoch milliseconds; `YYYY-MM-DD`, `YYYY-MM-DDTHH:MM` or `YYYY-MM-DDTHH:MM:SS` with an optional `.fff` fraction and an optional `Z` or `±HH:MM` suffix. A value without a suffix is read in `tz`, or in UTC when `tz` is absent. An instant lies between `1970-01-01T00:00:00Z` and `2100-01-01T00:00:00Z`, both accepted; a value outside answers `400 INVALID_PARAMETER`.",
         "schema": { "type": "string" }
       },
       "To": {
         "name": "to",
         "in": "query",
         "required": false,
-        "description": "End of the window, exclusive, in the same two forms and inside the same calendar domain as `from`. It must be later than `from`, and it may be in the future, so a whole month or year can be asked for; the days after today state no faults and no down time.",
+        "description": "End of the window, exclusive, in the same forms and inside the same calendar domain as `from`. It must be later than `from`, and it may be in the future, so a whole month or year can be asked for; an instant after `now` states no measured state.",
         "schema": { "type": "string" }
+      },
+      "Tz": {
+        "name": "tz",
+        "in": "query",
+        "required": false,
+        "description": "The zone a `from` or `to` value without an explicit offset is read in: `UTC`, a fixed offset such as `+02:00`, or an IANA name such as `Europe/Rome`. Defaults to UTC. A value with its own `Z` or offset ignores `tz`. The meta echoes the spelling the request used. An unknown zone answers `400 INVALID_PARAMETER`.",
+        "schema": { "type": "string", "default": "UTC", "examples": ["Europe/Rome", "+02:00"] }
+      },
+      "Ts": {
+        "name": "ts",
+        "in": "query",
+        "required": false,
+        "description": "When present (bare or `ts=true`), every sample also states `ts`, the instant rendered in RFC 3339 and localised in `tz`; `ts=false` keeps only the numeric `t`. An absent parameter states no `ts`.",
+        "schema": { "type": "boolean", "default": false }
+      },
+      "Step": {
+        "name": "step",
+        "in": "query",
+        "required": false,
+        "description": "The grid of the timeseries: a number of seconds between 1 and 86400, or a duration such as `30s`, `2m`, `1h`, or `1d`. Every sample sits on an epoch multiple of it.",
+        "schema": {
+          "oneOf": [
+            { "type": "integer", "minimum": 1, "maximum": 86400 },
+            { "type": "string", "pattern": "^[0-9]+[smhd]$" }
+          ],
+          "default": 5,
+          "examples": [5, "30s", "2m", "1h"]
+        }
       },
       "Limit": {
         "name": "limit",
@@ -132,6 +234,13 @@
         "required": false,
         "description": "How many records the page holds.",
         "schema": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 100 }
+      },
+      "LimitWide": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "description": "How many samples the page holds. The answer is streamed, one record per chunk, so a wide page does not build the document in memory.",
+        "schema": { "type": "integer", "minimum": 1, "maximum": 100000, "default": 1000 }
       },
       "Offset": {
         "name": "offset",
@@ -209,12 +318,48 @@
           "meta": { "$ref": "#/components/schemas/Meta" }
         }
       },
+      "TimeSeriesEnvelope": {
+        "type": "object",
+        "required": ["data", "meta"],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Sample" }
+          },
+          "meta": { "$ref": "#/components/schemas/Meta" }
+        }
+      },
+      "Sample": {
+        "type": "object",
+        "required": ["t", "v"],
+        "description": "The state of the answer's target at one grid instant. The target is stated once in `meta.filters.target` and is not repeated in every record.",
+        "properties": {
+          "t": {
+            "type": "integer",
+            "description": "The grid instant in epoch milliseconds"
+          },
+          "ts": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The same instant as `t` rendered in RFC 3339, localised in `tz`; present only when the request asks for it with `ts` or `ts=true`"
+          },
+          "v": {
+            "type": "string",
+            "enum": ["up", "down", "unknown"],
+            "description": "The state that held at the instant; unknown before the first event and after now"
+          }
+        }
+      },
       "Meta": {
         "type": "object",
         "required": ["limit", "offset", "total", "filters", "generatedAt"],
         "properties": {
           "limit": { "type": "integer" },
           "offset": { "type": "integer" },
+          "step": {
+            "type": "integer",
+            "description": "The grid of the timeseries in seconds; present on that route only"
+          },
           "total": {
             "type": "integer",
             "description": "How many records match the filters, whatever the page holds"
@@ -239,6 +384,10 @@
             "type": ["string", "null"],
             "format": "date-time",
             "description": "The end actually applied, defaults included"
+          },
+          "tz": {
+            "type": ["string", "null"],
+            "description": "The zone the request named, as it spelled it; absent when it named none, which reads as UTC"
           }
         }
       },

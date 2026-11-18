@@ -518,6 +518,15 @@ impl crate::history::History for Store {
         Store::timeline(self, from_ms, to_ms).map_err(into_history_error)
     }
 
+    fn timeline_of(
+        &self,
+        target: &str,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<TargetTimeline, crate::history::HistoryError> {
+        Store::timeline_of(self, target, from_ms, to_ms).map_err(into_history_error)
+    }
+
     fn daily_drops(
         &self,
         target: Option<&str>,
@@ -1449,6 +1458,66 @@ impl Store {
             })
             .collect())
     }
+
+    /// One target's lane over `[from_ms, to_ms)`, reading only that target's rows.
+    pub fn timeline_of(
+        &self,
+        target: &str,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<TargetTimeline, StoreError> {
+        if to_ms <= from_ms {
+            return Ok(TargetTimeline {
+                target: target.to_string(),
+                label: None,
+                segments: Vec::new(),
+            });
+        }
+
+        let label = self
+            .connection
+            .query_row(
+                "SELECT label FROM targets WHERE target = ?1",
+                params![target],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+
+        let state_before = self
+            .connection
+            .query_row(
+                "SELECT state FROM events
+                 WHERE target = ?1 AND occurred_at_ms < ?2
+                 ORDER BY occurred_at_ms DESC, id DESC LIMIT 1",
+                params![target, from_ms],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .and_then(|state| TargetState::parse(&state))
+            .unwrap_or(TargetState::Unknown);
+
+        let mut statement = self.connection.prepare(
+            "SELECT state, occurred_at_ms FROM events
+             WHERE target = ?1 AND occurred_at_ms >= ?2 AND occurred_at_ms < ?3
+             ORDER BY occurred_at_ms, id",
+        )?;
+        let points = statement
+            .query_map(params![target, from_ms, to_ms], |row| {
+                Ok(TransitionPoint {
+                    occurred_at_ms: row.get(1)?,
+                    state: TargetState::parse(&row.get::<_, String>(0)?)
+                        .unwrap_or(TargetState::Unknown),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(TargetTimeline {
+            target: target.to_string(),
+            label,
+            segments: timeline_segments(state_before, &points, from_ms, to_ms),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1935,6 +2004,34 @@ mod tests {
         assert_eq!(segments.len(), 2);
         assert_eq!(segments[0].state, TargetState::Unknown);
         assert_eq!(segments[1].state, TargetState::Up);
+    }
+
+    #[test]
+    fn timeline_of_returns_the_same_lane_as_the_whole_timeline() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        for target in ["1.1.1.1", "9.9.9.9"] {
+            store
+                .record_transition(&event(target, TargetState::Unknown, TargetState::Up, 1_000))
+                .unwrap();
+        }
+        store
+            .record_transition(&event("1.1.1.1", TargetState::Up, TargetState::Down, 5_000))
+            .unwrap();
+
+        let whole = store.timeline(4_000, 6_000).unwrap();
+        let lane = whole
+            .iter()
+            .find(|timeline| timeline.target == "1.1.1.1")
+            .unwrap();
+        assert_eq!(
+            store.timeline_of("1.1.1.1", 4_000, 6_000).unwrap(),
+            lane.clone()
+        );
+        assert_eq!(
+            store.timeline_of("1.1.1.1", 4_000, 6_000).unwrap().label,
+            None
+        );
     }
 
     #[test]

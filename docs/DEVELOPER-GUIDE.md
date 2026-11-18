@@ -107,6 +107,8 @@ uptime-monitor/
 │       │   ├── targets.rs  GET /api/v1/targets
 │       │   ├── faults.rs   GET /api/v1/faults
 │       │   ├── daily.rs    GET /api/v1/faults/daily
+│       │   ├── timeseries.rs  GET /api/v1/timeseries and its JSON Lines stream
+│       │   ├── instant.rs  the instants and time zones the API accepts
 │       │   ├── openapi.rs  GET /api/v1/openapi.json
 │       │   └── docs.rs     GET /api/v1/docs and the two files it loads
 │       ├── page.rs       timeline page: the lanes, the chart, the tables

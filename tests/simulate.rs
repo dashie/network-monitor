@@ -211,6 +211,9 @@ fn every_route_answers_over_the_simulated_history() {
         format!("/?from={from}&to={now}"),
         format!("/api/v1/faults?from={from}&to={now}"),
         format!("/api/v1/faults/daily?from={from}&to={now}"),
+        format!(
+            "/api/v1/timeseries?target=icmp%3A%2F%2F1.1.1.1&from={from}&to={now}&step=3600&limit=48"
+        ),
     ] {
         let (status, body) = sim.response(&path);
         assert_eq!(status, 200, "{path} answered {status}");

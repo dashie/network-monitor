@@ -13,7 +13,8 @@ use super::{
 
 /// Every target, ordered by key, streamed one record at a time.
 pub(super) fn route(stream: &mut TcpStream, query: &str, source: &dyn HistorySource, reply: Reply) {
-    let params = match Params::parse(query, &["limit", "offset"]) {
+    let now = now_ms();
+    let params = match Params::parse(query, &["limit", "offset"], now) {
         Ok(params) => params,
         Err(rejection) => return reject(stream, rejection, reply),
     };
@@ -25,7 +26,6 @@ pub(super) fn route(stream: &mut TcpStream, query: &str, source: &dyn HistorySou
         Err(error) => return reject(stream, Rejection::failed(&error), reply),
     };
 
-    let now = now_ms();
     let meta = Meta {
         limit: params.limit,
         offset: params.offset,
@@ -34,6 +34,8 @@ pub(super) fn route(stream: &mut TcpStream, query: &str, source: &dyn HistorySou
         from: None,
         to: None,
         generated_at: now,
+        step: None,
+        tz: None,
     };
 
     let mut envelope = Envelope::begin(stream, reply);

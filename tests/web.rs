@@ -1430,6 +1430,334 @@ fn the_daily_totals_state_the_faults_the_down_time_and_the_up_runs() {
     );
 }
 
+fn timeline_database() -> (tempfile::TempDir, PathBuf) {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let path = directory.path().join("events.db");
+    let mut store = Store::open_rw(&path).expect("the database opens");
+    const BASE: i64 = 1_000_000_000_000;
+    for (previous, state, at) in [
+        (TargetState::Unknown, TargetState::Up, BASE),
+        (TargetState::Up, TargetState::Down, BASE + 10_000),
+        (TargetState::Down, TargetState::Up, BASE + 25_000),
+    ] {
+        store
+            .record_transition(&event("10.0.0.1", previous, state, at))
+            .expect("the transition is recorded");
+    }
+    (directory, path)
+}
+
+#[test]
+fn the_timeseries_samples_a_regular_grid() {
+    let (_directory, database) = timeline_database();
+    let server = start(&database);
+
+    const BASE: i64 = 1_000_000_000_000;
+    let (status, body) = server.json(&format!(
+        "/api/v1/timeseries?target=10.0.0.1&from={BASE}&to={}&step=5",
+        BASE + 30_000
+    ));
+    assert_eq!(status, 200, "got {body}");
+    let states: Vec<&str> = body
+        .split("\"v\": \"")
+        .skip(1)
+        .map(|rest| rest.split('"').next().expect("a state value"))
+        .collect();
+    assert_eq!(
+        states,
+        vec!["up", "up", "down", "down", "down", "up"],
+        "the half-open window is sampled at multiples of the step: {body}"
+    );
+    assert!(body.contains("\"step\": 5"), "the grid is stated: {body}");
+    assert!(body.contains("\"total\": 6"), "got {body}");
+    assert!(
+        body.contains("\"from\": \"2001-09-09T01:46:40.000Z\""),
+        "the window is echoed: {body}"
+    );
+    for at in [BASE, BASE + 5_000, BASE + 10_000, BASE + 25_000] {
+        assert!(
+            body.contains(&format!("\"t\": {at},")),
+            "a sample sits on the grid at {at}: {body}"
+        );
+    }
+    assert!(
+        !body.contains("\"ts\":")
+            && !body.contains("\"at\":")
+            && !body.contains("\"atMs\":")
+            && !body.contains("\"state\":"),
+        "by default a sample states only `t` and `v`: {body}"
+    );
+}
+
+#[test]
+fn the_timeseries_states_ts_only_when_it_is_asked_for_and_in_the_requested_zone() {
+    let (_directory, database) = timeline_database();
+    let server = start(&database);
+
+    const BASE: i64 = 1_000_000_000_000;
+    let (status, plain) = server.json(&format!(
+        "/api/v1/timeseries?target=10.0.0.1&from={BASE}&to={}&ts",
+        BASE + 5_000
+    ));
+    assert_eq!(status, 200, "got {plain}");
+    assert!(
+        plain.contains("\"ts\": \"2001-09-09T01:46:40.000Z\""),
+        "a bare ts states the instant in UTC: {plain}"
+    );
+
+    let (status, zoned) = server.json(&format!(
+        "/api/v1/timeseries?target=10.0.0.1&from={BASE}&to={}&ts=true&tz=Europe/Rome",
+        BASE + 5_000
+    ));
+    assert_eq!(status, 200, "got {zoned}");
+    assert!(
+        zoned.contains("\"ts\": \"2001-09-09T03:46:40.000+02:00\""),
+        "ts is localised in the requested zone: {zoned}"
+    );
+
+    let (status, off) = server.json(&format!(
+        "/api/v1/timeseries?target=10.0.0.1&from={BASE}&to={}&ts=false",
+        BASE + 5_000
+    ));
+    assert_eq!(status, 200, "got {off}");
+    assert!(!off.contains("\"ts\":"), "ts=false states no ts: {off}");
+
+    for value in ["maybe", "yes"] {
+        let (status, body) = server.json(&format!(
+            "/api/v1/timeseries?target=10.0.0.1&from={BASE}&to={}&ts={value}",
+            BASE + 5_000
+        ));
+        assert_eq!(status, 400, "ts={value} answered {status}: {body}");
+        assert!(body.contains("\"parameter\": \"ts\""), "got {body}");
+    }
+}
+
+#[test]
+fn the_timeseries_pages_the_samples_and_ignores_the_window_width() {
+    let (_directory, database) = timeline_database();
+    let server = start(&database);
+
+    const BASE: i64 = 1_000_000_000_000;
+    let (status, body) = server.json(&format!(
+        "/api/v1/timeseries?target=probe&from={}&to={}&step=5&limit=2&offset=2",
+        BASE - 1,
+        BASE + 30_000
+    ));
+    assert_eq!(status, 200, "got {body}");
+    assert!(
+        body.contains("\"total\": 6"),
+        "the total is the whole grid: {body}"
+    );
+    assert!(body.contains("\"t\": 1000000010000"), "got {body}");
+    assert!(body.contains("\"t\": 1000000015000"), "got {body}");
+    assert!(!body.contains("\"t\": 1000000000000"), "got {body}");
+    assert!(body.contains("\"v\": \"down\""), "got {body}");
+
+    let (_, past) = server.json(&format!(
+        "/api/v1/timeseries?target=10.0.0.1&from={BASE}&to={}&step=5&offset=99",
+        BASE + 30_000
+    ));
+    assert!(past.contains("\"total\": 6"), "got {past}");
+    assert!(
+        past.contains("\"data\": []"),
+        "a page past the end is empty: {past}"
+    );
+}
+
+#[test]
+fn the_timeseries_states_unknown_before_the_first_event_and_after_now() {
+    let (_directory, database) = timeline_database();
+    let server = start(&database);
+
+    const BASE: i64 = 1_000_000_000_000;
+    let (status, body) = server.json(&format!(
+        "/api/v1/timeseries?target=10.0.0.1&from={}&to={BASE}&step=5",
+        BASE - 10_000
+    ));
+    assert_eq!(status, 200, "got {body}");
+    assert_eq!(body.matches("\"v\": \"unknown\"").count(), 2, "got {body}");
+
+    let now = now_ms();
+    let (status, body) = server.json(&format!(
+        "/api/v1/timeseries?target=10.0.0.1&from={}&to={}&step=60&limit=100",
+        now - 60_000,
+        now + 120_000
+    ));
+    assert_eq!(status, 200, "got {body}");
+    assert!(
+        body.contains("\"v\": \"unknown\""),
+        "an instant after now is not measured: {body}"
+    );
+}
+
+#[test]
+fn the_timeseries_refuses_a_missing_target_and_a_bad_step() {
+    let (_directory, database) = timeline_database();
+    let server = start(&database);
+
+    let (status, body) = server.json("/api/v1/timeseries");
+    assert_eq!(status, 400, "got {body}");
+    assert!(body.contains("\"parameter\": \"target\""), "got {body}");
+
+    let (status, body) = server.json("/api/v1/timeseries?target=nobody");
+    assert_eq!(status, 404, "got {body}");
+    assert!(body.contains("\"code\": \"UNKNOWN_TARGET\""), "got {body}");
+
+    for step in ["0", "86401", "abc", "2d", "0m", "1mo", "5x"] {
+        let (status, body) =
+            server.json(&format!("/api/v1/timeseries?target=10.0.0.1&step={step}"));
+        assert_eq!(status, 400, "step={step} answered {status}: {body}");
+        assert!(body.contains("\"parameter\": \"step\""), "got {body}");
+    }
+
+    let (status, body) = server
+        .json("/api/v1/timeseries?target=10.0.0.1&from=1000000000000&to=1000000600000&step=2m");
+    assert_eq!(status, 200, "step=2m answered {status}: {body}");
+    assert!(body.contains("\"total\": 5"), "120-second grid: {body}");
+    assert!(
+        body.contains("\"step\": 120"),
+        "the step is stated in seconds: {body}"
+    );
+}
+
+#[test]
+fn the_timeseries_accepts_a_wider_page_than_the_list_routes() {
+    let (_directory, database) = timeline_database();
+    let server = start(&database);
+
+    let (status, body) = server.json("/api/v1/timeseries?target=10.0.0.1");
+    assert_eq!(status, 200, "got {body}");
+    assert!(
+        body.contains("\"limit\": 1000"),
+        "the timeseries defaults to 1000 samples: {body}"
+    );
+
+    let (status, body) = server.json("/api/v1/timeseries?target=10.0.0.1&limit=100000");
+    assert_eq!(status, 200, "a 100000-sample page is accepted: {body}");
+    assert!(body.contains("\"limit\": 100000"), "got {body}");
+
+    let (status, body) = server.json("/api/v1/timeseries?target=10.0.0.1&limit=100001");
+    assert_eq!(status, 400, "got {body}");
+    assert!(body.contains("\"parameter\": \"limit\""), "got {body}");
+    assert!(
+        body.contains("between 1 and 100000"),
+        "the error states the wide bound: {body}"
+    );
+}
+
+#[test]
+fn the_timeseries_stream_is_json_lines_with_the_meta_first() {
+    let (_directory, database) = timeline_database();
+    let server = start(&database);
+
+    const BASE: i64 = 1_000_000_000_000;
+    let (status, head, body) = server.get_raw(&format!(
+        "/api/v1/timeseries/stream?target=10.0.0.1&from={BASE}&to={}&step=5",
+        BASE + 30_000
+    ));
+    assert_eq!(status, 200, "got {head}");
+    assert!(
+        head.contains("Content-Type: application/x-ndjson; charset=utf-8"),
+        "the stream states JSON Lines: {head}"
+    );
+    assert!(head.contains("Transfer-Encoding: chunked"), "got {head}");
+
+    let text = String::from_utf8(body).expect("the stream is UTF-8");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 7, "one meta line and six samples: {text}");
+    assert!(lines[0].starts_with("{\"meta\": "), "got {}", lines[0]);
+    assert!(lines[0].contains("\"step\": 5"), "got {}", lines[0]);
+    assert!(lines[0].contains("\"total\": 6"), "got {}", lines[0]);
+    assert!(!text.contains("\"data\""), "no array is written: {text}");
+    assert_eq!(lines[1], "{\"t\": 1000000000000, \"v\": \"up\"}");
+    assert_eq!(lines[3], "{\"t\": 1000000010000, \"v\": \"down\"}");
+    assert_eq!(lines[6], "{\"t\": 1000000025000, \"v\": \"up\"}");
+
+    let (status, response) = request(
+        &server.address,
+        &format!(
+            "HEAD /api/v1/timeseries/stream?target=10.0.0.1&from={BASE}&to={} HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            BASE + 30_000
+        ),
+    );
+    assert_eq!(status, 200, "a HEAD answers the stream headers");
+    assert!(
+        response.contains("application/x-ndjson"),
+        "the HEAD states the media type: {response}"
+    );
+    assert!(
+        response.ends_with("\r\n\r\n"),
+        "a HEAD writes no body: {response}"
+    );
+}
+
+#[test]
+fn the_timeseries_stream_keeps_the_flag_and_the_refusals_of_the_other_route() {
+    let (_directory, database) = timeline_database();
+    let server = start(&database);
+
+    const BASE: i64 = 1_000_000_000_000;
+    let (status, _, body) = server.get_raw(&format!(
+        "/api/v1/timeseries/stream?target=10.0.0.1&from={BASE}&to={}&ts=true&tz=Europe/Rome",
+        BASE + 5_000
+    ));
+    assert_eq!(status, 200);
+    let text = String::from_utf8(body).expect("the stream is UTF-8");
+    assert!(
+        text.contains("\"ts\": \"2001-09-09T03:46:40.000+02:00\""),
+        "ts is localised in the stream too: {text}"
+    );
+
+    for (query, status) in [
+        ("", 400),
+        ("?target=nobody", 404),
+        ("?target=10.0.0.1&limit=100001", 400),
+    ] {
+        let (answered, _) = server.get(&format!("/api/v1/timeseries/stream{query}"));
+        assert_eq!(answered, status, "{query}");
+    }
+}
+
+#[test]
+fn the_timeseries_reads_a_local_window_in_the_requested_zone() {
+    let (_directory, database) = timeline_database();
+    let server = start(&database);
+
+    let (status, body) = server.json(
+        "/api/v1/timeseries?target=10.0.0.1&from=2001-09-09T03:46:40&to=2001-09-09T03:47:10\
+         &step=5&tz=Europe/Rome",
+    );
+    assert_eq!(status, 200, "got {body}");
+    assert!(
+        body.contains("\"from\": \"2001-09-09T01:46:40.000Z\""),
+        "the local window is read in the zone: {body}"
+    );
+    assert!(
+        body.contains("\"tz\": \"Europe/Rome\""),
+        "the meta echoes the zone: {body}"
+    );
+    assert!(body.contains("\"total\": 6"), "got {body}");
+}
+
+#[test]
+fn the_existing_routes_accept_a_relative_window_and_a_zone() {
+    let (_directory, database) = seeded_database();
+    let server = start(&database);
+
+    for path in [
+        "/api/v1/faults?from=-1h&to=now",
+        "/api/v1/faults/daily?from=-2d&to=now&tz=Europe/Rome",
+    ] {
+        let (status, body) = server.json(path);
+        assert_eq!(status, 200, "{path} answered {status}: {body}");
+    }
+    let (_, body) = server.json("/api/v1/faults?from=-1h&to=now&tz=Europe/Rome");
+    assert!(
+        body.contains("\"tz\": \"Europe/Rome\""),
+        "the meta echoes the zone: {body}"
+    );
+}
+
 #[test]
 fn the_api_refuses_a_parameter_it_does_not_understand() {
     let (_directory, database) = seeded_database();
@@ -1633,6 +1961,8 @@ fn the_openapi_document_names_the_routes_and_every_property_they_answer() {
         "TargetEnvelope",
         "FaultEnvelope",
         "DayTotalEnvelope",
+        "TimeSeriesEnvelope",
+        "Sample",
         "Meta",
         "ErrorEnvelope",
     ] {
@@ -1662,6 +1992,51 @@ fn the_openapi_document_names_the_routes_and_every_property_they_answer() {
             );
         }
     }
+
+    const SAMPLE_KEYS: [&str; 2] = ["t", "v"];
+    assert!(
+        document.contains("\"/api/v1/timeseries\""),
+        "the document does not name the timeseries"
+    );
+    let (status, body) = server.json("/api/v1/timeseries?target=1.1.1.1");
+    assert_eq!(status, 200, "the documented timeseries must answer: {body}");
+    for key in SAMPLE_KEYS {
+        assert!(
+            document.contains(&format!("\"{key}\"")),
+            "the document does not state {key} of a sample"
+        );
+        assert!(
+            body.contains(&format!("\"{key}\":")),
+            "the timeseries answers no {key}: {body}"
+        );
+    }
+    assert!(
+        document.contains("\"step\"") && body.contains("\"step\":"),
+        "the document and the answer state the grid"
+    );
+
+    assert!(
+        document.contains("\"/api/v1/timeseries/stream\""),
+        "the document does not name the JSON Lines stream"
+    );
+    assert!(
+        document.contains("application/x-ndjson"),
+        "the stream media type"
+    );
+    let (status, body) = server.json("/api/v1/timeseries/stream?target=1.1.1.1");
+    assert_eq!(status, 200, "the documented stream must answer: {body}");
+    assert!(
+        body.lines()
+            .next()
+            .is_some_and(|line| line.starts_with("{\"meta\": ")),
+        "the first line is the meta object: {body}"
+    );
+    assert!(
+        body.lines()
+            .nth(1)
+            .is_some_and(|line| line.starts_with("{\"t\": ")),
+        "the second line is a sample: {body}"
+    );
 }
 
 #[test]

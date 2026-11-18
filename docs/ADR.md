@@ -55,6 +55,9 @@ the tool was renamed (ADR-0040); the decisions themselves are unchanged.
 | ADR-0038 | Resolve a configuration file's relative paths against the file | accepted | 2026-11-17 | File paths use the file's directory, flag paths use the working directory, absolute paths are unchanged; rebasing happens once in `config::parse_at` |
 | ADR-0039 | Let the configuration file state the listen address | accepted | 2026-11-17 | Top-level `listen`; `monitor` binds it when the flag is absent, `check` verifies it, `serve`/`simulate` ignore it; a changed value needs a restart |
 | ADR-0040 | Rename the tool to uptime-monitor | accepted | 2026-11-17 | `uptime-monitor` names the tool, the binary, the crate, the config and database defaults, and the deployment; a hard cut with no alias and no storage change |
+| ADR-0043 | Derive a regular series from the timeline instead of storing samples | accepted | 2026-11-18 | `GET /api/v1/timeseries` projects one lane onto an epoch grid of `step` seconds; half-open window, paging over samples, `unknown` before the first event and after `now`; no new table |
+| ADR-0044 | Accept relative and zoned instants on the JSON API through chrono/chrono-tz | accepted | 2026-11-18 | `now`, signed relative instants, dates and date-times without an offset, and `tz` (fixed offset or IANA name); exact `s`/`m`/`h`, calendar `d`/`w`/`mo`/`y`; UTC default; embedded tzdata |
+| ADR-0045 | Stream a large series as JSON Lines with the meta on the first line | accepted | 2026-11-18 | `GET /api/v1/timeseries/stream`, `application/x-ndjson`: `{"meta": …}` first, then one sample object per line; same parameters and errors; chunked and gzip like every data route |
 
 ## Records
 
@@ -2008,3 +2011,113 @@ now.
   contradicts the explicit `init` and configuration-promotion model.
 - **`uptime-log`, `reachwatch`, `blip`:** considered; `uptime-monitor` is the clearest to a new
   user, and the tagline carries the precision the name lacks.
+
+
+## ADR-0043 — Derive a regular series from the timeline instead of storing samples
+
+**Status:** accepted · **Date:** 2026-11-18 · **Extends:** [ADR-0004](#adr-0004--persist-transitions-only-in-embedded-sqlite-with-wal), [ADR-0028](#adr-0028--publish-a-read-only-json-api-under-apiv1-with-an-envelope-and-limitoffset)
+
+### Context
+
+The history stores transitions only ([ADR-0004](#adr-0004--persist-transitions-only-in-embedded-sqlite-with-wal)), and the API publishes those transitions and per-day aggregates. A dashboard, an export, or a comparison between targets needs the state at regular instants instead. Persisting per-probe observations would reverse the storage decision, enlarge the database without adding a fact the events do not already carry, and make the recording cost follow the probe interval rather than the changes that matter.
+
+### Decision
+
+`GET /api/v1/timeseries` derives samples on demand from one target's timeline:
+
+1. The grid is absolute: samples are the multiples of `step * 1000` inside `[from, to)`, so two requests with different windows still line up. `step` is an integer `1`–`86400` defaulting to `5`.
+2. The window is half-open: `from` is inclusive and `to` is exclusive, and the first sample is the first grid instant not earlier than `from`. `from` defaults to one hour before `to`, and `to` defaults to the request's `now`.
+3. A sample states the timeline segment that contains its instant. Before the target's first event the state is `unknown`; an instant after `now` is `unknown`, because unelapsed time is not measured.
+4. `limit` and `offset` count samples. `total` is the number of samples in the whole window, and only the timeline between the first and last sample of the page is read, through `History::timeline_of`, so the cost of a request follows `limit` and not the width of the window.
+5. `target` is required, so one answer is one lane; a client that wants every target loops over `/api/v1/targets`.
+6. `meta` states `step` and, inside `filters`, the zone the request named, so a client can reproduce the grid.
+
+Nothing is stored: the route reads the same segments the page reads under the same invariants (INV-1, INV-7).
+
+### Consequences
+
+- The series is always exactly the event history: a corrected or imported event changes the samples without a backfill, and no two facts can disagree.
+- A page costs one lane read and at most `limit` samples; a very wide window is cheap as long as the page is small, which is why the window is not capped by the domain.
+- A target that has never been probed states `unknown` for every sample; a target currently down keeps stating `down` until its return event.
+- Instants after `now` are `unknown` rather than the last known state, so a future window states what has been measured, not what a client hopes.
+- A client cannot obtain several targets in one answer; the per-target key is repeated in every record, which costs bytes but keeps each record self-contained.
+
+### Alternatives considered
+
+- **Persist one row per probe:** rejected — it reverses ADR-0004 and ADR-0022, makes the database grow with the probe rate, and stores a fact trivially derived from the transitions.
+- **Return the timeline segments and let the client resample:** rejected — every consumer would reimplement the grid, the `unknown` rule, and the paging, and the API would not answer the question it was asked.
+- **Place samples at `from + k * step`:** rejected — two requests for overlapping windows would produce different grids, so concatenating pages or comparing targets would not line up.
+- **Read the whole window before paging:** rejected — a 48 000-day window at five seconds would materialise hundreds of millions of samples for one page.
+
+## ADR-0044 — Accept relative and zoned instants on the JSON API through chrono/chrono-tz
+
+**Status:** accepted · **Date:** 2026-11-18 · **Amends:** the parameter description of [ADR-0028](#adr-0028--publish-a-read-only-json-api-under-apiv1-with-an-envelope-and-limitoffset)
+
+### Context
+
+The JSON API accepted only an RFC 3339 UTC instant or epoch milliseconds. Operators think in local calendar days and relative windows ("the last six hours", "yesterday"), and a whole local day cannot be expressed when the offset changes at a daylight-saving boundary. Consumers therefore converted in their own code, each with its own handling of DST and of the calendar.
+
+### Decision
+
+Every JSON API route that reads `from` or `to` uses one parser, `web::api::instant`:
+
+1. Accepted forms are `now`; a signed relative instant `[+-]N` with the unit `s`, `m`, `h`, `d`, `w`, `mo`, or `y`; epoch milliseconds; and `YYYY-MM-DD`, `YYYY-MM-DDTHH:MM`, or `YYYY-MM-DDTHH:MM:SS` with an optional `.fff` fraction and an optional `Z` or `±HH:MM` suffix.
+2. Relative `s`, `m`, and `h` are exact durations. `d`, `w`, `mo`, and `y` are calendar steps in the effective zone (`w` is seven days, `y` is twelve months, and a month clamps the day-of-month), so they survive a DST change as a local calendar would.
+3. `tz` accepts `UTC`, a fixed offset such as `+02:00`, and an IANA name such as `Europe/Rome`; it defaults to UTC and only applies to a value without an explicit offset. A suffix always wins.
+4. A local time that a zone skips when DST starts is `400 INVALID_PARAMETER`; a local time that repeats when DST ends takes its earlier occurrence.
+5. Every resolved instant stays inside the existing calendar domain `1970-01-01T00:00:00Z … 2100-01-01T00:00:00Z`, and the whole request resolves against one `now`.
+6. The zone database is embedded at build time by `chrono-tz`; `chrono` supplies the calendar arithmetic. No system tzdb is read.
+
+The page, the CLI, the export, and the import keep their current parsers; this is an API contract decision, not a change to the domain representation, which stays UTC epoch milliseconds (INV-6).
+
+### Consequences
+
+- Two dependencies are added: `chrono` and `chrono-tz`, whose data is compiled into the binary. The musl release and Windows therefore need no system time zone data, but the binary grows and the lock file must pin both crates.
+- A local calendar day or month is expressible across DST, and a relative window is stable regardless of the client's clock arithmetic.
+- A name with no zone on the server fails at parse time with a fixed `400`, and the store detail never reaches the answer.
+- The query string is form-decoded, so a literal `+` arrives as a space; the parser restores it, and a client is still expected to percent-encode `+` as `%2B` in a URL.
+- The meta echoes the spelling the request used, not a normalised offset, so two spellings of the same zone can appear in two answers.
+
+### Alternatives considered
+
+- **Fixed offsets only:** rejected — it cannot express DST or a local calendar step, which is the reason the change exists.
+- **Read the system time zone database:** rejected — Windows and the musl static build have no reliable copy, so the same request would answer differently per deployment.
+- **Full ISO 8601 duration strings (`-PT1H`, `-P1M`):** rejected — more verbose, and `M` is ambiguous between month and minute; the suffixed form matches the existing `--since` grammar.
+- **A time zone per parameter:** rejected — one zone per request is simpler to document and to reason about, and a client that needs two zones sends two requests.
+
+
+## ADR-0045 — Stream a large series as JSON Lines with the meta on the first line
+
+**Status:** accepted · **Date:** 2026-11-18 · **Extends:** [ADR-0043](#adr-0043--derive-a-regular-series-from-the-timeline-instead-of-storing-samples)
+
+### Context
+
+The timeseries route is chunked, but its body is one JSON array: a client that reads a line at a time still has to parse an array, and a page of 100 000 samples is an awkward document to consume incrementally. A consumer that wants to plot or forward samples as they arrive needs a format where each record is independently parseable and the end of a record is a newline.
+
+### Decision
+
+Add `GET /api/v1/timeseries/stream`. It computes the same plan as `/api/v1/timeseries` and writes it as JSON Lines:
+
+1. The media type is `application/x-ndjson`, the most widely understood spelling of JSON Lines; each line is one JSON object terminated by `\n`, no array and no commas.
+2. The first line is a meta object, `{"meta": {…}}`, with the same facts as the non-streaming `meta` (page, `step`, target, window, total, generated instant, and `tz` when named). Every following line is one sample, `{"t": …, "v": …}` plus `ts` when requested.
+3. The parameters, the grid, the paging, the `ts`/`tz` rendering, and the `limit` bounds are the ones of the non-streaming route; `limit` may reach 100 000.
+4. The answer is chunked and gzipped like every other data route, and answers `HEAD`.
+5. A refusal (bad parameter, unknown target, missing database) happens before the first line and is the usual JSON error object with its HTTP status. A failure after the first line cannot change the status, so the stream closes and the reason stays in the log, exactly as the chunked routes already behave.
+
+The route is a separate path rather than content negotiation on the same path: a client opts in explicitly, the two forms are separately documented and cached, and a proxy cannot answer with the wrong representation.
+
+### Consequences
+
+- A client reads a sample as soon as its line arrives and needs no incremental array parser; `jq -c` and every line-oriented tool consume it directly.
+- The protocol has one implicit rule: the first line is meta, the rest are samples. There is no per-line `type` discriminator, which keeps each sample small; a client that misreads the first line as a sample fails visibly on the missing `t`.
+- gzip compresses the stream on the fly; a client that wants to consume incrementally must decompress incrementally, which HTTP clients do by default.
+- Two renderings share one plan function, so the grid, the `unknown` rule, and the parameters cannot drift between them.
+- The meta line states the total before the samples, so a consumer can size its progress without a second request.
+
+### Alternatives considered
+
+- **Keep only the JSON array:** rejected — it forces an incremental array parser and hides each record until the array closes or the client implements a streaming parser.
+- **Choose the form with `Accept: application/x-ndjson`:** rejected — an explicit path is simpler to document, test, and cache, and avoids a proxy or a client library that rewrites `Accept`.
+- **Server-Sent Events:** rejected — SSE is a long-lived event protocol with its own framing, reconnection, and `EventSource` constraints; this is a finite document, and NDJSON is the smaller, standard answer.
+- **A typed envelope per line (`{"type": "meta"}` / `{"type": "sample"}`):** rejected — it costs bytes on every sample for a discriminator the first-line convention already supplies.
+- **Meta as the last line:** rejected — a consumer would not learn the total until the end, and could not tell whether the first line was a sample.
