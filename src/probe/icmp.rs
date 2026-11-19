@@ -557,6 +557,7 @@ pub fn simulated_day(
     seed: u64,
     day_start_ms: i64,
     fault_rate: f64,
+    rules: super::SimulatedRules,
 ) -> Vec<SimulatedEpisode> {
     let Endpoint::Icmp { address } = endpoint else {
         // The dispatcher chooses by method; this line cannot be reached from it.
@@ -565,10 +566,13 @@ pub fn simulated_day(
     let address = address.to_string();
     super::simulated_episodes(
         endpoint,
-        seed,
-        day_start_ms,
-        fault_rate,
-        "icmp",
+        super::SimulatedSchedule {
+            seed,
+            day_start_ms,
+            fault_rate,
+            rules,
+            purpose: "icmp",
+        },
         |rng| rng.between(300, 40_000),
         |_rng| {
             Failure::new(

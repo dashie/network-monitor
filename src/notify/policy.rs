@@ -16,6 +16,7 @@ use super::message::{Event, Message};
 fn state(message: &Message) -> Option<TargetState> {
     match message.event {
         Event::TargetDown { .. } => Some(TargetState::Down),
+        Event::TargetDegraded { .. } => Some(TargetState::Degraded),
         Event::TargetUp { .. } => Some(TargetState::Up),
         _ => None,
     }
@@ -42,14 +43,15 @@ impl Policy {
 
     /// Feed an observed change and return the message to send now, if any.
     pub fn observe(&mut self, message: Message) -> Option<Message> {
-        match state(&message)? {
-            TargetState::Down => {
-                // A disconnection cancels a recovery that has not been announced.
+        let state = state(&message)?;
+        match state {
+            TargetState::Down | TargetState::Degraded => {
+                // A fault or a degradation cancels a recovery that has not been announced.
                 self.pending = None;
-                if self.notified == Some(TargetState::Down) {
+                if self.notified == Some(state) {
                     return None;
                 }
-                self.notified = Some(TargetState::Down);
+                self.notified = Some(state);
                 Some(message)
             }
             TargetState::Up => {
@@ -159,6 +161,16 @@ mod tests {
         message
     }
 
+    fn degraded(key: &str, at: Instant) -> Message {
+        let mut message = Message::target_degraded(
+            TargetRef::new(key, None),
+            Cause::new("PROBE.SLOW", "the round-trip time stayed above 200 ms"),
+            0,
+        );
+        message.at = at;
+        message
+    }
+
     fn up(key: &str, at: Instant) -> Message {
         let mut message = Message::target_up(TargetRef::new(key, None), 0);
         message.at = at;
@@ -186,6 +198,48 @@ mod tests {
             .expect("a disconnection needs no window");
         assert!(is_down(&sent));
         assert_eq!(policy.next_deadline(), None);
+    }
+
+    #[test]
+    fn a_degradation_is_reported_at_once_and_a_repeat_is_silent() {
+        let now = Instant::now();
+        let mut policy = Policy::new(window());
+        let sent = policy
+            .observe(degraded("icmp://1.1.1.1", now))
+            .expect("a degradation needs no window");
+        assert!(matches!(sent.event, Event::TargetDegraded { .. }));
+        assert!(
+            policy
+                .observe(degraded("icmp://1.1.1.1", now + Duration::from_secs(5)))
+                .is_none(),
+            "a repeated degraded is suppressed"
+        );
+    }
+
+    #[test]
+    fn a_degradation_cancels_a_pending_recovery() {
+        let now = Instant::now();
+        let mut policy = Policy::new(window());
+        assert!(policy.observe(down("icmp://1.1.1.1", now)).is_some());
+        assert!(policy
+            .observe(up("icmp://1.1.1.1", now + Duration::from_secs(5)))
+            .is_none());
+        assert!(policy
+            .observe(degraded("icmp://1.1.1.1", now + Duration::from_secs(6)))
+            .is_some());
+        assert_eq!(policy.next_deadline(), None, "the recovery was cancelled");
+    }
+
+    #[test]
+    fn an_up_after_a_degradation_uses_the_window() {
+        let now = Instant::now();
+        let mut policy = Policy::new(window());
+        assert!(policy.observe(degraded("icmp://1.1.1.1", now)).is_some());
+        let up_at = now + Duration::from_secs(5);
+        assert!(policy.observe(up("icmp://1.1.1.1", up_at)).is_none());
+        assert_eq!(policy.next_deadline(), Some(up_at + window()));
+        let due = policy.due(up_at + window()).expect("the recovery is due");
+        assert!(matches!(due.event, Event::TargetUp { .. }));
     }
 
     #[test]

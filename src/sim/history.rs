@@ -18,7 +18,7 @@ use crate::history::{
     DailyDrops, EventFilter, EventRow, ExportedEvent, Fault, FaultFilter, History, HistoryError,
     HistorySource, TargetState, TargetStateRow, TargetTimeline, TimelineSegment,
 };
-use crate::probe::{simulated_day, SimulatedEpisode, SimulatedState};
+use crate::probe::{simulated_day, SimulatedEpisode, SimulatedRules, SimulatedState};
 use crate::store::{daily_drops_from_spans, Event};
 use crate::time::now_ms;
 
@@ -141,12 +141,21 @@ impl SimulatedHistory {
     ///
     /// A day covers itself, so the day that contains the instant holds the answer even when
     /// the episode began the day before.
+    fn rules(&self, target: &Target) -> SimulatedRules {
+        SimulatedRules {
+            degraded_after_ms: target.degraded_after_ms,
+            degraded_after: target.degraded_after,
+            interval: target.interval,
+        }
+    }
+
     fn episode_at(&self, target: &Target, instant: i64) -> Option<SimulatedEpisode> {
         simulated_day(
             &target.endpoint,
             self.seed,
             day_start_of(instant),
             self.fault_rate,
+            self.rules(target),
         )
         .into_iter()
         .find(|episode| episode.from_ms <= instant && instant < episode.to_ms)
@@ -182,7 +191,13 @@ impl SimulatedHistory {
             }
             let mut day = day_start_of(window_start);
             while day < to_ms {
-                for episode in simulated_day(&target.endpoint, self.seed, day, self.fault_rate) {
+                for episode in simulated_day(
+                    &target.endpoint,
+                    self.seed,
+                    day,
+                    self.fault_rate,
+                    self.rules(target),
+                ) {
                     if episode.from_ms >= to_ms {
                         break;
                     }
@@ -256,7 +271,13 @@ impl SimulatedHistory {
             if target.is_some_and(|wanted| wanted != key) {
                 continue;
             }
-            let episodes = simulated_day(&each.endpoint, self.seed, day_start_ms, self.fault_rate);
+            let episodes = simulated_day(
+                &each.endpoint,
+                self.seed,
+                day_start_ms,
+                self.fault_rate,
+                self.rules(each),
+            );
             for outage in outages(self.seed, &key, day_start_ms, self.fault_rate) {
                 if outage.from_ms < day_start_ms || outage.from_ms >= day_end_ms {
                     continue;
@@ -375,7 +396,13 @@ impl SimulatedHistory {
         let mut segments: Vec<TimelineSegment> = Vec::new();
         let mut day = day_start_of(from_ms);
         while day < to_ms {
-            for episode in simulated_day(&target.endpoint, self.seed, day, self.fault_rate) {
+            for episode in simulated_day(
+                &target.endpoint,
+                self.seed,
+                day,
+                self.fault_rate,
+                self.rules(target),
+            ) {
                 let state = state_of(&episode);
                 let from = episode.from_ms.max(from_ms);
                 let to = episode.to_ms.min(to_ms);
@@ -481,6 +508,7 @@ fn day_start_of(instant: i64) -> i64 {
 fn state_of(episode: &SimulatedEpisode) -> TargetState {
     match episode.state {
         SimulatedState::Up => TargetState::Up,
+        SimulatedState::Degraded => TargetState::Degraded,
         SimulatedState::Down => TargetState::Down,
     }
 }
@@ -826,6 +854,9 @@ mod tests {
                 priority: Some(20),
                 timeout: Duration::from_millis(2_000),
                 interval: Duration::from_secs(30),
+                down_after: 1,
+                degraded_after_ms: 0,
+                degraded_after: 3,
             },
             Target {
                 endpoint: Endpoint::Tcp {
@@ -837,6 +868,9 @@ mod tests {
                 priority: Some(10),
                 timeout: Duration::from_millis(2_000),
                 interval: Duration::from_secs(30),
+                down_after: 1,
+                degraded_after_ms: 0,
+                degraded_after: 3,
             },
             Target {
                 endpoint: Endpoint::Http {
@@ -851,6 +885,9 @@ mod tests {
                 priority: None,
                 timeout: Duration::from_millis(2_000),
                 interval: Duration::from_secs(30),
+                down_after: 1,
+                degraded_after_ms: 0,
+                degraded_after: 3,
             },
             Target {
                 endpoint: Endpoint::Dns {
@@ -863,6 +900,9 @@ mod tests {
                 priority: None,
                 timeout: Duration::from_millis(2_000),
                 interval: Duration::from_secs(30),
+                down_after: 1,
+                degraded_after_ms: 0,
+                degraded_after: 3,
             },
         ]
     }
@@ -874,6 +914,74 @@ mod tests {
             history_days,
             fault_rate: 3.0,
             now_ms: NOW,
+        }
+    }
+
+    /// The same board, with a slow threshold on every target, so the generator can carve
+    /// degraded stretches.
+    fn degrading_history() -> SimulatedHistory {
+        let mut history = history(30, 0);
+        for target in &mut history.targets {
+            target.degraded_after_ms = 200;
+            target.degraded_after = 3;
+            target.interval = Duration::from_secs(5);
+        }
+        history
+    }
+
+    /// A threshold set on the target produces `up -> degraded -> up` stretches, with the
+    /// cause and the latency of the monitor's own transition, and no fault.
+    #[test]
+    fn a_configured_threshold_turns_some_stretches_degraded() {
+        let history = degrading_history();
+        let from = history.first_ms();
+        let timelines = history.timeline(from, NOW).expect("a read");
+        assert_eq!(timelines.len(), 4);
+
+        let mut degraded = 0;
+        for lane in &timelines {
+            for (index, segment) in lane.segments.iter().enumerate() {
+                if segment.state != TargetState::Degraded {
+                    continue;
+                }
+                degraded += 1;
+                assert!(segment.to_ms > segment.from_ms, "a band has a width");
+                assert_eq!(
+                    lane.segments[index - 1].state,
+                    TargetState::Up,
+                    "a degradation is entered from up"
+                );
+                assert_eq!(
+                    lane.segments[index + 1].state,
+                    TargetState::Up,
+                    "the target returns to up"
+                );
+                assert!(
+                    segment.to_ms - segment.from_ms >= 60_000,
+                    "a slow window is long enough to see"
+                );
+            }
+        }
+        assert!(
+            degraded > 0,
+            "thirty days and four targets hold no degradation"
+        );
+
+        // The same stretch must state the cause and the round-trip time as an event.
+        let slow: Vec<_> = (0..30)
+            .flat_map(|day| history.day_events(from + day * DAY_MS))
+            .filter(|event| event.state == TargetState::Degraded)
+            .collect();
+        assert!(!slow.is_empty(), "the transition reaches the event list");
+        for event in slow {
+            assert_eq!(event.previous_state, TargetState::Up);
+            assert_eq!(event.cause.as_deref(), Some("PROBE.SLOW"));
+            assert!(event.rtt_us.is_some_and(|rtt| rtt >= 200_000));
+        }
+
+        // A degradation is not a fault: no fault carries its cause.
+        for fault in history.recent_faults(100).expect("a read") {
+            assert_ne!(fault.cause.as_deref(), Some("PROBE.SLOW"));
         }
     }
 
@@ -1346,6 +1454,11 @@ mod tests {
                     assert!(row.rtt_us.is_some());
                 }
                 TargetState::Unknown => panic!("a simulated transition is never unknown"),
+                TargetState::Degraded => {
+                    assert_eq!(row.cause.as_deref(), Some("PROBE.SLOW"));
+                    assert!(row.cause_message.is_some());
+                    assert!(row.rtt_us.is_some(), "a degradation states its latency");
+                }
             }
         }
 

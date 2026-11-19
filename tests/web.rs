@@ -795,6 +795,9 @@ fn the_target_page_states_the_configured_probe_interval() {
         priority: None,
         timeout: Duration::from_secs(2),
         interval: Duration::from_secs(5),
+        down_after: 1,
+        degraded_after_ms: 0,
+        degraded_after: 3,
     }]);
     let server = start_with_intervals(&database, Compression::Auto, intervals);
 
@@ -2780,4 +2783,85 @@ fn a_run_of_requests_never_consumes_a_connection_slot_for_good() {
     let (status, page) = server.get("/");
     assert_eq!(status, 200, "the page still answers");
     assert!(page.contains("1.1.1.1"), "and it still holds the history");
+}
+
+/// A degraded episode is a real state on every read surface, not a colour alone.
+#[test]
+fn a_degraded_episode_reaches_the_page_the_api_the_csv_and_the_detail_page() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let path = directory.path().join("events.db");
+    let now = now_ms();
+    {
+        let mut store = Store::open_rw(&path).expect("the database opens");
+        store
+            .record_transition(&event(
+                "1.1.1.1",
+                TargetState::Unknown,
+                TargetState::Up,
+                now - 3_600_000,
+            ))
+            .expect("the up transition is recorded");
+        let mut degraded = event(
+            "1.1.1.1",
+            TargetState::Up,
+            TargetState::Degraded,
+            now - 1_800_000,
+        );
+        degraded.rtt_us = Some(250_000);
+        degraded.cause = Some("PROBE.SLOW".to_string());
+        degraded.cause_message =
+            Some("the round-trip time stayed above 200 ms for 3 consecutive probes".to_string());
+        store
+            .record_transition(&degraded)
+            .expect("the degraded transition is recorded");
+    }
+    let server = start(&path);
+
+    let (status, page) = server.get("/");
+    assert_eq!(status, 200);
+    assert!(
+        page.contains("#8bc34a"),
+        "the light-green band is drawn: {page}"
+    );
+
+    let (status, targets) = server.get("/api/v1/targets");
+    assert_eq!(status, 200);
+    assert!(
+        targets.contains("\"state\": \"degraded\""),
+        "unexpected targets answer: {targets}"
+    );
+
+    let (status, series) = server.get(&format!(
+        "/api/v1/timeseries?target=1.1.1.1&from={}&to={}&step=300",
+        now - 1_800_000,
+        now
+    ));
+    assert_eq!(status, 200);
+    assert!(
+        series.contains("\"v\": \"degraded\""),
+        "the series states the fourth value: {series}"
+    );
+
+    let (status, head, body) = server.get_raw("/export/faults.csv.gz");
+    assert_eq!(status, 200, "unexpected head: {head}");
+    let csv = gunzip(&body);
+    assert!(
+        csv.contains(",degraded,"),
+        "the CSV states the degraded row: {csv}"
+    );
+    assert!(
+        csv.contains(",250000,PROBE.SLOW,"),
+        "the CSV states the RTT and the cause of the degradation: {csv}"
+    );
+
+    let (status, detail) = server.get("/target?target=1.1.1.1");
+    assert_eq!(status, 200);
+    assert!(
+        detail.contains("<div class=\"stat state degraded\"><b>degraded</b>"),
+        "the detail page states the state: {detail}"
+    );
+    assert!(
+        page.contains("<i class=\"swatch\" style=\"background:#8bc34a\"></i>degraded"),
+        "the legend names the state: {page}"
+    );
 }

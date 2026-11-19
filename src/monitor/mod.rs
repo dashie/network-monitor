@@ -21,7 +21,7 @@ use crate::shutdown::{self, Shutdown};
 use crate::store::{Event, Store, StoreError, TargetState};
 use crate::time::now_ms;
 
-use state::Transition;
+use state::{Rules, Tracker, Transition};
 
 #[derive(Debug, Error)]
 pub enum RunError {
@@ -680,13 +680,19 @@ fn monitor_target(
     prober: Arc<dyn Probe>,
     store: Arc<Mutex<Store>>,
     notifier: Arc<dyn Notifier>,
-    mut previous: TargetState,
+    previous: TargetState,
     shutdown: Shutdown,
     first_round: Arc<FirstRound>,
 ) -> Result<(), RunError> {
     let name = target.display();
     let key = target.key();
     let mut reported = false;
+    let rules = Rules {
+        down_after: target.down_after,
+        degraded_after_ms: target.degraded_after_ms,
+        degraded_after: target.degraded_after,
+    };
+    let mut tracker = Tracker::start(previous);
 
     while !shutdown::stopped(&shutdown) {
         let outcome = prober.probe(
@@ -705,7 +711,7 @@ fn monitor_target(
             Err(error) => logging::warn(Some(&name), &format!("probe failed: {error}")),
         }
 
-        if let Some(transition) = state::transition(previous, &outcome) {
+        if let Some(transition) = tracker.observe(&outcome, &rules) {
             let cause = transition.cause.as_ref();
             let event = Event {
                 target: target.key(),
@@ -739,6 +745,18 @@ fn monitor_target(
                     ),
                     event.occurred_at_ms,
                 )),
+                TargetState::Degraded => Some(Message::target_degraded(
+                    TargetRef::new(event.target.clone(), target.label.clone()),
+                    Cause::new(
+                        cause
+                            .map(|failure| failure.code().to_string())
+                            .unwrap_or_default(),
+                        cause
+                            .map(|failure| failure.message().to_string())
+                            .unwrap_or_default(),
+                    ),
+                    event.occurred_at_ms,
+                )),
                 TargetState::Up => Some(Message::target_up(
                     TargetRef::new(event.target.clone(), target.label.clone()),
                     event.occurred_at_ms,
@@ -750,7 +768,6 @@ fn monitor_target(
             }
             logging::debug(Some(&name), "notification queued");
 
-            previous = transition.to;
             logging::info(Some(&name), &describe(&transition));
         }
 

@@ -10,7 +10,7 @@ Website: <https://dashie.github.io/uptime-monitor/> · Licence: MIT — see [LIC
 
 A target is a method plus what it checks: an ICMP echo request to an address, a TCP connection to a port, a DNS record that must resolve, or an HTTP status that must fall inside an expectation. ICMP and TCP probes can be bound to a named interface, exactly like `ping -I eth1 1.1.1.1`; when no interface is configured the operating system routing table decides, so the probe leaves through the default interface.
 
-Unlike a ping loop or an uptime checker that samples every probe, it writes to the database only when a target changes state: one record when a target stops answering and one when it answers again. The history therefore grows with the number of incidents, not with the number of probes.
+Unlike a ping loop or an uptime checker that samples every probe, it writes to the database only when a target changes state: one record when a target stops answering and one when it answers again. The history therefore grows with the number of incidents, not with the number of probes. A `down_after` count damps a flaky link, and an opt-in `degraded` state records a target that stays reachable but slow.
 
 Every option of the configuration file can also be given on the command line, where it overrides the file. The database is SQLite in WAL mode, so a `query` invocation reads the event history while the monitor keeps running.
 
@@ -109,7 +109,7 @@ label = "example-health"
 
 ## Status
 
-**Alpha.** The feature set in [docs/PRODUCT.md](docs/PRODUCT.md) is implemented and covered by the test suite: layered configuration with live reload, four probe methods — ICMP, TCP, DNS, and HTTP/HTTPS — with per-interface binding for the first two, event-only SQLite persistence, querying while monitoring runs, retention, a read-only web page with 24 h state bands, per-target statistics, the latest faults with the cause of each, and a 30-day per-target view, and a read-only JSON API under `/api/v1` that serves the targets, the faults, and the per-day totals to a dashboard, rendered as a reference at `/api/v1/docs` that needs no internet access. The container image builds and probes with only `NET_RAW` added; HTTPS verification uses roots compiled into the binary.
+**Alpha.** The feature set in [docs/PRODUCT.md](docs/PRODUCT.md) is implemented and covered by the test suite: layered configuration with live reload, four probe methods — ICMP, TCP, DNS, and HTTP/HTTPS — with per-interface binding for the first two, event-only SQLite persistence, querying while monitoring runs, retention, a read-only web page with 24 h state bands, per-target statistics, the latest faults with the cause of each, a 30-day per-target view, flap damping and the opt-in `degraded` state, and a read-only JSON API under `/api/v1` that serves the targets, the faults, and the per-day totals to a dashboard, rendered as a reference at `/api/v1/docs` that needs no internet access. The container image builds and probes with only `NET_RAW` added; HTTPS verification uses roots compiled into the binary.
 
 Not done yet: the Windows raw-socket path is written but not exercised on a Windows host, IPv6 targets are deferred, HTTP checks do not follow redirects, and no binary is published as a release.
 

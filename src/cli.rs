@@ -42,6 +42,18 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "MILLISECONDS")]
     pub gap_after_ms: Option<u64>,
 
+    /// Consecutive failed probes before a target is recorded down (default: 1)
+    #[arg(long, global = true, value_name = "COUNT")]
+    pub down_after: Option<u64>,
+
+    /// Round-trip time at or above which a reachable probe is degraded (0 disables)
+    #[arg(long, global = true, value_name = "MILLISECONDS")]
+    pub degraded_after_ms: Option<u64>,
+
+    /// Consecutive slow probes before a target is recorded degraded (default: 3)
+    #[arg(long, global = true, value_name = "COUNT")]
+    pub degraded_after: Option<u64>,
+
     /// Target as [method:]address[,key=value]… — `1.1.1.1`, `tcp:1.1.1.1:443`,
     /// `dns:example.com@9.9.9.9`, `http:https://example.com/`; repeatable, replaces the
     /// file list
@@ -294,6 +306,9 @@ impl Cli {
             || self.database.is_some()
             || self.retention_days.is_some()
             || self.gap_after_ms.is_some()
+            || self.down_after.is_some()
+            || self.degraded_after_ms.is_some()
+            || self.degraded_after.is_some()
             || !self.targets.is_empty()
     }
 
@@ -322,6 +337,9 @@ impl Cli {
             },
             retention_days: self.retention_days,
             gap_after_ms: self.gap_after_ms,
+            down_after: self.down_after,
+            degraded_after_ms: self.degraded_after_ms,
+            degraded_after: self.degraded_after,
             targets,
         })
     }
@@ -438,6 +456,9 @@ mod tests {
             vec!["--database", "x.db", "manual"],
             vec!["--retention-days", "1", "manual"],
             vec!["--gap-after-ms", "60000", "manual"],
+            vec!["--down-after", "3", "manual"],
+            vec!["--degraded-after-ms", "200", "manual"],
+            vec!["--degraded-after", "3", "manual"],
             vec!["--target", "1.1.1.1", "manual"],
         ] {
             assert!(parse(&args).uses_configuration(), "args: {args:?}");
@@ -478,6 +499,12 @@ mod tests {
             "7",
             "--gap-after-ms",
             "90000",
+            "--down-after",
+            "3",
+            "--degraded-after-ms",
+            "200",
+            "--degraded-after",
+            "4",
             "--target",
             "1.1.1.1,interface=eth1",
         ]);
@@ -487,6 +514,9 @@ mod tests {
         assert_eq!(overrides.database, Some(PathBuf::from("/tmp/x.db")));
         assert_eq!(overrides.retention_days, Some(7));
         assert_eq!(overrides.gap_after_ms, Some(90_000));
+        assert_eq!(overrides.down_after, Some(3));
+        assert_eq!(overrides.degraded_after_ms, Some(200));
+        assert_eq!(overrides.degraded_after, Some(4));
         let targets = overrides.targets.unwrap();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].interface.as_deref(), Some("eth1"));

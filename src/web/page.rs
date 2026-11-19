@@ -31,6 +31,10 @@ const MIN_BAND_WIDTH: f64 = 2.0;
 /// The fill of a fault drawn wider than its true duration, so a band that lies about its
 /// width does not lie about its severity: orange states "this is a short fault, widened".
 const SHORT_FAULT_FILL: &str = "#ef6c00";
+/// A reachable but slow target: light green, in the same family as `up`, so it reads as
+/// "still up" while its lightness keeps it apart from the dark green of a healthy lane,
+/// the orange of a widened short fault, the red of a fault and the grey of `unknown`.
+pub const DEGRADED_FILL: &str = "#8bc34a";
 
 const HOUR_MS: i64 = 3_600_000;
 
@@ -406,7 +410,10 @@ fn bands<'a>(segments: &'a [TimelineSegment], window: Window) -> Vec<Band<'a>> {
         .map(|segment| {
             let start = window.x(segment.from_ms);
             let true_width = (window.x(segment.to_ms) - start).max(0.0);
-            let exaggerated = segment.state == TargetState::Down && true_width < MIN_BAND_WIDTH;
+            // A brief fault and a brief degradation are both widened so they stay visible;
+            // only the fault is painted orange, to say its width is not its duration.
+            let exaggerated = matches!(segment.state, TargetState::Down | TargetState::Degraded)
+                && true_width < MIN_BAND_WIDTH;
             let width = if exaggerated {
                 MIN_BAND_WIDTH
             } else {
@@ -577,14 +584,16 @@ fn short(text: &str, limit: usize) -> String {
     shortened
 }
 
-/// The fill of a band: green, red, or grey. A fault widened to stay visible is orange, so
-/// a reader never mistakes a minimum-width band for a long outage.
+/// The fill of a band: green for reachable (`up` and the light-green `degraded`), red, or
+/// grey. A fault widened to stay visible is orange, so a reader never mistakes a
+/// minimum-width band for a long outage.
 fn colour(state: TargetState, exaggerated: bool) -> &'static str {
-    if exaggerated {
+    if exaggerated && state == TargetState::Down {
         return SHORT_FAULT_FILL;
     }
     match state {
         TargetState::Up => "#2e7d32",
+        TargetState::Degraded => DEGRADED_FILL,
         TargetState::Down => "#c62828",
         TargetState::Unknown => "#bdbdbd",
     }
@@ -745,6 +754,53 @@ mod tests {
         assert!(
             rendered.find(SHORT_FAULT_FILL) > rendered.rfind("#2e7d32"),
             "the widened band is painted over its neighbours"
+        );
+    }
+
+    /// A brief degradation is widened like a fault, but stays light green: only a fault
+    /// says its width is not its duration.
+    #[test]
+    fn a_short_degraded_stretch_is_widened_but_not_painted_orange() {
+        let timeline = TargetTimeline {
+            target: "1.1.1.1".to_string(),
+            label: None,
+            segments: vec![
+                TimelineSegment {
+                    state: TargetState::Up,
+                    from_ms: 0,
+                    to_ms: 43_199_000,
+                },
+                TimelineSegment {
+                    state: TargetState::Degraded,
+                    from_ms: 43_199_000,
+                    to_ms: 43_200_000,
+                },
+                TimelineSegment {
+                    state: TargetState::Up,
+                    from_ms: 43_200_000,
+                    to_ms: 86_400_000,
+                },
+            ],
+        };
+        let window = Window {
+            from_ms: 0,
+            to_ms: 86_400_000,
+        };
+        let rendered = chart(&[timeline], &no_streaks(), window);
+
+        let band = rendered
+            .split("<rect ")
+            .skip(1)
+            .map(|band| band.split('>').next().unwrap_or_default())
+            .find(|tag| tag.contains(DEGRADED_FILL))
+            .unwrap_or_else(|| panic!("the degraded band is light green: {rendered}"));
+        assert!(
+            band.contains(&format!("width=\"{MIN_BAND_WIDTH:.1}\"")),
+            "the short degradation is widened to the minimum: {band}"
+        );
+        assert!(
+            !rendered.contains(SHORT_FAULT_FILL),
+            "a degradation is never painted as a short fault: {rendered}"
         );
     }
 

@@ -21,9 +21,10 @@ needed, so the manual can be read and distributed on its own.
 
 ## What the tool does
 
-`uptime-monitor` probes each target on an interval and records in SQLite only when the answer
-changes, so history grows with incidents, not probes. A target is one check — ICMP, TCP, DNS,
-or HTTP — with its own key; it is `unknown`, `up`, or `down`, and a local failure changes nothing.
+`uptime-monitor` probes each target — ICMP, TCP, DNS, or HTTP — on an interval and records in
+SQLite only when the answer changes, so history grows with incidents, not probes. A target is
+`unknown`, `up`, `degraded`, or `down`; a local failure changes nothing, `down_after` damps a
+flaky link, and `degraded_after_ms` opts into recording a reachable but slow answer.
 
 When the monitor itself was stopped for longer than `gap_after_ms`, the return is recorded as an
 `unknown` stretch instead of a fault: the last known state is closed as `unknown`, and the first
@@ -177,6 +178,9 @@ and `.gitignore` excludes `*.active` and `*.bak` so a working copy cannot commit
 | `listen` | none | `ADDRESS:PORT`, the page address `monitor` binds when `--listen` is absent; `--listen` wins. Without either, no page is served. `serve` and `simulate` ignore this key |
 | `retention_days` | `0` | Delete events older than this; `0` keeps everything |
 | `gap_after_ms` | `60000` | Monitor downtime recorded as `unknown`; `0` disables gap recording and the live `unknown`, and a non-zero value below `5000` is refused |
+| `down_after` | `1` | Consecutive failed probes before a target is recorded `down`; `1` records the first failure at once, `0` is refused. Every target may state its own |
+| `degraded_after_ms` | `0` | Round-trip time at or above which a reachable probe is slow; `0` (the default) keeps `degraded` off. Every target may state its own |
+| `degraded_after` | `3` | Consecutive slow probes to enter `degraded`, and fast ones to leave it; `0` is refused. Every target may state its own |
 | `notify` | empty | Channel names enabled for global events and as the default for every target; see [Notifications](#notifications) |
 
 ### Common target keys
@@ -188,6 +192,9 @@ and `.gitignore` excludes `*.active` and `*.bak` so a working copy cannot commit
 | `priority` | all | Where the lane sits on the page: lowest first, absent = after the others |
 | `timeout_ms` | all | Overrides the global timeout for this target |
 | `interval_ms` | all | Overrides the global interval for this target |
+| `down_after` | all | Consecutive failed probes before this target is recorded `down`; overrides the global value |
+| `degraded_after_ms` | all | Slow threshold of this target; overrides the global value |
+| `degraded_after` | all | Consecutive slow probes of this target; overrides the global value |
 | `interface` | `icmp`, `tcp` | Bind the probe to a device; refused on the other methods |
 | `notify` | all | Declared channel names for this target: replaces the root list, `[]` silences it; see [Notifications](#notifications) |
 
@@ -351,8 +358,8 @@ and any other `4xx` is not retried. The body is one JSON document:
 ```
 
 `target`, `state` and `cause` appear only on a target event, and `label` only when the target
-has one. `event` is `target_down`, `target_up`, `startup`, `config_reload`, `channel_started`
-or `shutdown`. A global event adds one member of its own and nothing else: `startup` states
+has one. `event` is `target_down`, `target_degraded`, `target_up`, `startup`, `config_reload`,
+`channel_started` or `shutdown`. A global event adds one member of its own and nothing else: `startup` states
 the configuration, the target keys and the page; `reload` states whether it was applied and
 why; `channel` states the name and the type of the channel that started. A `shutdown` adds
 nothing.
@@ -442,6 +449,10 @@ no target event.
   `Gap:` line — the start and end of the unobserved span and how many targets were marked
   `unknown` — and the webhook JSON carries the same facts as a `gap` member.
 - A target stops answering: one `DOWN` message at once, with the cause as a code and a sentence.
+  With `down_after` greater than one, only the failure that completes the count sends it.
+- A target answers slowly enough and long enough to cross `degraded_after_ms`: one `DEGRADED`
+  message at once, with the `PROBE.SLOW` cause and the threshold. A repeated `DEGRADED` is
+  silent, and a later `UP` uses the usual `stabilize_seconds` window.
 - A target answers again: one `UP` message only after `up` has held continuously for
   `stabilize_seconds`. A target that drops again inside that window produces no message at all,
   because the operator was already told it is down.
@@ -502,6 +513,9 @@ listed in [Troubleshooting](#troubleshooting), later in this guide.
 | `--database <path>` | Event database |
 | `--retention-days <n>` | Retention window |
 | `--gap-after-ms <n>` | Monitor downtime recorded as `unknown`; `0` disables, `5000` is the minimum non-zero value |
+| `--down-after <n>` | Consecutive failed probes before a target is recorded `down`; `1` is the default |
+| `--degraded-after-ms <n>` | Round-trip time at or above which a reachable probe is slow; `0` disables `degraded` |
+| `--degraded-after <n>` | Consecutive slow probes to enter `degraded`; `3` is the default |
 | `--target <spec>` | Target list, replaces the file list; repeatable |
 | `--log-level <level>` | `error`, `warn`, `info`, `debug` |
 | `--compression <mode>` | `auto` (default) gzips the HTML pages and the JSON answers when the client accepts it; `off` sends them plain, for a proxy that compresses |
@@ -514,6 +528,8 @@ listed in [Troubleshooting](#troubleshooting), later in this guide.
 --target tcp:1.1.1.1:443,label=cloudflare-https,priority=2
 --target dns:example.com@9.9.9.9,record=AAAA
 --target http:https://example.com/health,expect=204,timeout_ms=1500
+--target 1.1.1.1,down_after=3
+--target tcp:1.1.1.1:443,degraded_after_ms=200,degraded_after=3
 ```
 
 ### Subcommands
@@ -610,6 +626,13 @@ life from the seed, and most targets are up nearly always while some fail a few 
 a few flap. The past is whole UTC days that end today; nothing exists before its first day, and
 nothing exists after now. A fault may cross midnight and stays one fault.
 
+A target that states `degraded_after_ms` also gets `up -> degraded -> up` stretches at that
+threshold — several a day when the threshold is low, rarer but never absent as it rises — so the
+light-green band, the `DEGRADED` message and the `degraded` value of the API and the export can be
+reviewed without a slow link. `--fault-rate 0` silences the faults but not the degradations,
+because a degradation is not a fault. Every user-visible state the monitor can record is reproducible here ;
+without a threshold the board carries no `degraded` stretch at all.
+
 `--fault-rate` is the knob for how busy the board is. Its number is the faults a day of a target
 that fails now and then, and it is measured against that target: one target in five never fails
 whatever the number, and one in ten flaps and gets about eight times as many faults, drawn short
@@ -641,7 +664,9 @@ is showing, on the left of the line, and carries the control that changes it, on
   meet square. A fault too short to reach a visible width is drawn at a minimum width and
   coloured **orange instead of red**, so a brief outage is not lost in a wide window and its
   width is never mistaken for its duration; hover it for the exact instants. The legend names
-  that band `short fault`.
+  that band `short fault`. A reachable but slow target is drawn as a **light-green** `degraded` band,
+  widened by the same minimum-width rule but never coloured orange; it is not a fault and the
+  down time ignores it.
   A lane states the drops, the average `up` run with its spread, the longest run, and how long
   the target has been up without a drop. Below the chart opens a table of the last 10 faults,
   under a rule that marks where it begins: a row names the target as its lane does — the label,
@@ -670,7 +695,7 @@ is showing, on the left of the line, and carries the control that changes it, on
   `interval_ms` when it states one, otherwise the global `interval_ms`, shown as `every 5s`.
   It is stated only while the target is in the active configuration, and it is not the 30 s
   reload of the page. Under the toolbar, four widgets: the first states the state of the target — its word
-  and how long it has held, white on a tile of the colour the chart gives that state —, and the
+  and how long it has held, white on a tile of the colour the chart gives that state (dark type on the light green of `degraded`) —, and the
   other three state the faults, the down time, and the average `up` run of the period. They
   keep that order at every window width and take one of three shapes: four across while they
   fit, then two and two, and on a narrow window the state alone on its line above the other
@@ -834,7 +859,7 @@ Every answer is an object, and the records sit in `data`:
 by adding `limit` to `offset` until it reaches the total.
 
 `/api/v1/timeseries` samples one target every `step` — seconds, or a duration such as `2m` or `1h`: each record is
-`{"t": 1763449860000, "v": "up"}`, where `t` is the epoch in milliseconds and `v` is `up`, `down`,
+`{"t": 1763449860000, "v": "up"}`, where `t` is the epoch in milliseconds and `v` is `up`, `degraded`, `down`,
 or `unknown`. Adding `ts` (bare or `ts=true`) also states `ts`, the same instant in RFC 3339,
 localised in `tz` when one is given: `{"t": 1763449860000, "ts": "2026-11-18T08:11:00.000+01:00", "v": "up"}`.
 The target is stated once in `meta.filters.target` and is not repeated in every record. The first sample is the first

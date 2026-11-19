@@ -258,11 +258,34 @@ pub struct SimulatedEpisode {
     pub cause: Option<Failure>,
 }
 
-/// Whether a simulated stretch is the target answering or failing.
+/// Whether a simulated stretch is the target answering, answering slowly, or failing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SimulatedState {
     Up,
+    Degraded,
     Down,
+}
+
+/// What the simulator needs to know to produce a `degraded` stretch.
+///
+/// The monitor's `degraded_after_ms` and `degraded_after` decide whether a target can be
+/// degraded at all and how long the stretch has to last to be plausible at its interval;
+/// a threshold of `0` disables it, exactly as it does in the monitor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SimulatedRules {
+    pub degraded_after_ms: u64,
+    pub degraded_after: u32,
+    pub interval: Duration,
+}
+
+impl Default for SimulatedRules {
+    fn default() -> Self {
+        SimulatedRules {
+            degraded_after_ms: 0,
+            degraded_after: 3,
+            interval: Duration::from_secs(5),
+        }
+    }
 }
 
 /// The timeout a simulated failure states: the one a target runs with unless it configures
@@ -279,12 +302,17 @@ pub fn simulated_day(
     seed: u64,
     day_start_ms: i64,
     fault_rate: f64,
+    rules: SimulatedRules,
 ) -> Vec<SimulatedEpisode> {
     match endpoint {
-        Endpoint::Icmp { .. } => icmp::simulated_day(endpoint, seed, day_start_ms, fault_rate),
-        Endpoint::Tcp { .. } => tcp::simulated_day(endpoint, seed, day_start_ms, fault_rate),
-        Endpoint::Dns { .. } => dns::simulated_day(endpoint, seed, day_start_ms, fault_rate),
-        Endpoint::Http { .. } => http::simulated_day(endpoint, seed, day_start_ms, fault_rate),
+        Endpoint::Icmp { .. } => {
+            icmp::simulated_day(endpoint, seed, day_start_ms, fault_rate, rules)
+        }
+        Endpoint::Tcp { .. } => tcp::simulated_day(endpoint, seed, day_start_ms, fault_rate, rules),
+        Endpoint::Dns { .. } => dns::simulated_day(endpoint, seed, day_start_ms, fault_rate, rules),
+        Endpoint::Http { .. } => {
+            http::simulated_day(endpoint, seed, day_start_ms, fault_rate, rules)
+        }
     }
 }
 
@@ -293,31 +321,165 @@ pub fn simulated_day(
 /// `answer` is called once for every stretch the target is up, `fail` once for every stretch
 /// it is down, and the two draw from a stream of their own — seeded by the method's name, so
 /// an ICMP target and a TCP target of the same schedule do not share their draws.
+/// The schedule one simulated day is drawn from: the same tuple for the answers, the
+/// failures and the slow windows.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SimulatedSchedule<'a> {
+    pub seed: u64,
+    pub day_start_ms: i64,
+    pub fault_rate: f64,
+    pub rules: SimulatedRules,
+    pub purpose: &'a str,
+}
+
 pub(crate) fn simulated_episodes(
     endpoint: &Endpoint,
-    seed: u64,
-    day_start_ms: i64,
-    fault_rate: f64,
-    purpose: &str,
+    schedule: SimulatedSchedule<'_>,
     mut answer: impl FnMut(&mut crate::sim::rng::Rng) -> i64,
     mut fail: impl FnMut(&mut crate::sim::rng::Rng) -> Failure,
 ) -> Vec<SimulatedEpisode> {
+    let SimulatedSchedule {
+        seed,
+        day_start_ms,
+        fault_rate,
+        rules,
+        purpose,
+    } = schedule;
     let key = endpoint.to_string();
     let mut rng = crate::sim::rng::Rng::for_draw(seed, &key, day_start_ms, purpose);
-    crate::sim::day(seed, &key, day_start_ms, fault_rate)
-        .into_iter()
-        .map(|stretch| SimulatedEpisode {
-            state: if stretch.up {
-                SimulatedState::Up
-            } else {
-                SimulatedState::Down
-            },
-            from_ms: stretch.from_ms,
-            to_ms: stretch.to_ms,
-            rtt_us: stretch.up.then(|| answer(&mut rng)),
-            cause: (!stretch.up).then(|| fail(&mut rng)),
-        })
-        .collect()
+    // Slow stretches draw from a stream of their own: they neither consume the draws of the
+    // answers and failures nor depend on them.
+    let mut slow_rng = crate::sim::rng::Rng::for_draw(seed, &key, day_start_ms, "slow");
+    let mut remaining = slow_spells(rules.degraded_after_ms, crate::sim::life(seed, &key));
+
+    let mut episodes = Vec::new();
+    for stretch in crate::sim::day(seed, &key, day_start_ms, fault_rate) {
+        if !stretch.up {
+            episodes.push(SimulatedEpisode {
+                state: SimulatedState::Down,
+                from_ms: stretch.from_ms,
+                to_ms: stretch.to_ms,
+                rtt_us: None,
+                cause: Some(fail(&mut rng)),
+            });
+            continue;
+        }
+
+        let windows = if remaining == 0 {
+            Vec::new()
+        } else {
+            slow_windows(&stretch, rules, &mut slow_rng, remaining)
+        };
+        remaining = remaining.saturating_sub(windows.len());
+
+        let mut cursor = stretch.from_ms;
+        for (from_ms, to_ms) in windows {
+            if from_ms > cursor {
+                episodes.push(SimulatedEpisode {
+                    state: SimulatedState::Up,
+                    from_ms: cursor,
+                    to_ms: from_ms,
+                    rtt_us: Some(answer(&mut rng)),
+                    cause: None,
+                });
+            }
+            episodes.push(SimulatedEpisode {
+                state: SimulatedState::Degraded,
+                from_ms,
+                to_ms,
+                rtt_us: Some(slow_rtt(rules.degraded_after_ms, &mut slow_rng)),
+                cause: Some(Failure::new(
+                    Code::ProbeSlow,
+                    &Details {
+                        timeout: Some(Duration::from_millis(rules.degraded_after_ms)),
+                        count: Some(u64::from(rules.degraded_after)),
+                        ..Details::default()
+                    },
+                )),
+            });
+            cursor = to_ms;
+        }
+        if cursor < stretch.to_ms {
+            episodes.push(SimulatedEpisode {
+                state: SimulatedState::Up,
+                from_ms: cursor,
+                to_ms: stretch.to_ms,
+                rtt_us: Some(answer(&mut rng)),
+                cause: None,
+            });
+        }
+    }
+    episodes
+}
+
+/// How many slow spells a day a target that can degrade holds.
+///
+/// The stricter the threshold, the rarer a spell that crosses it: six a day at 250 ms or
+/// less, three up to a second, one above. A flapping target holds twice as many, and a
+/// target that never fails, or a threshold of `0`, holds none.
+fn slow_spells(threshold_ms: u64, life: crate::sim::Life) -> usize {
+    if threshold_ms == 0 {
+        return 0;
+    }
+    let base = if threshold_ms <= 250 {
+        6
+    } else if threshold_ms <= 1_000 {
+        3
+    } else {
+        1
+    };
+    match life {
+        crate::sim::Life::AlwaysUp => 0,
+        crate::sim::Life::Occasional => base,
+        crate::sim::Life::Flapping => base * 2,
+    }
+}
+
+/// The shortest slow window: even a fast interval must show a stretch a reader can see.
+const MIN_SLOW_MS: i64 = 60_000;
+/// The longest slow window: a degradation is a stretch, not a second outage.
+const MAX_SLOW_MS: i64 = 3_600_000;
+
+/// The slow windows inside one `up` stretch, in order and separated by an `up` piece.
+///
+/// Each lasts at least `degraded_after` probes at the target's interval, so it is plausible
+/// at that interval, and the first and the last leave an `up` stretch on both sides: a first
+/// verdict is never `degraded`, exactly as in the monitor (FR-40). A stretch with no room
+/// holds none, and the day keeps the spells that fit.
+fn slow_windows(
+    stretch: &crate::sim::Stretch,
+    rules: SimulatedRules,
+    rng: &mut crate::sim::rng::Rng,
+    limit: usize,
+) -> Vec<(i64, i64)> {
+    let needed = (i64::from(rules.degraded_after))
+        .saturating_mul(rules.interval.as_millis() as i64)
+        .max(MIN_SLOW_MS);
+    let duration = needed.min(MAX_SLOW_MS);
+    let lead = (rules.interval.as_millis() as i64).max(1);
+
+    let mut windows = Vec::new();
+    let mut cursor = stretch.from_ms;
+    for _ in 0..limit {
+        let low = cursor.saturating_add(lead);
+        let high = stretch.to_ms.saturating_sub(duration).saturating_sub(lead);
+        if high <= low {
+            break;
+        }
+        let start = rng.between(low, high);
+        let end = start.saturating_add(duration);
+        windows.push((start, end));
+        cursor = end;
+    }
+    windows
+}
+
+/// The round-trip time of a slow answer, in microseconds: at or above the threshold in
+/// milliseconds, drawn from the stream.
+fn slow_rtt(threshold_ms: u64, rng: &mut crate::sim::rng::Rng) -> i64 {
+    let threshold = threshold_ms.saturating_mul(1_000).min(i64::MAX as u64) as i64;
+    let spread = threshold.max(50_000);
+    threshold.saturating_add(rng.between(0, spread))
 }
 
 /// The outcome of one probe cycle.

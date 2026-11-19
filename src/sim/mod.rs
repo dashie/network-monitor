@@ -372,9 +372,11 @@ mod tests {
 #[cfg(test)]
 mod probe_sim {
     use std::net::Ipv4Addr;
+    use std::time::Duration;
 
     use crate::probe::{
-        simulated_day, Endpoint, RecordType, Scheme, SimulatedEpisode, SimulatedState, StatusMatch,
+        simulated_day, Endpoint, RecordType, Scheme, SimulatedEpisode, SimulatedRules,
+        SimulatedState, StatusMatch,
     };
 
     const DAY_START_MS: i64 = 1_767_225_600_000;
@@ -420,16 +422,22 @@ mod probe_sim {
     #[test]
     fn the_same_tuple_replays_the_same_day_and_another_seed_draws_another() {
         for endpoint in endpoints() {
-            let first = simulated_day(&endpoint, 5, DAY_START_MS, RATE);
+            let first = simulated_day(&endpoint, 5, DAY_START_MS, RATE, SimulatedRules::default());
             covers(&first, DAY_START_MS);
             assert_eq!(
                 first,
-                simulated_day(&endpoint, 5, DAY_START_MS, RATE),
+                simulated_day(&endpoint, 5, DAY_START_MS, RATE, SimulatedRules::default()),
                 "{endpoint} is not reproducible"
             );
-            let other = simulated_day(&endpoint, 6, DAY_START_MS, RATE);
+            let other = simulated_day(&endpoint, 6, DAY_START_MS, RATE, SimulatedRules::default());
             assert_ne!(first, other, "{endpoint} ignores the seed");
-            let later = simulated_day(&endpoint, 5, DAY_START_MS + super::DAY_MS, RATE);
+            let later = simulated_day(
+                &endpoint,
+                5,
+                DAY_START_MS + super::DAY_MS,
+                RATE,
+                SimulatedRules::default(),
+            );
             assert_ne!(first, later, "{endpoint} ignores the day");
         }
     }
@@ -445,11 +453,15 @@ mod probe_sim {
                     3 + day,
                     DAY_START_MS + day as i64 * super::DAY_MS,
                     RATE,
+                    SimulatedRules::default(),
                 ) {
                     match episode.state {
                         SimulatedState::Up => {
                             assert!(episode.cause.is_none(), "an answer states no cause");
                             assert!(episode.rtt_us.is_some_and(|rtt| rtt > 0));
+                        }
+                        SimulatedState::Degraded => {
+                            panic!("the default rules produce no degradation")
                         }
                         SimulatedState::Down => {
                             faults += 1;
@@ -469,16 +481,86 @@ mod probe_sim {
         }
     }
 
+    /// A threshold carves `up -> degraded -> up` inside an up stretch, with the monitor's
+    /// cause and a latency above the threshold, and the same tuple replays it exactly.
+    #[test]
+    fn a_slow_threshold_carves_a_degraded_window_deterministically() {
+        let rules = SimulatedRules {
+            degraded_after_ms: 200,
+            degraded_after: 3,
+            interval: Duration::from_secs(5),
+        };
+        let endpoint = Endpoint::Icmp {
+            address: Ipv4Addr::new(1, 1, 1, 1),
+        };
+        let strict = SimulatedRules {
+            degraded_after_ms: 2_000,
+            ..rules
+        };
+        let mut seen = 0;
+        let mut seen_strict = 0;
+        for seed in 0..40 {
+            let episodes = simulated_day(&endpoint, seed, DAY_START_MS, RATE, rules);
+            covers(&episodes, DAY_START_MS);
+            assert_ne!(
+                episodes[0].state,
+                SimulatedState::Degraded,
+                "a first verdict is never degraded (FR-40)"
+            );
+            assert_eq!(
+                episodes,
+                simulated_day(&endpoint, seed, DAY_START_MS, RATE, rules),
+                "the slow window is not deterministic"
+            );
+            for episode in &episodes {
+                if episode.state != SimulatedState::Degraded {
+                    continue;
+                }
+                seen += 1;
+                assert!(episode.to_ms - episode.from_ms >= 60_000);
+                let cause = episode.cause.clone().expect("a degradation states why");
+                assert_eq!(cause.code(), "PROBE.SLOW");
+                assert!(
+                    episode.rtt_us.is_some_and(|rtt| rtt >= 200_000),
+                    "a slow answer is above the threshold"
+                );
+            }
+
+            // The stricter the threshold, the rarer a spell, but never never.
+            let episodes = simulated_day(&endpoint, seed, DAY_START_MS, RATE, strict);
+            covers(&episodes, DAY_START_MS);
+            seen_strict += episodes
+                .iter()
+                .filter(|episode| episode.state == SimulatedState::Degraded)
+                .count();
+        }
+        assert!(seen > 0, "no seed produced a degradation");
+        assert!(
+            seen_strict > 0,
+            "a stricter threshold produced nothing at all"
+        );
+        assert!(
+            seen > seen_strict * 2,
+            "the threshold does not change how often a degradation happens: {seen} vs {seen_strict}"
+        );
+    }
+
     #[test]
     fn a_fault_that_crosses_midnight_is_continuous_across_the_two_days() {
         for endpoint in endpoints() {
             for day in 0..60 {
                 let start = DAY_START_MS + day * super::DAY_MS;
-                let tonight = simulated_day(&endpoint, 9, start, RATE);
+                let tonight = simulated_day(&endpoint, 9, start, RATE, SimulatedRules::default());
                 let Some(last) = tonight.last() else {
                     continue;
                 };
-                let tomorrow = simulated_day(&endpoint, 9, start + super::DAY_MS, RATE);
+                let tomorrow = simulated_day(
+                    &endpoint,
+                    9,
+                    start + super::DAY_MS,
+                    RATE,
+                    SimulatedRules::default(),
+                );
                 covers(&tomorrow, start + super::DAY_MS);
                 if !last.state.eq(&SimulatedState::Down) || last.to_ms <= start + super::DAY_MS {
                     continue;

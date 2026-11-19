@@ -94,7 +94,7 @@
       "get": {
         "operationId": "listTimeSeriesSamples",
         "summary": "One target's state on a regular grid, oldest first",
-        "description": "Samples one target's timeline every `step` seconds. A sample states the state that held at its instant, `up`, `down` or `unknown` as `v`, next to `t` in epoch milliseconds; when the request asks with `ts` or `ts=true` it also states `ts`, localised in `tz`. An instant after `now` is `unknown` because unelapsed time is not measured. Samples lie on the epoch grid of `step`: `from <= at < to` and `at` is a multiple of `step * 1000`. The window is the last hour when the request names no `from`, and `to` defaults to `now`. `target` is required. `limit` and `offset` count samples, and only the timeline the page needs is read, so the cost follows `limit`, not the width of the window.",
+        "description": "Samples one target's timeline every `step` seconds. A sample states the state that held at its instant, `up`, `degraded`, `down` or `unknown` as `v`, next to `t` in epoch milliseconds; when the request asks with `ts` or `ts=true` it also states `ts`, localised in `tz`. An instant after `now` is `unknown` because unelapsed time is not measured. Samples lie on the epoch grid of `step`: `from <= at < to` and `at` is a multiple of `step * 1000`. The window is the last hour when the request names no `from`, and `to` defaults to `now`. `target` is required. `limit` and `offset` count samples, and only the timeline the page needs is read, so the cost follows `limit`, not the width of the window.",
         "parameters": [
           { "$ref": "#/components/parameters/TargetRequired" },
           { "$ref": "#/components/parameters/From" },
@@ -345,7 +345,7 @@
           },
           "v": {
             "type": "string",
-            "enum": ["up", "down", "unknown"],
+            "enum": ["up", "degraded", "down", "unknown"],
             "description": "The state that held at the instant; unknown before the first event and after now"
           }
         }
@@ -406,7 +406,7 @@
             "type": ["string", "null"],
             "description": "The interface the probe is bound to, or null for the default route"
           },
-          "state": { "type": "string", "enum": ["up", "down", "unknown"] },
+          "state": { "type": "string", "enum": ["up", "degraded", "down", "unknown"] },
           "stateSince": { "type": "string", "format": "date-time" },
           "stateSinceMs": { "type": "integer", "description": "The same instant in epoch milliseconds" },
           "firstSeenAt": { "type": "string", "format": "date-time" },

@@ -38,6 +38,20 @@ impl Sim {
 
     /// The same server, with the fault rate stated when the test wants a quiet board.
     fn start_with(seed: u64, history: &str, fault_rate: Option<&str>) -> Sim {
+        Sim::start_with_flags(seed, history, fault_rate, &[])
+    }
+
+    /// The same server, with a slow threshold so the board holds degraded stretches.
+    fn start_degraded(seed: u64, history: &str) -> Sim {
+        Sim::start_with_flags(
+            seed,
+            history,
+            None,
+            &["--degraded-after-ms", "200", "--degraded-after", "3"],
+        )
+    }
+
+    fn start_with_flags(seed: u64, history: &str, fault_rate: Option<&str>, extra: &[&str]) -> Sim {
         let directory = tempfile::tempdir().expect("a temporary directory");
         let address = format!("127.0.0.1:{}", free_port());
         let mut arguments = vec![
@@ -53,6 +67,7 @@ impl Sim {
             arguments.push("--fault-rate".to_string());
             arguments.push(rate.to_string());
         }
+        arguments.extend(extra.iter().map(|flag| flag.to_string()));
         for target in [
             "icmp:1.1.1.1",
             "icmp:192.168.1.1",
@@ -180,6 +195,37 @@ fn start_of_today() -> i64 {
         .expect("a clock after the epoch")
         .as_millis() as i64;
     now.div_euclid(DAY_MS) * DAY_MS
+}
+
+/// How many `degraded` samples the two ICMP targets serve in the window.
+fn degraded_samples(sim: &Sim, from: i64, to: i64) -> usize {
+    ["1.1.1.1", "192.168.1.1"]
+        .iter()
+        .map(|target| {
+            sim.body(&format!(
+                "/api/v1/timeseries?target={target}&from={from}&to={to}&step=300&limit=10000"
+            ))
+            .matches("\"v\": \"degraded\"")
+            .count()
+        })
+        .sum()
+}
+
+/// The answer with the value of its `generatedAt` member blanked, so two processes can be
+/// compared on the same request.
+fn without_generated_at_field(body: &str) -> String {
+    let marker = "\"generatedAt\":";
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(at) = rest.find(marker) {
+        out.push_str(&rest[..at]);
+        out.push_str("\"generatedAt\":0");
+        let after = &rest[at + marker.len()..];
+        let skip = after.find([',', '}']).unwrap_or(after.len());
+        rest = &after[skip..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The answer without the one line that states the instant it was generated at.
@@ -397,4 +443,54 @@ fn the_simulated_mode_writes_nothing() {
         .map(|entry| format!("{:?}", entry.expect("an entry").path()))
         .collect();
     assert!(written.is_empty(), "the simulation wrote {written:?}");
+}
+
+/// A threshold on the simulated board turns some stretches into `degraded`, on the page, in
+/// the series and in the export, and the default board has none.
+#[test]
+fn a_simulated_target_with_a_slow_threshold_serves_degraded_stretches() {
+    let sim = Sim::start_degraded(7, "3d");
+    let to = start_of_today();
+    let from = to - 2 * DAY_MS;
+
+    let page = sim.body("/?window=24h");
+    assert!(
+        page.contains("fill=\"#8bc34a\""),
+        "the page draws a light-green band: {page}"
+    );
+
+    let low = degraded_samples(&sim, from, to);
+    assert!(low > 0, "no target served a degraded sample");
+
+    // The threshold is a knob, not decoration: a stricter one yields fewer spells, but the
+    // board still holds some.
+    let strict = Sim::start_with_flags(
+        7,
+        "3d",
+        None,
+        &["--degraded-after-ms", "2000", "--degraded-after", "3"],
+    );
+    let high = degraded_samples(&strict, from, to);
+    assert!(high > 0, "a 2 s threshold produced no degradation at all");
+    assert!(
+        low > high,
+        "the threshold does not change the number of degraded samples: {low} vs {high}"
+    );
+
+    // The same seed replays the same slow stretches: no draw depends on the request order.
+    let again = Sim::start_degraded(7, "3d");
+    let path =
+        format!("/api/v1/timeseries?target=1.1.1.1&from={from}&to={to}&step=300&limit=10000");
+    assert_eq!(
+        without_generated_at_field(&sim.body(&path)),
+        without_generated_at_field(&again.body(&path))
+    );
+
+    // A board without a threshold carries no degradation at all.
+    let plain = Sim::start(7, "3d");
+    assert!(!plain.body("/?window=24h").contains("fill=\"#8bc34a\""));
+    let series = plain.body(&format!(
+        "/api/v1/timeseries?target=1.1.1.1&from={from}&to={to}&step=300&limit=10000"
+    ));
+    assert!(!series.contains("\"v\": \"degraded\""));
 }

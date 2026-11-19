@@ -17,7 +17,9 @@ pub fn up_ranges(segments: &[TimelineSegment]) -> Vec<(i64, i64)> {
     let mut ranges = Vec::new();
     let mut open: Option<i64> = None;
     for segment in segments {
-        if segment.state == TargetState::Up {
+        if matches!(segment.state, TargetState::Up | TargetState::Degraded) {
+            // A degraded stretch is reachable, so it neither breaks nor restarts a run:
+            // availability measures reachability, not quality.
             open.get_or_insert(segment.from_ms);
         } else if let Some(from_ms) = open.take() {
             ranges.push((from_ms, segment.from_ms));
@@ -180,6 +182,16 @@ mod tests {
             segment(TargetState::Up, 30, 40),
         ];
         assert_eq!(up_runs(&segments), vec![20_000, 10_000]);
+    }
+
+    #[test]
+    fn a_degraded_stretch_is_reachable_and_does_not_break_a_run() {
+        let segments = [
+            segment(TargetState::Up, 0, 10),
+            segment(TargetState::Degraded, 10, 20),
+            segment(TargetState::Up, 20, 30),
+        ];
+        assert_eq!(up_runs(&segments), vec![30_000]);
     }
 
     #[test]

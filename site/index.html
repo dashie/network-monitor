@@ -61,8 +61,9 @@
   <section id="top" class="hero">
     <h1>Reachability monitoring that records incidents, not samples</h1>
     <p class="lead">One executable, no runtime. It probes ICMP, TCP, DNS and HTTP — from the interface
-      you choose — writes a row to SQLite only when a target changes state, and serves that history as
-      a read-only page and a JSON API from the same process.</p>
+      you choose — writes a row to SQLite only when a target changes state — with optional flap
+      damping and a <code>degraded</code> state for a target that answers slowly —, and serves that
+      history as a read-only page and a JSON API from the same process.</p>
     <p class="actions">
       <a class="button primary" href="https://github.com/dashie/uptime-monitor">Get the source</a>
       <a class="button" href="#quick-start">Quick start</a>
@@ -150,7 +151,8 @@
         interface, a socket error — is logged and changes nothing: the tool never reports "cannot see
         the network" as "the network is down".</li>
       <li>Only a transition is written: the instant, the state reached, and — for a fault — a code and
-        one standard sentence carrying the details of the occurrence.</li>
+        one standard sentence carrying the details of the occurrence. A target that stays reachable
+        but slow can be recorded <code>degraded</code>, in its own light-green band.</li>
       <li>The page, the JSON API, the gzipped CSV export and <code>query</code> read the same rows. The
         page needs no account, no framework and no client-side chart library.</li>
     </ol>

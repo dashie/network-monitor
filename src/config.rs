@@ -29,6 +29,12 @@ pub const DEFAULT_RETENTION_DAYS: u64 = 0;
 pub const DEFAULT_STABILIZE_SECONDS: u64 = 60;
 /// The default monitor downtime recorded as unknown: one minute.
 pub const DEFAULT_GAP_AFTER_MS: u64 = 60_000;
+/// The default consecutive failures before a target is recorded `down`: the first one.
+pub const DEFAULT_DOWN_AFTER: u32 = 1;
+/// The default slow threshold; `0` keeps the `degraded` state unreachable.
+pub const DEFAULT_DEGRADED_AFTER_MS: u64 = 0;
+/// The default consecutive slow probes needed to enter `degraded` and to leave it.
+pub const DEFAULT_DEGRADED_AFTER: u32 = 3;
 /// The smallest non-zero downtime that is recorded as unknown.
 pub const MIN_GAP_AFTER_MS: u64 = 5_000;
 
@@ -62,6 +68,12 @@ pub struct FileConfig {
     pub retention_days: Option<u64>,
     /// Minimum monitor downtime recorded as unknown; `0` disables.
     pub gap_after_ms: Option<u64>,
+    /// Consecutive failed probes before a target is recorded `down`.
+    pub down_after: Option<u64>,
+    /// Round-trip time at or above which a reachable probe is slow; `0` disables `degraded`.
+    pub degraded_after_ms: Option<u64>,
+    /// Consecutive slow probes needed to enter `degraded` (and fast ones to leave it).
+    pub degraded_after: Option<u64>,
     pub telegram: Option<FileTelegram>,
     /// The channels enabled for global events and for every target that does not
     /// state its own list.
@@ -139,6 +151,12 @@ pub struct FileTarget {
     pub priority: Option<i64>,
     pub timeout_ms: Option<u64>,
     pub interval_ms: Option<u64>,
+    /// Consecutive failed probes before this target is recorded `down`.
+    pub down_after: Option<u64>,
+    /// Round-trip time at or above which a reachable probe is slow; `0` disables `degraded`.
+    pub degraded_after_ms: Option<u64>,
+    /// Consecutive slow probes needed to enter `degraded` (and fast ones to leave it).
+    pub degraded_after: Option<u64>,
     /// The channels this target enables instead of the root list.
     pub notify: Option<Vec<String>>,
 }
@@ -152,6 +170,9 @@ pub struct TargetSpec {
     pub priority: Option<i64>,
     pub timeout_ms: Option<u64>,
     pub interval_ms: Option<u64>,
+    pub down_after: Option<u64>,
+    pub degraded_after_ms: Option<u64>,
+    pub degraded_after: Option<u64>,
     pub notify: Option<Vec<String>>,
 }
 
@@ -164,6 +185,9 @@ pub struct Target {
     pub priority: Option<i64>,
     pub timeout: Duration,
     pub interval: Duration,
+    pub down_after: u32,
+    pub degraded_after_ms: u64,
+    pub degraded_after: u32,
 }
 
 impl Target {
@@ -190,6 +214,9 @@ impl Target {
         index: usize,
         timeout: Duration,
         interval: Duration,
+        down_after: u32,
+        degraded_after_ms: u64,
+        degraded_after: u32,
     ) -> Result<Target, ConfigError> {
         if spec.interface.is_some() && !matches!(spec.endpoint.method(), Method::Icmp | Method::Tcp)
         {
@@ -208,6 +235,17 @@ impl Target {
                 .unwrap_or(timeout),
             interval: millis(spec.interval_ms, format!("targets[{index}].interval_ms"))?
                 .unwrap_or(interval),
+            down_after: count(
+                spec.down_after,
+                format!("targets[{index}].down_after"),
+                down_after,
+            )?,
+            degraded_after_ms: spec.degraded_after_ms.unwrap_or(degraded_after_ms),
+            degraded_after: count(
+                spec.degraded_after,
+                format!("targets[{index}].degraded_after"),
+                degraded_after,
+            )?,
         })
     }
 }
@@ -227,6 +265,9 @@ impl TargetSpec {
         let mut priority = None;
         let mut timeout_ms = None;
         let mut interval_ms = None;
+        let mut down_after = None;
+        let mut degraded_after_ms = None;
+        let mut degraded_after = None;
         let mut record = None;
         let mut expect: Vec<String> = Vec::new();
 
@@ -249,12 +290,16 @@ impl TargetSpec {
                 "priority" => priority = Some(parse_priority(value)?),
                 "timeout_ms" => timeout_ms = Some(parse_millis(value)?),
                 "interval_ms" => interval_ms = Some(parse_millis(value)?),
+                "down_after" => down_after = Some(parse_count(value)?),
+                "degraded_after_ms" => degraded_after_ms = Some(parse_count(value)?),
+                "degraded_after" => degraded_after = Some(parse_count(value)?),
                 "record" => record = Some(value.to_string()),
                 "expect" => expect.push(value.to_string()),
                 other => {
                     return Err(format!(
                         "unknown target attribute '{other}' (expected interface, label, \
-                         priority, timeout_ms, interval_ms, record or expect)"
+                         priority, timeout_ms, interval_ms, down_after, degraded_after_ms, \
+                         degraded_after, record or expect)"
                     ))
                 }
             }
@@ -319,6 +364,9 @@ impl TargetSpec {
             priority,
             timeout_ms,
             interval_ms,
+            down_after,
+            degraded_after_ms,
+            degraded_after,
             notify: None,
         })
     }
@@ -433,6 +481,9 @@ impl TargetSpec {
             priority: target.priority,
             timeout_ms: target.timeout_ms,
             interval_ms: target.interval_ms,
+            down_after: target.down_after,
+            degraded_after_ms: target.degraded_after_ms,
+            degraded_after: target.degraded_after,
             notify: clean_list(target.notify),
         })
     }
@@ -449,6 +500,12 @@ pub struct Config {
     pub retention_days: u64,
     /// Minimum monitor downtime recorded as unknown; zero disables the feature.
     pub gap_after: Duration,
+    /// Consecutive failed probes before a target is recorded `down`.
+    pub down_after: u32,
+    /// Round-trip time at or above which a reachable probe is slow; `0` disables `degraded`.
+    pub degraded_after_ms: u64,
+    /// Consecutive slow probes needed to enter `degraded` (and fast ones to leave it).
+    pub degraded_after: u32,
     pub notify: NotificationConfig,
     pub targets: Vec<Target>,
 }
@@ -681,6 +738,9 @@ pub struct Overrides {
     pub listen: Option<String>,
     pub retention_days: Option<u64>,
     pub gap_after_ms: Option<u64>,
+    pub down_after: Option<u64>,
+    pub degraded_after_ms: Option<u64>,
+    pub degraded_after: Option<u64>,
     pub targets: Option<Vec<TargetSpec>>,
 }
 
@@ -826,6 +886,21 @@ impl Config {
             return Err(invalid("gap_after_ms", "is too large"));
         }
 
+        let down_after = count(
+            overrides.down_after.or(file.down_after),
+            "down_after".to_string(),
+            DEFAULT_DOWN_AFTER,
+        )?;
+        let degraded_after_ms = overrides
+            .degraded_after_ms
+            .or(file.degraded_after_ms)
+            .unwrap_or(DEFAULT_DEGRADED_AFTER_MS);
+        let degraded_after = count(
+            overrides.degraded_after.or(file.degraded_after),
+            "degraded_after".to_string(),
+            DEFAULT_DEGRADED_AFTER,
+        )?;
+
         let file_targets = file.targets;
         let specs = match overrides.targets {
             Some(specs) => specs,
@@ -852,7 +927,17 @@ impl Config {
         let targets = specs
             .into_iter()
             .enumerate()
-            .map(|(index, spec)| Target::resolve(spec, index, timeout, interval))
+            .map(|(index, spec)| {
+                Target::resolve(
+                    spec,
+                    index,
+                    timeout,
+                    interval,
+                    down_after,
+                    degraded_after_ms,
+                    degraded_after,
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
         ensure_unique(&targets)?;
         let notify = resolve_notifications(
@@ -871,6 +956,9 @@ impl Config {
             listen,
             retention_days,
             gap_after: Duration::from_millis(gap_after_ms),
+            down_after,
+            degraded_after_ms,
+            degraded_after,
             notify,
             targets,
         })
@@ -900,6 +988,9 @@ impl Config {
             listen: Option<String>,
             retention_days: u64,
             gap_after_ms: u64,
+            down_after: u32,
+            degraded_after_ms: u64,
+            degraded_after: u32,
             notify: Vec<String>,
             notification: Vec<SerializableNotification>,
             targets: Vec<SerializableTarget>,
@@ -963,6 +1054,12 @@ impl Config {
             #[serde(skip_serializing_if = "Option::is_none")]
             interval_ms: Option<u64>,
             #[serde(skip_serializing_if = "Option::is_none")]
+            down_after: Option<u32>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            degraded_after_ms: Option<u64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            degraded_after: Option<u32>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             notify: Option<Vec<String>>,
         }
 
@@ -1006,6 +1103,15 @@ impl Config {
                 }
                 if target.interval != self.interval {
                     serializable.interval_ms = Some(target.interval.as_millis() as u64);
+                }
+                if target.down_after != self.down_after {
+                    serializable.down_after = Some(target.down_after);
+                }
+                if target.degraded_after_ms != self.degraded_after_ms {
+                    serializable.degraded_after_ms = Some(target.degraded_after_ms);
+                }
+                if target.degraded_after != self.degraded_after {
+                    serializable.degraded_after = Some(target.degraded_after);
                 }
                 if let Some(effective) = self.notify.by_target.get(&target.key()) {
                     if *effective != self.notify.global {
@@ -1061,6 +1167,9 @@ impl Config {
             listen: self.listen.clone(),
             retention_days: self.retention_days,
             gap_after_ms: self.gap_after.as_millis() as u64,
+            down_after: self.down_after,
+            degraded_after_ms: self.degraded_after_ms,
+            degraded_after: self.degraded_after,
             notify: self.notify.global.clone(),
             notification,
             targets,
@@ -1099,6 +1208,16 @@ fn millis(value: Option<u64>, key: String) -> Result<Option<Duration>, ConfigErr
     }
 }
 
+/// A positive consecutive-probe count, with the global value as the default.
+fn count(value: Option<u64>, key: String, default: u32) -> Result<u32, ConfigError> {
+    match value {
+        None => Ok(default),
+        Some(0) => Err(invalid(key, "must be greater than zero")),
+        Some(count) if count > u32::MAX as u64 => Err(invalid(key, "is too large")),
+        Some(count) => Ok(count as u32),
+    }
+}
+
 /// The priority of a target: any integer, lower first. Absent leaves it unordered.
 fn parse_priority(text: &str) -> Result<i64, String> {
     text.parse::<i64>()
@@ -1110,6 +1229,13 @@ fn parse_millis(text: &str) -> Result<u64, String> {
         Ok(0) | Err(_) => Err(format!("'{text}' is not a positive number of milliseconds")),
         Ok(ms) => Ok(ms),
     }
+}
+
+/// A probe count; `Config::resolve` refuses zero where the key requires a positive number.
+fn parse_count(text: &str) -> Result<u64, String> {
+    text.trim()
+        .parse::<u64>()
+        .map_err(|_| format!("'{text}' is not a whole number"))
 }
 
 fn parse_method(name: &str) -> Result<Method, String> {
@@ -1600,6 +1726,148 @@ mod tests {
             Duration::from_millis(DEFAULT_GAP_AFTER_MS)
         );
         assert!(config.targets.is_empty());
+    }
+
+    #[test]
+    fn damping_defaults_to_one_failure_and_zero_is_refused() {
+        let config = resolve(Some(file(vec![icmp("1.1.1.1")])));
+        assert_eq!(config.down_after, DEFAULT_DOWN_AFTER);
+        assert_eq!(config.targets[0].down_after, DEFAULT_DOWN_AFTER);
+
+        let mut global = overrides();
+        global.down_after = Some(3);
+        let config = Config::resolve(Some(file(vec![icmp("1.1.1.1")])), global).unwrap();
+        assert_eq!(config.down_after, 3);
+        assert_eq!(
+            config.targets[0].down_after, 3,
+            "the global value is the default"
+        );
+
+        let mut refused = overrides();
+        refused.down_after = Some(0);
+        let error = Config::resolve(None, refused).unwrap_err().to_string();
+        assert!(error.contains("down_after"), "error: {error}");
+    }
+
+    #[test]
+    fn a_target_states_its_own_damping_count() {
+        let config = resolve(Some(file(vec![
+            FileTarget {
+                down_after: Some(3),
+                ..icmp("1.1.1.1")
+            },
+            icmp("8.8.8.8"),
+        ])));
+        assert_eq!(config.targets[0].down_after, 3);
+        assert_eq!(config.targets[1].down_after, 1);
+
+        let spec = TargetSpec::parse_spec("1.1.1.1,down_after=4").unwrap();
+        assert_eq!(spec.down_after, Some(4));
+
+        let refused = Config::resolve(
+            None,
+            Overrides {
+                targets: Some(vec![TargetSpec::parse_spec("1.1.1.1,down_after=0").unwrap()]),
+                ..Overrides::default()
+            },
+        );
+        let error = refused.unwrap_err().to_string();
+        assert!(error.contains("targets[0].down_after"), "error: {error}");
+    }
+
+    #[test]
+    fn the_rendered_configuration_states_damping_only_when_it_differs() {
+        let config = resolve(Some(file(vec![
+            FileTarget {
+                down_after: Some(3),
+                ..icmp("1.1.1.1")
+            },
+            icmp("8.8.8.8"),
+        ])));
+        let text = config.to_toml();
+        assert!(text.contains("down_after = 1"), "global default: {text}");
+        assert_eq!(
+            text.matches("down_after = 3").count(),
+            1,
+            "only the overriding target states it: {text}"
+        );
+
+        let parsed = parse(&text, Path::new("roundtrip.toml")).unwrap();
+        let again = resolve(Some(parsed));
+        assert_eq!(again.targets[0].down_after, 3);
+        assert_eq!(again.targets[1].down_after, 1);
+    }
+
+    #[test]
+    fn degradation_is_off_by_default_and_a_zero_count_is_refused() {
+        let config = resolve(Some(file(vec![icmp("1.1.1.1")])));
+        assert_eq!(config.degraded_after_ms, DEFAULT_DEGRADED_AFTER_MS);
+        assert_eq!(config.degraded_after, DEFAULT_DEGRADED_AFTER);
+        assert_eq!(config.targets[0].degraded_after_ms, 0);
+        assert_eq!(config.targets[0].degraded_after, 3);
+
+        let mut global = overrides();
+        global.degraded_after_ms = Some(200);
+        global.degraded_after = Some(5);
+        let config = Config::resolve(Some(file(vec![icmp("1.1.1.1")])), global).unwrap();
+        assert_eq!(config.degraded_after_ms, 200);
+        assert_eq!(config.targets[0].degraded_after_ms, 200);
+        assert_eq!(config.targets[0].degraded_after, 5);
+
+        let mut refused = overrides();
+        refused.degraded_after = Some(0);
+        let error = Config::resolve(None, refused).unwrap_err().to_string();
+        assert!(error.contains("degraded_after"), "error: {error}");
+
+        // A zero threshold is the documented way to turn the feature off.
+        let mut disabled = overrides();
+        disabled.degraded_after_ms = Some(0);
+        assert!(Config::resolve(None, disabled).is_ok());
+    }
+
+    #[test]
+    fn a_target_states_its_own_slow_threshold() {
+        let config = resolve(Some(file(vec![
+            FileTarget {
+                degraded_after_ms: Some(200),
+                degraded_after: Some(2),
+                ..icmp("1.1.1.1")
+            },
+            icmp("8.8.8.8"),
+        ])));
+        assert_eq!(config.targets[0].degraded_after_ms, 200);
+        assert_eq!(config.targets[0].degraded_after, 2);
+        assert_eq!(config.targets[1].degraded_after_ms, 0);
+        assert_eq!(config.targets[1].degraded_after, 3);
+
+        let spec = TargetSpec::parse_spec("tcp:1.1.1.1:443,degraded_after_ms=200,degraded_after=4")
+            .unwrap();
+        assert_eq!(spec.degraded_after_ms, Some(200));
+        assert_eq!(spec.degraded_after, Some(4));
+    }
+
+    #[test]
+    fn the_rendered_configuration_states_the_threshold_only_when_it_differs() {
+        let config = resolve(Some(file(vec![
+            FileTarget {
+                degraded_after_ms: Some(200),
+                ..icmp("1.1.1.1")
+            },
+            icmp("8.8.8.8"),
+        ])));
+        let text = config.to_toml();
+        assert!(text.contains("degraded_after_ms = 0"), "global: {text}");
+        assert!(text.contains("degraded_after = 3"), "global: {text}");
+        assert_eq!(
+            text.matches("degraded_after_ms = 200").count(),
+            1,
+            "only the overriding target states it: {text}"
+        );
+
+        let parsed = parse(&text, Path::new("roundtrip.toml")).unwrap();
+        let again = resolve(Some(parsed));
+        assert_eq!(again.targets[0].degraded_after_ms, 200);
+        assert_eq!(again.targets[1].degraded_after_ms, 0);
     }
 
     #[test]

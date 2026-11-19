@@ -142,7 +142,9 @@ target,label,interface,state,occurred_at,rtt_us
 ```
 
 Repeated states stay in the file: the importer drops them in one pass (`BR-1`), which is
-why the report of the import is smaller than the number of rows.
+why the report of the import is smaller than the number of rows. A `degraded` row is accepted
+like `up`, `down`, or `unknown`: the column takes the same four state tokens, and an archive
+written before the `degraded` state existed imports unchanged.
 
 The tests of the converter run without any dependency:
 

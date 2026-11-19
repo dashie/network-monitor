@@ -106,6 +106,10 @@ pub enum Event {
         target: TargetRef,
         cause: Cause,
     },
+    TargetDegraded {
+        target: TargetRef,
+        cause: Cause,
+    },
     TargetUp {
         target: TargetRef,
     },
@@ -124,6 +128,10 @@ pub struct Message {
 impl Message {
     pub fn target_down(target: TargetRef, cause: Cause, occurred_at_ms: i64) -> Self {
         Message::new(Event::TargetDown { target, cause }, occurred_at_ms)
+    }
+
+    pub fn target_degraded(target: TargetRef, cause: Cause, occurred_at_ms: i64) -> Self {
+        Message::new(Event::TargetDegraded { target, cause }, occurred_at_ms)
     }
 
     pub fn target_up(target: TargetRef, occurred_at_ms: i64) -> Self {
@@ -190,7 +198,9 @@ impl Message {
     /// The key of the target the event concerns, when it concerns one.
     pub fn target_key(&self) -> Option<&str> {
         match &self.event {
-            Event::TargetDown { target, .. } | Event::TargetUp { target } => Some(&target.key),
+            Event::TargetDown { target, .. }
+            | Event::TargetDegraded { target, .. }
+            | Event::TargetUp { target } => Some(&target.key),
             _ => None,
         }
     }
@@ -203,6 +213,7 @@ impl Message {
             Event::ConfigReload { .. } => "config_reload",
             Event::ChannelStarted { .. } => "channel_started",
             Event::TargetDown { .. } => "target_down",
+            Event::TargetDegraded { .. } => "target_degraded",
             Event::TargetUp { .. } => "target_up",
         }
     }
@@ -210,7 +221,7 @@ impl Message {
     /// The diagnostic level a log file writes this event at.
     pub fn severity(&self) -> Level {
         match self.event {
-            Event::TargetDown { .. } => Level::Warn,
+            Event::TargetDown { .. } | Event::TargetDegraded { .. } => Level::Warn,
             _ => Level::Info,
         }
     }
@@ -225,6 +236,12 @@ impl Message {
             Event::TargetDown { target, cause } => format!(
                 "{}\nCause: {} — {}\n{instant}",
                 target.headline("DOWN"),
+                cause.code,
+                cause.message
+            ),
+            Event::TargetDegraded { target, cause } => format!(
+                "{}\nCause: {} — {}\n{instant}",
+                target.headline("DEGRADED"),
                 cause.code,
                 cause.message
             ),
@@ -283,6 +300,12 @@ impl Message {
                 cause.code,
                 cause.message
             ),
+            Event::TargetDegraded { target, cause } => format!(
+                "{} cause={}: {}",
+                target.headline("DEGRADED"),
+                cause.code,
+                cause.message
+            ),
             Event::TargetUp { target } => target.headline("UP"),
             Event::Startup {
                 config,
@@ -338,6 +361,17 @@ impl Message {
                 out.push_str(&target_json(target));
                 out.push_str(",\"state\":");
                 out.push_str(&json::string(TargetState::Down.as_str()));
+                out.push_str(",\"cause\":{\"code\":");
+                out.push_str(&json::string(&cause.code));
+                out.push_str(",\"message\":");
+                out.push_str(&json::string(&cause.message));
+                out.push('}');
+            }
+            Event::TargetDegraded { target, cause } => {
+                out.push_str(",\"target\":");
+                out.push_str(&target_json(target));
+                out.push_str(",\"state\":");
+                out.push_str(&json::string(TargetState::Degraded.as_str()));
                 out.push_str(",\"cause\":{\"code\":");
                 out.push_str(&json::string(&cause.code));
                 out.push_str(",\"message\":");
@@ -425,6 +459,17 @@ mod tests {
         )
     }
 
+    fn degraded() -> Message {
+        Message::target_degraded(
+            TargetRef::new("icmp://1.1.1.1", Some("cloudflare-dns".to_string())),
+            Cause::new(
+                "PROBE.SLOW",
+                "the round-trip time stayed above 200 ms for 3 consecutive probes",
+            ),
+            AT_MS,
+        )
+    }
+
     fn up() -> Message {
         Message::target_up(TargetRef::new("icmp://1.1.1.1", None), 0)
     }
@@ -444,6 +489,7 @@ mod tests {
     fn all() -> Vec<Message> {
         vec![
             down(),
+            degraded(),
             up(),
             startup(),
             Message::shutdown(AT_MS),
@@ -460,6 +506,21 @@ mod tests {
             "DOWN cloudflare-dns (icmp://1.1.1.1)\n\
              Cause: ICMP.NO_REPLY — no reply within 2000 ms\n\
              2025-11-24T16:00:00.000Z"
+        );
+    }
+
+    #[test]
+    fn a_degradation_keeps_the_layout_of_a_fault() {
+        assert_eq!(
+            degraded().text(),
+            "DEGRADED cloudflare-dns (icmp://1.1.1.1)\n\
+             Cause: PROBE.SLOW — the round-trip time stayed above 200 ms for 3 consecutive probes\n\
+             2025-11-24T16:00:00.000Z"
+        );
+        assert_eq!(
+            degraded().summary(),
+            "DEGRADED cloudflare-dns (icmp://1.1.1.1) cause=PROBE.SLOW: \
+             the round-trip time stayed above 200 ms for 3 consecutive probes"
         );
     }
 
@@ -560,6 +621,7 @@ mod tests {
     #[test]
     fn the_event_names_are_stable() {
         assert_eq!(down().event_name(), "target_down");
+        assert_eq!(degraded().event_name(), "target_degraded");
         assert_eq!(up().event_name(), "target_up");
         assert_eq!(startup().event_name(), "startup");
         assert_eq!(Message::shutdown(0).event_name(), "shutdown");
@@ -576,6 +638,7 @@ mod tests {
     #[test]
     fn a_disconnection_is_a_warning_and_the_rest_is_information() {
         assert_eq!(down().severity(), Level::Warn);
+        assert_eq!(degraded().severity(), Level::Warn);
         assert_eq!(up().severity(), Level::Info);
         assert_eq!(startup().severity(), Level::Info);
     }
@@ -583,6 +646,7 @@ mod tests {
     #[test]
     fn the_target_key_is_present_only_for_target_events() {
         assert_eq!(down().target_key(), Some("icmp://1.1.1.1"));
+        assert_eq!(degraded().target_key(), Some("icmp://1.1.1.1"));
         assert_eq!(up().target_key(), Some("icmp://1.1.1.1"));
         assert_eq!(startup().target_key(), None);
         assert_eq!(Message::shutdown(0).target_key(), None);
@@ -597,6 +661,19 @@ mod tests {
              \"target\":{\"key\":\"icmp://1.1.1.1\",\"label\":\"cloudflare-dns\"},\
              \"state\":\"down\",\
              \"cause\":{\"code\":\"ICMP.NO_REPLY\",\"message\":\"no reply within 2000 ms\"}}"
+        );
+    }
+
+    #[test]
+    fn the_json_degraded_document_states_the_state_and_the_cause() {
+        assert_eq!(
+            degraded().json(None),
+            "{\"schema\":1,\"event\":\"target_degraded\",\
+             \"occurred_at\":\"2025-11-24T16:00:00.000Z\",\
+             \"target\":{\"key\":\"icmp://1.1.1.1\",\"label\":\"cloudflare-dns\"},\
+             \"state\":\"degraded\",\
+             \"cause\":{\"code\":\"PROBE.SLOW\",\
+             \"message\":\"the round-trip time stayed above 200 ms for 3 consecutive probes\"}}"
         );
     }
 

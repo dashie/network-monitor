@@ -28,6 +28,8 @@ pub struct Details<'a> {
     pub status: Option<u16>,
     pub expect: Option<&'a str>,
     pub timeout: Option<Duration>,
+    /// How many consecutive probes the condition held for.
+    pub count: Option<u64>,
     pub method: Option<&'a str>,
     pub other: Option<&'a str>,
     pub reason: Option<&'a str>,
@@ -65,11 +67,12 @@ pub enum Code {
     HttpMalformed,
     HttpHeadLimit,
     ProbeWrongMethod,
+    ProbeSlow,
 }
 
 impl Code {
     /// Every code, so a test can check that none is missing a code or a template.
-    pub const ALL: [Code; 26] = [
+    pub const ALL: [Code; 27] = [
         Code::IcmpNoReply,
         Code::IcmpSocket,
         Code::IcmpIo,
@@ -96,6 +99,7 @@ impl Code {
         Code::HttpMalformed,
         Code::HttpHeadLimit,
         Code::ProbeWrongMethod,
+        Code::ProbeSlow,
     ];
 
     /// The short token stored with an event and shown in a table.
@@ -127,6 +131,7 @@ impl Code {
             Code::HttpMalformed => "HTTP.MALFORMED",
             Code::HttpHeadLimit => "HTTP.HEAD_LIMIT",
             Code::ProbeWrongMethod => "PROBE.WRONG_METHOD",
+            Code::ProbeSlow => "PROBE.SLOW",
         }
     }
 
@@ -165,6 +170,9 @@ impl Code {
             Code::HttpMalformed => "{url} answered something that is not an HTTP answer: {reason}",
             Code::HttpHeadLimit => "{url} sent a head larger than the {expect} limit",
             Code::ProbeWrongMethod => "the {method} prober cannot check a {other} target",
+            Code::ProbeSlow => {
+                "the round-trip time stayed above {timeout} for {count} consecutive probes"
+            }
         }
     }
 }
@@ -239,6 +247,7 @@ fn value(name: &str, details: &Details<'_>) -> String {
         "timeout" => details
             .timeout
             .map(|timeout| format!("{} ms", timeout.as_millis())),
+        "count" => details.count.map(|count| count.to_string()),
         "method" => details.method.map(str::to_string),
         "other" => details.other.map(str::to_string),
         "reason" => details.reason.map(str::to_string),
@@ -264,6 +273,7 @@ mod tests {
             status: Some(503),
             expect: Some("200-399"),
             timeout: Some(Duration::from_millis(2_000)),
+            count: Some(3),
             method: Some("tcp"),
             other: Some("dns"),
             reason: Some("the socket went away"),

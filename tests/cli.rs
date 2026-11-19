@@ -21,7 +21,39 @@ fn show_config_prints_the_effective_configuration_without_a_file() {
         .stdout(predicate::str::contains("timeout_ms = 2000"))
         .stdout(predicate::str::contains("database = \"uptime-monitor.db\""))
         .stdout(predicate::str::contains("retention_days = 0"))
-        .stdout(predicate::str::contains("gap_after_ms = 60000"));
+        .stdout(predicate::str::contains("gap_after_ms = 60000"))
+        .stdout(predicate::str::contains("down_after = 1"));
+}
+
+#[test]
+fn show_config_reflects_the_damping_flag() {
+    let directory = tempfile::tempdir().unwrap();
+
+    monitor(directory.path())
+        .args(["--show-config", "--down-after", "3", "--target", "1.1.1.1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("down_after = 3"));
+}
+
+#[test]
+fn show_config_reflects_the_degradation_flags() {
+    let directory = tempfile::tempdir().unwrap();
+
+    monitor(directory.path())
+        .args([
+            "--show-config",
+            "--degraded-after-ms",
+            "200",
+            "--degraded-after",
+            "4",
+            "--target",
+            "1.1.1.1",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("degraded_after_ms = 200"))
+        .stdout(predicate::str::contains("degraded_after = 4"));
 }
 
 #[test]

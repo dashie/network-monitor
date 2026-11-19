@@ -11,7 +11,7 @@ use uptime_monitor::notify::fake::FakeNotifier;
 use uptime_monitor::notify::Notifier;
 use uptime_monitor::notify::{Event, Message};
 use uptime_monitor::probe::fake::{down, up, FakeProbe};
-use uptime_monitor::probe::{Code, Details, Endpoint, Probe, ProbeError};
+use uptime_monitor::probe::{Code, Details, Endpoint, Probe, ProbeError, Verdict};
 use uptime_monitor::shutdown::Shutdown;
 use uptime_monitor::store::{EventFilter, Store, TargetState};
 
@@ -312,6 +312,291 @@ fn test_config(database: &std::path::Path) -> Config {
         Overrides::default(),
     )
     .unwrap()
+}
+
+/// The same single loopback target, with a damping count.
+fn test_config_down_after(database: &std::path::Path, down_after: u64) -> Config {
+    Config::resolve(
+        Some(FileConfig {
+            interval_ms: Some(30),
+            timeout_ms: Some(500),
+            database: Some(database.to_string_lossy().into_owned()),
+            down_after: Some(down_after),
+            targets: Some(vec![FileTarget {
+                ip: Some("127.0.0.1".to_string()),
+                label: Some("loop-test".to_string()),
+                ..FileTarget::default()
+            }]),
+            ..FileConfig::default()
+        }),
+        Overrides::default(),
+    )
+    .unwrap()
+}
+
+/// Three consecutive failures record one `up -> down`, at the third one.
+#[test]
+fn a_flapping_target_records_no_down_until_the_configured_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("events.db");
+    let expected = database.clone();
+    let config = test_config_down_after(&database, 3);
+
+    let stop = Shutdown::new();
+    let running = stop.clone();
+    let prober: Arc<dyn Probe> = Arc::new(FakeProbe::scripted(vec![
+        Ok(up()),
+        Ok(down()),
+        Ok(down()),
+        Ok(down()),
+        Ok(up()),
+    ]));
+    let store = Arc::new(Mutex::new(Store::open_rw(&database).unwrap()));
+    let notifier = Arc::new(FakeNotifier::new());
+    let sink: Arc<dyn Notifier> = notifier.clone();
+
+    let handle = thread::spawn(move || {
+        monitor::run_with_notifier(
+            &config,
+            prober,
+            store,
+            &running,
+            None,
+            sink,
+            monitor::Start::default(),
+        )
+    });
+
+    wait_for_notifications(&notifier, 3, Duration::from_secs(5));
+    stop.request();
+    handle.join().unwrap().unwrap();
+
+    let reader = Store::open_ro(&expected).unwrap();
+    let events = reader.events(&EventFilter::default()).unwrap();
+    let chain: Vec<(&str, &str)> = events
+        .iter()
+        .rev()
+        .map(|event| (event.previous_state.as_str(), event.state.as_str()))
+        .collect();
+    assert_eq!(
+        chain,
+        vec![("unknown", "up"), ("up", "down"), ("down", "up")]
+    );
+
+    let names: Vec<&str> = notifier
+        .messages()
+        .iter()
+        .map(|message| message.event_name())
+        .collect();
+    assert_eq!(names, vec!["target_up", "target_down", "target_up"]);
+}
+
+fn up_with(rtt_ms: u64) -> Verdict {
+    Verdict::Up {
+        rtt: Duration::from_millis(rtt_ms),
+    }
+}
+
+/// The same single loopback target, with a slow threshold and a degradation count.
+fn test_config_degraded(
+    database: &std::path::Path,
+    degraded_after_ms: u64,
+    degraded_after: u64,
+    down_after: u64,
+) -> Config {
+    Config::resolve(
+        Some(FileConfig {
+            interval_ms: Some(30),
+            timeout_ms: Some(500),
+            database: Some(database.to_string_lossy().into_owned()),
+            down_after: Some(down_after),
+            degraded_after_ms: Some(degraded_after_ms),
+            degraded_after: Some(degraded_after),
+            targets: Some(vec![FileTarget {
+                ip: Some("127.0.0.1".to_string()),
+                label: Some("loop-test".to_string()),
+                ..FileTarget::default()
+            }]),
+            ..FileConfig::default()
+        }),
+        Overrides::default(),
+    )
+    .unwrap()
+}
+
+/// A slow but reachable target records `up -> degraded -> up`, with the cause and the
+/// notification the plan promises.
+#[test]
+fn a_slow_target_is_recorded_degraded_and_comes_back() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("events.db");
+    let expected = database.clone();
+    let config = test_config_degraded(&database, 200, 3, 1);
+
+    let stop = Shutdown::new();
+    let running = stop.clone();
+    // FR-6 makes the first verdict `up`; the degradation then needs three slow probes.
+    let prober: Arc<dyn Probe> = Arc::new(FakeProbe::scripted(vec![
+        Ok(up_with(250)),
+        Ok(up_with(250)),
+        Ok(up_with(250)),
+        Ok(up_with(250)),
+        Ok(up_with(20)),
+        Ok(up_with(20)),
+        Ok(up_with(20)),
+    ]));
+    let store = Arc::new(Mutex::new(Store::open_rw(&database).unwrap()));
+    let notifier = Arc::new(FakeNotifier::new());
+    let sink: Arc<dyn Notifier> = notifier.clone();
+
+    let handle = thread::spawn(move || {
+        monitor::run_with_notifier(
+            &config,
+            prober,
+            store,
+            &running,
+            None,
+            sink,
+            monitor::Start::default(),
+        )
+    });
+
+    wait_for_notifications(&notifier, 3, Duration::from_secs(5));
+    stop.request();
+    handle.join().unwrap().unwrap();
+
+    let reader = Store::open_ro(&expected).unwrap();
+    let events = reader.events(&EventFilter::default()).unwrap();
+    let chain: Vec<(&str, &str)> = events
+        .iter()
+        .rev()
+        .map(|event| (event.previous_state.as_str(), event.state.as_str()))
+        .collect();
+    assert_eq!(
+        chain,
+        vec![("unknown", "up"), ("up", "degraded"), ("degraded", "up")]
+    );
+
+    let degraded = events
+        .iter()
+        .find(|event| event.state == TargetState::Degraded)
+        .expect("the degraded event exists");
+    assert_eq!(degraded.cause.as_deref(), Some("PROBE.SLOW"));
+    assert_eq!(
+        degraded.cause_message.as_deref(),
+        Some("the round-trip time stayed above 200 ms for 3 consecutive probes")
+    );
+    assert_eq!(degraded.rtt_us, Some(250_000));
+
+    let names: Vec<&str> = notifier
+        .messages()
+        .iter()
+        .map(|message| message.event_name())
+        .collect();
+    assert_eq!(names, vec!["target_up", "target_degraded", "target_up"]);
+}
+
+/// A `down` verdict from `degraded` obeys the same damping count as from `up`.
+#[test]
+fn a_degraded_target_takes_down_after_its_failures() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("events.db");
+    let config = test_config_degraded(&database, 200, 1, 2);
+
+    let stop = Shutdown::new();
+    let running = stop.clone();
+    let prober: Arc<dyn Probe> = Arc::new(FakeProbe::scripted(vec![
+        Ok(up_with(250)),
+        Ok(up_with(250)),
+        Ok(down()),
+        Ok(down()),
+    ]));
+    let store = Arc::new(Mutex::new(Store::open_rw(&database).unwrap()));
+    let notifier = Arc::new(FakeNotifier::new());
+    let sink: Arc<dyn Notifier> = notifier.clone();
+
+    let handle = thread::spawn(move || {
+        monitor::run_with_notifier(
+            &config,
+            prober,
+            store,
+            &running,
+            None,
+            sink,
+            monitor::Start::default(),
+        )
+    });
+
+    wait_for_notifications(&notifier, 3, Duration::from_secs(5));
+    stop.request();
+    handle.join().unwrap().unwrap();
+
+    let names: Vec<&str> = notifier
+        .messages()
+        .iter()
+        .map(|message| message.event_name())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["target_up", "target_degraded", "target_down"],
+        "the second failure is the down, not the first"
+    );
+}
+
+/// A local error between failures neither delays nor triggers the transition (INV-5).
+#[test]
+fn a_local_error_does_not_break_the_damping_streak() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("events.db");
+    let config = test_config_down_after(&database, 3);
+
+    let stop = Shutdown::new();
+    let running = stop.clone();
+    let failure = ProbeError::of(
+        Code::TcpInterface,
+        &Details {
+            interface: Some("eth1"),
+            reason: Some("the interface disappeared"),
+            ..Details::default()
+        },
+    );
+    let prober: Arc<dyn Probe> = Arc::new(FakeProbe::scripted(vec![
+        Ok(up()),
+        Ok(down()),
+        Err(failure),
+        Ok(down()),
+        Ok(down()),
+    ]));
+    let store = Arc::new(Mutex::new(Store::open_rw(&database).unwrap()));
+    let notifier = Arc::new(FakeNotifier::new());
+    let sink: Arc<dyn Notifier> = notifier.clone();
+
+    let handle = thread::spawn(move || {
+        monitor::run_with_notifier(
+            &config,
+            prober,
+            store,
+            &running,
+            None,
+            sink,
+            monitor::Start::default(),
+        )
+    });
+
+    wait_for_notifications(&notifier, 2, Duration::from_secs(5));
+    stop.request();
+    handle.join().unwrap().unwrap();
+
+    let names: Vec<&str> = notifier
+        .messages()
+        .iter()
+        .map(|message| message.event_name())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["target_up", "target_down"],
+        "the error is silent and the third real failure is the transition"
+    );
 }
 
 /// Each recorded transition is one notification, and a local probe error is none.

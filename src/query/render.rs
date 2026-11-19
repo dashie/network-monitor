@@ -193,6 +193,36 @@ mod tests {
     }
 
     #[test]
+    fn a_degraded_state_is_printed_in_the_table_and_the_json() {
+        let mut row = state_row();
+        row.state = TargetState::Degraded;
+        let table = states(&[row], Format::Table);
+        assert!(table.contains("degraded"), "the table: {table}");
+        let json = states(&[state_row()], Format::Json);
+        assert!(!json.contains("degraded"));
+
+        let mut row = state_row();
+        row.state = TargetState::Degraded;
+        assert!(states(&[row], Format::Json).contains("\"state\":\"degraded\""));
+    }
+
+    #[test]
+    fn a_degraded_event_states_the_transition() {
+        let mut row = event_row();
+        row.previous_state = TargetState::Up;
+        row.state = TargetState::Degraded;
+        row.cause = Some("PROBE.SLOW".to_string());
+        row.cause_message = Some("the round-trip time stayed above 200 ms".to_string());
+
+        let table = events(&[row.clone()], Format::Table);
+        assert!(table.contains("up -> degraded"), "the table: {table}");
+        assert!(table.contains("PROBE.SLOW"));
+        let json = events(&[row], Format::Json);
+        assert!(json.contains("\"state\":\"degraded\""));
+        assert!(json.contains("\"cause\":\"PROBE.SLOW\""));
+    }
+
+    #[test]
     fn renders_empty_results_as_empty_arrays() {
         assert_eq!(states(&[], Format::Json), "[]");
         assert_eq!(events(&[], Format::Json), "[]");

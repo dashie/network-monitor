@@ -59,6 +59,8 @@ the tool was renamed (ADR-0040); the decisions themselves are unchanged.
 | ADR-0043 | Derive a regular series from the timeline instead of storing samples | accepted | 2026-11-18 | `GET /api/v1/timeseries` projects one lane onto an epoch grid of `step` seconds; half-open window, paging over samples, `unknown` before the first event and after `now`; no new table |
 | ADR-0044 | Accept relative and zoned instants on the JSON API through chrono/chrono-tz | accepted | 2026-11-18 | `now`, signed relative instants, dates and date-times without an offset, and `tz` (fixed offset or IANA name); exact `s`/`m`/`h`, calendar `d`/`w`/`mo`/`y`; UTC default; embedded tzdata |
 | ADR-0045 | Stream a large series as JSON Lines with the meta on the first line | accepted | 2026-11-18 | `GET /api/v1/timeseries/stream`, `application/x-ndjson`: `{"meta": …}` first, then one sample object per line; same parameters and errors; chunked and gzip like every data route |
+| ADR-0046 | Record a reachable-but-slow target as `degraded`, and damp `down` with a consecutive-failure count | accepted | 2026-11-19 | `down_after` (default 1) gates `down`; `degraded_after_ms` (default 0, off) and `degraded_after` (default 3) gate `degraded`; it is a transition with cause `PROBE.SLOW`, counts as reachable for availability, and schema 5 makes an older binary refuse the file |
+| ADR-0047 | Make every user-visible behaviour reproducible in the simulator | accepted | 2026-11-19 | A change that adds a state, an event, or a read surface extends `simulate` in the same plan and is gated by the same configuration; an exemption is recorded in the plan and approved by the operator |
 
 ## Records
 
@@ -136,7 +138,7 @@ Open a raw ICMP socket in-process, bind it to the interface with the platform op
 
 ## ADR-0004 — Persist transitions only, in embedded SQLite with WAL
 
-**Status:** accepted; the data model gains a third table for liveness in [ADR-0041](#adr-0041--record-monitor-downtime-as-unknown-instead-of-carrying-the-last-state) · **Date:** 2026-11-08
+**Status:** accepted; the data model gains a third table for liveness in [ADR-0041](#adr-0041--record-monitor-downtime-as-unknown-instead-of-carrying-the-last-state); the fourth state of [ADR-0046](#adr-0046--record-a-reachable-but-slow-target-as-degraded-and-damp-down-with-a-consecutive-failure-count) is still a transition, never a sample · **Date:** 2026-11-08
 
 ### Context
 
@@ -954,7 +956,7 @@ worse as soon as the table carried a row that is not a lost connection.
 ### Decision
 
 1. Every failure of a probe cycle is a `Failure { code, message }` built from `probe::failure`. The
-   **code** comes from a closed set of 26 values, uppercase and prefixed with the layer that
+   **code** comes from a closed set of 26 values — 27 once [ADR-0046](#adr-0046--record-a-reachable-but-slow-target-as-degraded-and-damp-down-with-a-consecutive-failure-count) adds `PROBE.SLOW`, the cause of a degradation, which is a verdict and not a local failure —, uppercase and prefixed with the layer that
    reported it (`ICMP.NO_REPLY`, `TCP.REFUSED`, `DNS.NXDOMAIN`, `HTTP.UNEXPECTED_STATUS`,
    `PROBE.WRONG_METHOD`). The **message** is one sentence per code, declared once as a template and
    rendered with a `Details` record of the occurrence; a detail a code does not supply reads
@@ -1424,7 +1426,7 @@ Two constraints shape any answer:
 
 ## ADR-0032 — Serve a deterministic simulated history from a dedicated `simulate` verb
 
-**Status:** accepted · **Date:** 2026-11-15
+**Status:** accepted; extended by [ADR-0047](#adr-0047--make-every-user-visible-behaviour-reproducible-in-the-simulator) · **Date:** 2026-11-15
 
 **Amended:** 2026-11-15 — how busy the board is, is an option: `--fault-rate` states the faults a
 day of a target that fails now and then holds, and the life of a target scales it. The shape of
@@ -2188,3 +2190,115 @@ The existing `unknown` token is reused; no new state is introduced.
   the import, and the grey `unknown` band already says "not measured".
 - **Retroactive gap detection for a database with no liveness record:** rejected — no previous
   liveness exists, so no gap can be claimed.
+
+
+## ADR-0046 — Record a reachable-but-slow target as `degraded`, and damp `down` with a consecutive-failure count
+
+**Status:** accepted · **Date:** 2026-11-19
+**Amended:** 2026-11-19 — the band is light green (`#8bc34a`), not amber, so a `degraded`
+stretch separates from the orange of a widened short fault and stays in the green family of a
+reachable target (extension E2 of plan 020).
+
+### Context
+
+A single lost packet was an outage: the state machine compared one verdict per cycle with
+the last recorded one, so a flaky link produced a storm of false incidents and alerts. On
+the other side, a link that stays reachable but slow never transitions at all, so the
+history — which stores transitions only — could not express "reachable but bad", and the
+operator could not see the degradation a latency graph would show. Both gaps were open
+questions in the product document.
+
+### Decision
+
+1. `down_after` is a global and per-target count, default `1`, with `--down-after` as its
+   flag: a target that was `up` is recorded `down` only after that many consecutive failed
+   probes. One success resets the count, a local probe failure neither increments nor resets
+   it, and the first verdict after a start or a gap is still recorded at once (`FR-6`).
+2. `degraded_after_ms` (default `0`, which disables the feature) is the round-trip time at
+   or above which a reachable probe is slow, and `degraded_after` (default `3`) is the number
+   of consecutive slow probes needed to enter `degraded` — and of fast ones to leave it.
+   Both are global and per-target keys with a flag.
+3. `degraded` is a fourth state and a real transition: persisted in `events` and `targets`,
+   drawn as a light-green band, served by the page and the JSON API, exported and imported, and
+   notified as `target_degraded` with the cause `PROBE.SLOW` and the round-trip time.
+4. `degraded` counts as reachable: it is not a fault, down time ignores it, an `up` run
+   continues across it, and a fault that was open closes on it like on any other event.
+5. Schema version `5` adds no column; it exists so a binary that predates the fourth state
+   refuses a database that may hold `degraded` (`BR-9`) instead of failing to parse it.
+
+### Consequences
+
+- False outages drop, and a degradation becomes visible, notifiable and queryable without a
+  new table: the storage stays proportional to transitions (`ADR-0004`, `ADR-0043`).
+- Every consumer of the state vocabulary grows by one value, and every exhaustive match must
+  be revisited by the compiler; the CSV and the import accept one more token.
+- A `degraded` alert can precede an `up` alert, so an operator sees a recovery after a warning
+  of the same episode.
+- Both features are off by their defaults — `down_after = 1` and `degraded_after_ms = 0` —
+  so an existing configuration records exactly what it recorded before.
+
+### Alternatives considered
+
+- Persisting per-probe latency samples and deriving the state from them: rejected, it reverses
+  `ADR-0004` and `ADR-0043` and makes the database grow with the probe rate.
+- A notification-only degradation signal: rejected, it leaves no history and never reaches
+  the page or the API.
+- A `slow` flag on an `up` event: rejected, it breaks `BR-1` and the current-state projection
+  that every reader shares.
+- Symmetric damping with a separate `recovered_after`: rejected as unnecessary complexity;
+  one count governs both directions, and a recovery to `up` stays immediate.
+- Validating `degraded_after_ms` against `timeout_ms`: rejected, a threshold above the timeout
+  simply never triggers, because a probe slower than the timeout is `down`.
+
+
+## ADR-0047 — Make every user-visible behaviour reproducible in the simulator
+
+**Status:** accepted · **Date:** 2026-11-19
+
+### Context
+
+The simulator ([ADR-0032](#adr-0032--serve-a-deterministic-simulated-history-from-a-dedicated-simulate-verb))
+exists to review, demonstrate and test the page, the API and the export without a network and
+without waiting days for real data. When the `degraded` state was added
+([ADR-0046](#adr-0046--record-a-reachable-but-slow-target-as-degraded-and-damp-down-with-a-consecutive-failure-count)),
+the plan left it out of the generator, so the one surface that makes a state reviewable in a
+few seconds could not show it: the feature could be read in the code and in the tests, but not
+seen, and a reviewer had to trust a hand-built database or a deliberately throttled link.
+
+### Decision
+
+Every feature that adds or changes a user-visible state, event, or read surface must be
+reproducible in `simulate`, and that work belongs to the same plan and the same change that adds
+the feature — not to a follow-up.
+
+- The simulated form is gated by **the same configuration** the monitor reads, so the board
+  cannot show behaviour the configuration disables (`degraded_after_ms = 0` still means no
+  `degraded`).
+- It stays deterministic: the new behaviour is drawn from a stream keyed by
+  `(seed, target key, UTC day, purpose)`, so the same command replays it and a request costs
+  what it returns.
+- It must be visible through the normal surfaces — the page, the JSON API, the export — and
+  covered by `tests/simulate.rs`, which is the acceptance evidence of the change.
+- An exemption is allowed only when the behaviour cannot be modelled without a real network,
+  device, or wall-clock effect: the plan states the reason and the operator approves it. Silence
+  is not an exemption.
+
+### Consequences
+
+- A plan's steps include the simulator work and its tests; "the simulator still emits only
+  `up`/`down`" is no longer an acceptable non-goal for a state the monitor can record.
+- The generator gains one small, gated rule per feature instead of a parallel model: here a
+  slow window inside an up stretch, not per-probe latency samples.
+- Review and demonstration stop depending on network conditions, privileges, or time: a
+  screenshot, a defect and a comparison all reproduce from a seed.
+- The deterministic contract of `ADR-0032` is unchanged; an exemption that breaks it is not
+  allowed.
+
+### Alternatives considered
+
+- Build a fixture database by hand or with `import`: rejected, it is not reproducible, not
+  shareable as a command, and drifts from the generator.
+- Rely on a real slow link (`tc`/`netem`): rejected, it needs privileges and a network, and CI
+  must run without either.
+- Keep the simulator a fixed `up`/`down` model and accept the gap: rejected by this record;
+  it made a shipped state unverifiable through the product's own surface.

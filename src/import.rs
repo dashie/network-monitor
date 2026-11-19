@@ -633,6 +633,17 @@ mod tests {
     }
 
     #[test]
+    fn a_degraded_row_round_trips() {
+        let row = Row::parse(
+            "tcp://1.1.1.1:443,cloudflare,eth0,degraded,2026-11-08T00:00:00.000Z,250000",
+        )
+        .expect("a degraded row is part of the format");
+        assert_eq!(row.state, TargetState::Degraded);
+        assert_eq!(row.rtt_us, Some(250_000));
+        assert_eq!(row.target, "tcp://1.1.1.1:443");
+    }
+
+    #[test]
     fn an_unknown_row_is_parsed_as_a_gap_marker() {
         let row = Row::parse("1.1.1.1,,,unknown,2026-11-08T00:00:00.000Z,")
             .expect("an unknown row is a gap marker");

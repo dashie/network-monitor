@@ -20,6 +20,7 @@ use schema::{LIVENESS_SCHEMA, PRAGMAS, SCHEMA_META, SCHEMA_VERSION, TABLES};
 pub enum TargetState {
     Unknown,
     Up,
+    Degraded,
     Down,
 }
 
@@ -28,6 +29,7 @@ impl TargetState {
         match self {
             TargetState::Unknown => "unknown",
             TargetState::Up => "up",
+            TargetState::Degraded => "degraded",
             TargetState::Down => "down",
         }
     }
@@ -36,6 +38,7 @@ impl TargetState {
         match value {
             "unknown" => Some(TargetState::Unknown),
             "up" => Some(TargetState::Up),
+            "degraded" => Some(TargetState::Degraded),
             "down" => Some(TargetState::Down),
             _ => None,
         }
@@ -896,7 +899,7 @@ impl Store {
             if gap_after_ms > 0 && gap_start < now_ms && absent_ms > gap_after_ms as i64 {
                 let mut select = transaction.prepare(
                     "SELECT target, interface, current_state FROM targets
-                     WHERE current_state IN ('up', 'down')",
+                     WHERE current_state IN ('up', 'degraded', 'down')",
                 )?;
                 let rows = select
                     .query_map([], |row| {
@@ -2106,6 +2109,107 @@ mod tests {
             .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION, "a writing open migrates the file");
+    }
+
+    #[test]
+    fn the_four_states_round_trip_through_text() {
+        for state in [
+            TargetState::Unknown,
+            TargetState::Up,
+            TargetState::Degraded,
+            TargetState::Down,
+        ] {
+            assert_eq!(TargetState::parse(state.as_str()), Some(state));
+        }
+        assert_eq!(TargetState::parse("slow"), None);
+    }
+
+    /// Version 4 is the last one this history could have been written with; version 5
+    /// adds no DDL, it only lets an older binary refuse a file that may hold `degraded`.
+    #[test]
+    fn a_version_four_database_migrates_to_five_keeping_its_rows() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("events.db");
+        {
+            let mut store = Store::open_rw(&path).unwrap();
+            insert_known_target(&mut store, "icmp://1.1.1.1", TargetState::Up, 2_000);
+            store
+                .connection
+                .execute("UPDATE schema_meta SET version = 4", [])
+                .unwrap();
+        }
+
+        let store = Store::open_rw(&path).unwrap();
+        let version: i64 = store
+            .connection
+            .query_row("SELECT version FROM schema_meta", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 5, "the generic migration stamps the new version");
+        let events = store.events(&EventFilter::default()).unwrap();
+        assert_eq!(events.len(), 1, "every row survives the version bump");
+        assert_eq!(store.states().unwrap()[0].state, TargetState::Up);
+    }
+
+    /// BR-9: a file stamped with a version the binary does not know is refused, not
+    /// misread. The guard is `found > SCHEMA_VERSION`, so a binary built at 4 refuses a
+    /// file stamped 5 for the same reason this one refuses 6.
+    #[test]
+    fn a_database_from_a_newer_schema_is_refused() {
+        assert_eq!(SCHEMA_VERSION, 5);
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("events.db");
+        {
+            let store = Store::open_rw(&path).unwrap();
+            store
+                .connection
+                .execute("UPDATE schema_meta SET version = 6", [])
+                .unwrap();
+        }
+        assert!(matches!(
+            Store::open_ro(&path),
+            Err(StoreError::NewerSchema {
+                found: 6,
+                supported: 5
+            })
+        ));
+    }
+
+    #[test]
+    fn a_degraded_target_is_closed_as_unknown_by_begin_run() {
+        let directory = tempdir().unwrap();
+        let mut store = Store::open_rw(&directory.path().join("events.db")).unwrap();
+        store
+            .begin_run(1_000, 5_000, &["icmp://1.1.1.1".to_string()])
+            .unwrap();
+        insert_known_target(&mut store, "icmp://1.1.1.1", TargetState::Up, 2_000);
+        store
+            .record_transition(&Event {
+                state: TargetState::Degraded,
+                ..event("icmp://1.1.1.1", TargetState::Up, TargetState::Down, 3_000)
+            })
+            .unwrap();
+        let stored: String = store
+            .connection
+            .query_row("SELECT current_state FROM targets", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(stored, "degraded", "the projection holds the fourth state");
+
+        // The process died and returns more than gap_after_ms later.
+        let gap = store
+            .begin_run(100_000, 5_000, &["icmp://1.1.1.1".to_string()])
+            .unwrap()
+            .expect("a gap is recorded");
+        assert_eq!(gap.targets, 1);
+
+        let events = store.events(&EventFilter::default()).unwrap();
+        let last = events.first().expect("the synthetic event exists");
+        assert_eq!(last.previous_state, TargetState::Degraded);
+        assert_eq!(last.state, TargetState::Unknown);
+        let stored: String = store
+            .connection
+            .query_row("SELECT current_state FROM targets", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(stored, "unknown");
     }
 
     fn insert_known_target(store: &mut Store, target: &str, state: TargetState, at: i64) {

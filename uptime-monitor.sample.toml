@@ -47,6 +47,17 @@ timeout_ms = 2000
 # unknown and the first probe after the gap records the observed state. 0 disables.
 gap_after_ms = 60000
 
+# Consecutive failed probes before a target is recorded down. 1 (the default) records
+# the first failure at once. Every target may state its own `down_after`.
+down_after = 1
+
+# A reachable target whose round-trip time stays at or above `degraded_after_ms` for
+# `degraded_after` consecutive probes is recorded `degraded` instead of `up`, and returns
+# to `up` after as many probes below it. 0 (the default) keeps the state off. Every
+# target may state its own pair.
+degraded_after_ms = 0
+degraded_after = 3
+
 # The page the monitor serves when --listen is absent. Without this key and without
 # --listen, no page is served. `serve` and `simulate` ignore this key and keep their
 # own --listen flag.
@@ -70,6 +81,10 @@ ip = "1.1.1.1"
 label = "cloudflare-dns"
 priority = 1
 # notify = ["telegram", "audit"]   # replaces the root list for this target
+# down_after = 3                   # a flaky link needs three real failures
+# degraded_after_ms = 200          # reachable but slow at or above 200 ms
+# degraded_after = 3               # three slow probes to enter, three fast ones to leave
+
 
 [[targets]]
 ip = "192.168.1.1"

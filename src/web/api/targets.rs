@@ -71,3 +71,26 @@ fn target_record(row: &TargetStateRow, now: i64) -> String {
         json::option_i64(page::up_for(row.state, row.last_change_at_ms, now)),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_degraded_target_is_stated_by_its_own_name() {
+        let row = TargetStateRow {
+            target: "tcp://1.1.1.1:443".to_string(),
+            interface: None,
+            label: None,
+            state: crate::store::TargetState::Degraded,
+            first_seen_at_ms: 0,
+            last_change_at_ms: 1_000,
+            last_rtt_us: Some(250_000),
+        };
+        let record = target_record(&row, 5_000);
+        assert!(
+            record.contains("\"state\": \"degraded\""),
+            "unexpected record: {record}"
+        );
+    }
+}

@@ -68,6 +68,9 @@ A change is done when all of the following hold:
 - [ ] `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` are clean.
 - [ ] Every new configuration key has a default, a command-line override, and a precedence test.
 - [ ] The documents touched by the change are updated in the same pull request.
+- [ ] Every user-visible state, event or read surface the change adds is reproducible in
+      `simulate` ([ADR-0047](./docs/ADR.md)), or the plan records the reason it cannot be
+      simulated and the operator has approved that exemption.
 - [ ] All text is in English.
 - [ ] No `TODO` without a linked issue.
 - [ ] No new runtime dependency: the release binary still links only the platform C runtime.

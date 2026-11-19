@@ -194,6 +194,7 @@ pub fn simulated_day(
     seed: u64,
     day_start_ms: i64,
     fault_rate: f64,
+    rules: super::SimulatedRules,
 ) -> Vec<SimulatedEpisode> {
     let Endpoint::Tcp { host, port } = endpoint else {
         // The dispatcher chooses by method; this line cannot be reached from it.
@@ -203,10 +204,13 @@ pub fn simulated_day(
     let port = *port;
     super::simulated_episodes(
         endpoint,
-        seed,
-        day_start_ms,
-        fault_rate,
-        "tcp",
+        super::SimulatedSchedule {
+            seed,
+            day_start_ms,
+            fault_rate,
+            rules,
+            purpose: "tcp",
+        },
         |rng| rng.between(1_000, 80_000),
         |rng| {
             let stated = Details {

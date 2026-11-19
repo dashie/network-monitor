@@ -305,6 +305,24 @@ mod tests {
     }
 
     #[test]
+    fn a_degraded_segment_states_the_fourth_state() {
+        let segments = [
+            segment(TargetState::Up, 0, 10_000),
+            segment(TargetState::Degraded, 10_000, 20_000),
+        ];
+        let samples = sample_segments(&segments, 0, STEP, 4, 20_000);
+        assert_eq!(
+            samples,
+            vec![
+                (0, TargetState::Up),
+                (5_000, TargetState::Up),
+                (10_000, TargetState::Degraded),
+                (15_000, TargetState::Degraded),
+            ]
+        );
+    }
+
+    #[test]
     fn an_instant_after_now_is_unknown() {
         let segments = [segment(TargetState::Up, 0, 60_000)];
         let samples = sample_segments(&segments, 0, STEP, 4, 7_500);

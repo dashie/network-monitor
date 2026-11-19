@@ -1025,6 +1025,29 @@ mod tests {
             .contains("<div class=\"stat state down\"><b>down</b><span>for 16m</span></div>"));
     }
 
+    /// A degraded target is reachable, but its widget states its own state and colour.
+    #[test]
+    fn a_degraded_target_states_its_own_state() {
+        let mut degraded = target();
+        degraded.state = TargetState::Degraded;
+        let rendered = target_page(
+            &degraded,
+            &[day(0, 1, 60_000)],
+            &[],
+            &[],
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+            None,
+        );
+        assert!(rendered.contains(
+            "<div class=\"stat state degraded\"><b>degraded</b><span>for 16m</span></div>"
+        ));
+        assert!(
+            stylesheet().contains(".stat.state.degraded { background: #8bc34a; color: #17330a; }"),
+            "the tile uses the light green of the chart"
+        );
+    }
+
     /// A target that has never answered has no stretch to measure, so its widget states
     /// the state and nothing it cannot know.
     #[test]

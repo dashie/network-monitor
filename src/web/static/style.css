@@ -210,6 +210,7 @@ footer p:last-child { margin-bottom: 0; }
   color: #ffffff;
 }
 .stat.state.down { background: #c62828; }
+.stat.state.degraded { background: #8bc34a; color: #17330a; }
 .stat.state.unknown { background: #9e9e9e; }
 .stat.state span { opacity: 0.85; }
 /* Four widgets fit one row until the content is narrower than four readable tiles: they then

@@ -104,6 +104,7 @@ pub fn simulated_day(
     seed: u64,
     day_start_ms: i64,
     fault_rate: f64,
+    rules: super::SimulatedRules,
 ) -> Vec<SimulatedEpisode> {
     let Endpoint::Http {
         scheme,
@@ -123,10 +124,13 @@ pub fn simulated_day(
     let tls = *scheme == Scheme::Https;
     super::simulated_episodes(
         endpoint,
-        seed,
-        day_start_ms,
-        fault_rate,
-        "http",
+        super::SimulatedSchedule {
+            seed,
+            day_start_ms,
+            fault_rate,
+            rules,
+            purpose: "http",
+        },
         |rng| rng.between(10_000, 500_000),
         |rng| {
             const STATUSES: [u16; 4] = [500, 502, 503, 504];

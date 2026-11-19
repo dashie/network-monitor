@@ -201,6 +201,13 @@ constants at the top of `src/sim/mod.rs`, and the failures and latencies of a me
 that method in `src/probe/`. `cargo test --test simulate` covers the mode end to end,
 including that two processes of the same seed answer the same bytes.
 
+The board must be able to show every user-visible state the monitor can record: that is the
+rule of ADR-0047, and it is why a target with `degraded_after_ms` set gets `degraded` stretches
+here. Add the simulated form of a new state, event or read surface in the same change that adds
+it to the monitor, gated by the same configuration, and extend `tests/simulate.rs`; a feature
+that cannot be modelled in the generated past is an exception the plan records and the
+operator approves.
+
 ## Web templates and assets
 
 The HTML of both pages sits in `src/web/templates/`: `page.html` for the timeline,

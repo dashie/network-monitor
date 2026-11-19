@@ -427,6 +427,7 @@ pub fn simulated_day(
     seed: u64,
     day_start_ms: i64,
     fault_rate: f64,
+    rules: super::SimulatedRules,
 ) -> Vec<SimulatedEpisode> {
     let Endpoint::Dns { name, resolver, .. } = endpoint else {
         // The dispatcher chooses by method; this line cannot be reached from it.
@@ -438,10 +439,13 @@ pub fn simulated_day(
         .unwrap_or_else(|| "the system resolver".to_string());
     super::simulated_episodes(
         endpoint,
-        seed,
-        day_start_ms,
-        fault_rate,
-        "dns",
+        super::SimulatedSchedule {
+            seed,
+            day_start_ms,
+            fault_rate,
+            rules,
+            purpose: "dns",
+        },
         |rng| rng.between(500, 50_000),
         |rng| {
             let stated = Details {

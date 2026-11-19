@@ -4,7 +4,7 @@
 //! "Data ownership" in docs/ARCHITECTURE.md).
 
 /// Schema version written to `schema_meta` by this binary.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// The schema version that added the single-row `monitor_liveness` table.
 pub const LIVENESS_SCHEMA: i64 = 4;

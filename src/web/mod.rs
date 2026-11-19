@@ -898,6 +898,9 @@ mod tests {
             priority: None,
             timeout: Duration::from_secs(2),
             interval: Duration::from_secs(5),
+            down_after: 1,
+            degraded_after_ms: 0,
+            degraded_after: 3,
         };
         let intervals = TargetIntervals::from_targets(&[target]);
         assert_eq!(
