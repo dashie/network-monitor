@@ -11,11 +11,13 @@ use std::thread;
 use std::time::Duration;
 
 use uptime_monitor::cli::Compression;
+use uptime_monitor::config::Target;
 use uptime_monitor::history::HistorySource;
+use uptime_monitor::probe::Endpoint;
 use uptime_monitor::shutdown::Shutdown;
 use uptime_monitor::store::{DatabaseSource, Event, EventFilter, Store, TargetState};
 use uptime_monitor::time::now_ms;
-use uptime_monitor::web;
+use uptime_monitor::web::{self, TargetIntervals};
 
 struct Server {
     stop: Shutdown,
@@ -179,6 +181,14 @@ fn start(database: &Path) -> Server {
 }
 
 fn start_with(database: &Path, compression: Compression) -> Server {
+    start_with_intervals(database, compression, TargetIntervals::default())
+}
+
+fn start_with_intervals(
+    database: &Path,
+    compression: Compression,
+    intervals: TargetIntervals,
+) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").expect("an ephemeral port");
     let address = listener
         .local_addr()
@@ -189,7 +199,7 @@ fn start_with(database: &Path, compression: Compression) -> Server {
     let source: Arc<dyn HistorySource> = Arc::new(DatabaseSource::new(database));
 
     let handle = thread::spawn(move || {
-        web::serve(listener, source, &running, compression).expect("the server runs");
+        web::serve(listener, source, intervals, &running, compression).expect("the server runs");
     });
 
     let server = Server {
@@ -770,6 +780,33 @@ fn the_page_context_and_its_selector_share_one_line() {
         !detail[..masthead_end].contains("target-info"),
         "the masthead of the detail page carries the identity block and nothing else"
     );
+}
+
+/// The toolbar states the target's effective probe interval as its third part.
+#[test]
+fn the_target_page_states_the_configured_probe_interval() {
+    let (_directory, database) = seeded_database();
+    let intervals = TargetIntervals::from_targets(&[Target {
+        endpoint: Endpoint::Icmp {
+            address: "1.1.1.1".parse().expect("a valid address"),
+        },
+        interface: None,
+        label: Some("probe".to_string()),
+        priority: None,
+        timeout: Duration::from_secs(2),
+        interval: Duration::from_secs(5),
+    }]);
+    let server = start_with_intervals(&database, Compression::Auto, intervals);
+
+    let (status, detail) = server.get("/target?target=1.1.1.1");
+    assert_eq!(status, 200);
+    let identity = detail
+        .find("</span><span class=\"target-interval\">every 5s</span>")
+        .expect("the interval follows the target identity");
+    let crumbs = detail
+        .find("<p class=\"crumbs\">")
+        .expect("the toolbar states the page");
+    assert!(crumbs < identity, "the interval sits on the toolbar line");
 }
 
 /// Both pages close with the same short manual: a rule narrower than the content, then

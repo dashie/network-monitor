@@ -462,6 +462,17 @@ pub fn format_span(ms: i64) -> String {
     format!("{}d{:02}h", hours / 24, hours % 24)
 }
 
+/// A configured interval, exact and never truncated: `2m`, `45s`, `500ms`.
+pub fn format_interval(ms: u64) -> String {
+    if ms % 60_000 == 0 {
+        format!("{}m", ms / 60_000)
+    } else if ms % 1_000 == 0 {
+        format!("{}s", ms / 1_000)
+    } else {
+        format!("{ms}ms")
+    }
+}
+
 /// Mean and spread of the `up` runs of a lane, over the window it shows.
 pub fn runs_stats(segments: &[TimelineSegment]) -> RunStats {
     stats::summarize(&stats::up_runs(segments))
@@ -1472,5 +1483,15 @@ mod tests {
         assert_eq!(format_span(12 * 60_000), "12m");
         assert_eq!(format_span(3 * 3_600_000 + 7 * 60_000), "3h07");
         assert_eq!(format_span(2 * 86_400_000 + 4 * 3_600_000), "2d04h");
+    }
+
+    #[test]
+    fn intervals_are_formatted_exactly() {
+        assert_eq!(format_interval(500), "500ms");
+        assert_eq!(format_interval(1_500), "1500ms");
+        assert_eq!(format_interval(5_000), "5s");
+        assert_eq!(format_interval(60_000), "1m");
+        assert_eq!(format_interval(90_000), "90s");
+        assert_eq!(format_interval(120_000), "2m");
     }
 }

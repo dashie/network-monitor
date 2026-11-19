@@ -11,6 +11,7 @@ pub mod page;
 pub mod stats;
 pub mod templates;
 
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{AddrParseError, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -22,6 +23,7 @@ use flate2::write::GzEncoder;
 use thiserror::Error;
 
 use crate::cli::Compression;
+use crate::config::Target;
 use crate::history::{History, HistoryError, HistorySource};
 use crate::logging;
 use crate::shutdown::{self, Shutdown};
@@ -41,6 +43,35 @@ const RECENT_FAULTS: u32 = 10;
 /// support.
 const ICON_SVG: &str = include_str!("../../assets/icon/icon.svg");
 const ICON_PNG: &[u8] = include_bytes!("../../assets/icon/favicon-32.png");
+
+/// The effective probe interval of every configured target, keyed by canonical key.
+/// The database stores transitions, not configuration, so the server receives this map
+/// from the process that read the configuration; it is a snapshot taken at startup.
+#[derive(Debug, Clone, Default)]
+pub struct TargetIntervals {
+    by_key: HashMap<String, Duration>,
+}
+
+impl TargetIntervals {
+    pub fn from_targets(targets: &[Target]) -> Self {
+        Self {
+            by_key: targets
+                .iter()
+                .map(|target| (target.key(), target.interval))
+                .collect(),
+        }
+    }
+
+    /// The interval of `key`, also accepting a bare address written before methods
+    /// existed, the same fallback `Store::find_target` uses.
+    pub fn get(&self, key: &str) -> Option<Duration> {
+        self.by_key.get(key).copied().or_else(|| {
+            (!key.contains("://"))
+                .then(|| self.by_key.get(&format!("icmp://{key}")).copied())
+                .flatten()
+        })
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum ServeError {
@@ -73,18 +104,20 @@ pub fn bind(listen: &str) -> Result<TcpListener, ServeError> {
 /// Bind the address and serve until shutdown.
 pub fn run(
     source: Arc<dyn HistorySource>,
+    intervals: TargetIntervals,
     listen: &str,
     shutdown: &Shutdown,
     compression: Compression,
 ) -> Result<(), ServeError> {
     let listener = bind(listen)?;
-    serve(listener, source, shutdown, compression)
+    serve(listener, source, intervals, shutdown, compression)
 }
 
 /// Serve on an already bound listener, so a test can ask for port 0.
 pub fn serve(
     listener: TcpListener,
     source: Arc<dyn HistorySource>,
+    intervals: TargetIntervals,
     shutdown: &Shutdown,
     compression: Compression,
 ) -> Result<(), ServeError> {
@@ -113,6 +146,7 @@ pub fn serve(
     // Every accepted connection runs on its own thread and outlives the call, so the
     // source is shared rather than borrowed.
     let active = Arc::new(AtomicUsize::new(0));
+    let intervals = Arc::new(intervals);
     let mut workers = Vec::new();
 
     while !shutdown::stopped(shutdown) {
@@ -124,9 +158,10 @@ pub fn serve(
                 }
                 let source = Arc::clone(&source);
                 let active = Arc::clone(&active);
+                let intervals = Arc::clone(&intervals);
                 workers.push(thread::spawn(move || {
                     let _slot = Slot::enter(&active);
-                    handle(stream, source.as_ref(), compression);
+                    handle(stream, source.as_ref(), intervals.as_ref(), compression);
                 }));
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -171,7 +206,12 @@ impl Drop for Slot {
     }
 }
 
-fn handle(mut stream: TcpStream, source: &dyn HistorySource, compression: Compression) {
+fn handle(
+    mut stream: TcpStream,
+    source: &dyn HistorySource,
+    intervals: &TargetIntervals,
+    compression: Compression,
+) {
     // macOS gives an accepted socket the non-blocking flag of the listener, so a write
     // larger than the socket buffer would fail with `EAGAIN` instead of waiting for the
     // reader. Every answer is written by a blocking socket with a timeout on both sides.
@@ -331,7 +371,16 @@ fn handle(mut stream: TcpStream, source: &dyn HistorySource, compression: Compre
                 }
             };
 
-            let body = detail::target_page(&target, &days, &segments, &recent, now, period_days);
+            let interval = intervals.get(&target.target);
+            let body = detail::target_page(
+                &target,
+                &days,
+                &segments,
+                &recent,
+                now,
+                period_days,
+                interval,
+            );
             respond_page(&mut stream, &body, include_body, gzip);
         }
         // The path the page used before the rows were called faults. Kept for one
@@ -836,6 +885,33 @@ fn resolve_window(from: Option<i64>, to: Option<i64>, hours: Option<u8>, now: i6
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::probe::Endpoint;
+
+    #[test]
+    fn the_interval_of_a_target_is_found_by_its_key_and_by_a_bare_address() {
+        let target = Target {
+            endpoint: Endpoint::Icmp {
+                address: "1.1.1.1".parse().expect("a valid address"),
+            },
+            interface: None,
+            label: None,
+            priority: None,
+            timeout: Duration::from_secs(2),
+            interval: Duration::from_secs(5),
+        };
+        let intervals = TargetIntervals::from_targets(&[target]);
+        assert_eq!(
+            intervals.get("icmp://1.1.1.1"),
+            Some(Duration::from_secs(5)),
+            "the canonical key finds the interval"
+        );
+        assert_eq!(
+            intervals.get("1.1.1.1"),
+            Some(Duration::from_secs(5)),
+            "an older bare key finds the same interval"
+        );
+        assert_eq!(intervals.get("9.9.9.9"), None, "an unknown target has none");
+    }
 
     #[test]
     fn a_slot_counts_a_worker_and_gives_the_count_back_on_the_way_out() {

@@ -664,9 +664,12 @@ is showing, on the left of the line, and carries the control that changes it, on
 - `/target?target=<key>&days=30d` — one target for 30, 60, 90, 180, or 360 days: a bar per day,
   the last 10 faults of that target in the same table as the timeline page, and a per-day table.
   The toolbar states the page on one line, the parts separated by a dot:
-  `HOME • <label> (<address>)`. `HOME` is the way back to the list page — a link to `/`,
-  whatever page you came from —, and the label with the address in parentheses is the target,
-  in bold. Under the toolbar, four widgets: the first states the state of the target — its word
+  `HOME • <label> (<address>) • every <interval>`. `HOME` is the way back to the list page — a
+  link to `/`, whatever page you came from —, and the label with the address in parentheses is
+  the target, in bold. The third part is the target's **probe interval**: its own
+  `interval_ms` when it states one, otherwise the global `interval_ms`, shown as `every 5s`.
+  It is stated only while the target is in the active configuration, and it is not the 30 s
+  reload of the page. Under the toolbar, four widgets: the first states the state of the target — its word
   and how long it has held, white on a tile of the colour the chart gives that state —, and the
   other three state the faults, the down time, and the average `up` run of the period. They
   keep that order at every window width and take one of three shapes: four across while they

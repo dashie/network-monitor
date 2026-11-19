@@ -26,7 +26,7 @@ use uptime_monitor::sim::history::SimulatedSource;
 use uptime_monitor::snapshot;
 use uptime_monitor::store::{DatabaseSource, Store, StoreError};
 use uptime_monitor::time::{format_rfc3339, now_ms};
-use uptime_monitor::web::{self, ServeError};
+use uptime_monitor::web::{self, ServeError, TargetIntervals};
 
 fn main() -> ExitCode {
     match run() {
@@ -155,7 +155,8 @@ fn run() -> Result<ExitCode, AppError> {
                     shutdown::install();
                     let source: Arc<dyn HistorySource> =
                         Arc::new(DatabaseSource::new(settings.database.clone()));
-                    web::run(source, &listen, &stop, compression)?;
+                    let intervals = TargetIntervals::from_targets(&settings.targets);
+                    web::run(source, intervals, &listen, &stop, compression)?;
                 }
                 Some(Command::Simulate {
                     listen,
@@ -174,7 +175,8 @@ fn run() -> Result<ExitCode, AppError> {
                         history.days(),
                         fault_rate.per_day(),
                     ));
-                    web::run(simulated, &listen, &stop, compression)?;
+                    let intervals = TargetIntervals::from_targets(&settings.targets);
+                    web::run(simulated, intervals, &listen, &stop, compression)?;
                 }
                 Some(Command::Import {
                     source,
@@ -680,9 +682,11 @@ fn run_monitor(
             );
             let source: Arc<dyn HistorySource> =
                 Arc::new(DatabaseSource::new(settings.database.clone()));
+            let intervals = TargetIntervals::from_targets(&settings.targets);
             let web_stop = stop.clone();
             Some(std::thread::spawn(move || {
-                if let Err(error) = web::serve(listener, source, &web_stop, compression) {
+                let result = web::serve(listener, source, intervals, &web_stop, compression);
+                if let Err(error) = result {
                     logging::error(None, &format!("web interface failed: {error}"));
                 }
             }))

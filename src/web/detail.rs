@@ -5,12 +5,13 @@
 //! day. No chart library and no client-side data handling, like the timeline.
 
 use std::fmt::Write as _;
+use std::time::Duration;
 
 use crate::history::{DailyDrops, Fault, TargetState, TargetStateRow, TimelineSegment};
 use crate::time::format_rfc3339;
 
 use super::encode;
-use super::page::{escape, faults_table, format_runs, format_span, runs_stats};
+use super::page::{escape, faults_table, format_interval, format_runs, format_span, runs_stats};
 use super::stats;
 
 const WIDTH: f64 = 1000.0;
@@ -46,6 +47,7 @@ pub fn target_page(
     recent: &[Fault],
     now_ms: i64,
     period_days: u32,
+    interval: Option<Duration>,
 ) -> String {
     let name = target
         .label
@@ -61,6 +63,13 @@ pub fn target_page(
             escape(label)
         ),
         None => format!("<span class=\"target-address\">{address}</span>"),
+    };
+    let interval_part = match interval {
+        Some(interval) => format!(
+            "<span class=\"target-interval\">every {}</span>",
+            format_interval(interval.as_millis() as u64)
+        ),
+        None => String::new(),
     };
     let period = format!("{period_days} days");
     let total: u32 = days.iter().map(|day| day.drops).sum();
@@ -97,6 +106,7 @@ pub fn target_page(
         .replace("{brand}", &super::templates::brand())
         .replace("{print_name}", &escape(&name))
         .replace("{identity}", &identity)
+        .replace("{interval}", &interval_part)
         .replace("{state}", target.state.as_str())
         .replace("{held}", &held)
         .replace("{periods}", &period_links(&target.target, period_days))
@@ -367,7 +377,7 @@ mod tests {
     #[test]
     fn the_page_draws_one_bar_per_day_with_drops() {
         let days = [day(0, 2, 90_000), day(1, 0, 0), day(2, 5, 600_000)];
-        let rendered = target_page(&target(), &days, &[], &[], NOW, DEFAULT_PERIOD_DAYS);
+        let rendered = target_page(&target(), &days, &[], &[], NOW, DEFAULT_PERIOD_DAYS, None);
         assert_eq!(rendered.matches("<rect ").count(), 2);
         assert!(rendered.contains("data-format=\"day\" data-suffix=\": 2\">01-01: 2</title>"));
         assert!(rendered.contains("data-suffix=\": 5\">01-03: 5</title>"));
@@ -379,7 +389,7 @@ mod tests {
     #[test]
     fn the_table_lists_every_day_newest_first_with_its_down_time() {
         let days = [day(0, 2, 90_000), day(1, 0, 0), day(2, 5, 600_000)];
-        let rendered = target_page(&target(), &days, &[], &[], NOW, DEFAULT_PERIOD_DAYS);
+        let rendered = target_page(&target(), &days, &[], &[], NOW, DEFAULT_PERIOD_DAYS, None);
         assert_eq!(
             rendered
                 .matches("<tr role=\"row\"><td role=\"cell\">")
@@ -429,6 +439,7 @@ mod tests {
             &recent,
             NOW,
             DEFAULT_PERIOD_DAYS,
+            None,
         );
 
         let list = rendered
@@ -454,7 +465,7 @@ mod tests {
 
     #[test]
     fn a_target_without_a_drop_still_states_the_empty_list() {
-        let rendered = target_page(&target(), &[day(0, 0, 0)], &[], &[], NOW, 30);
+        let rendered = target_page(&target(), &[day(0, 0, 0)], &[], &[], NOW, 30, None);
         assert!(rendered.contains("No fault recorded yet."));
     }
 
@@ -467,6 +478,7 @@ mod tests {
             &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
+            None,
         );
         assert!(
             rendered.contains("<table class=\"days\" role=\"table\">"),
@@ -486,7 +498,7 @@ mod tests {
     #[test]
     fn a_quiet_month_states_zero_disconnections() {
         let days = [day(0, 0, 0), day(1, 0, 0)];
-        let rendered = target_page(&target(), &days, &[], &[], NOW, DEFAULT_PERIOD_DAYS);
+        let rendered = target_page(&target(), &days, &[], &[], NOW, DEFAULT_PERIOD_DAYS, None);
         assert!(!rendered.contains("<rect "), "no day draws a bar");
         assert_eq!(
             rendered
@@ -507,6 +519,7 @@ mod tests {
             &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
+            None,
         );
         assert_eq!(
             rendered
@@ -532,7 +545,7 @@ mod tests {
 
     #[test]
     fn the_page_offers_every_period_and_marks_the_one_shown() {
-        let rendered = target_page(&target(), &[day(0, 1, 60_000)], &[], &[], NOW, 30);
+        let rendered = target_page(&target(), &[day(0, 1, 60_000)], &[], &[], NOW, 30, None);
         for days in PERIODS {
             assert!(
                 rendered.contains(&format!("href=\"/target?target=1.1.1.1&days={days}d\"")),
@@ -551,7 +564,7 @@ mod tests {
     #[test]
     fn a_longer_period_restates_every_figure_it_covers() {
         let days: Vec<DailyDrops> = (0..90).map(|index| day(index, 1, 60_000)).collect();
-        let rendered = target_page(&target(), &days, &[], &[], NOW, 90);
+        let rendered = target_page(&target(), &days, &[], &[], NOW, 90, None);
         assert!(rendered.contains("last 90 days"));
         assert!(rendered.contains("90 faults"));
         assert!(rendered.contains("down time in the last 90 days"));
@@ -574,7 +587,7 @@ mod tests {
     #[test]
     fn a_year_of_days_keeps_the_axis_readable() {
         let days: Vec<DailyDrops> = (0..360).map(|index| day(index, 1, 60_000)).collect();
-        let rendered = target_page(&target(), &days, &[], &[], NOW, 360);
+        let rendered = target_page(&target(), &days, &[], &[], NOW, 360, None);
         let labels = rendered.matches("data-format=\"day\">").count();
         assert!(
             (6..=7).contains(&labels),
@@ -590,7 +603,7 @@ mod tests {
     #[test]
     fn the_counts_keep_their_place_while_the_columns_have_room() {
         let days = [day(0, 2, 90_000), day(1, 0, 0), day(2, 5, 600_000)];
-        let rendered = target_page(&target(), &days, &[], &[], NOW, 30);
+        let rendered = target_page(&target(), &days, &[], &[], NOW, 30, None);
         assert!(rendered.contains("fill=\"#c62828\">2</text>"));
         assert!(rendered.contains("fill=\"#666666\">0</text>"));
     }
@@ -604,6 +617,7 @@ mod tests {
             &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
+            None,
         );
         let back = rendered
             .find("class=\"back-button\"")
@@ -627,7 +641,7 @@ mod tests {
     #[test]
     fn the_page_states_the_state_and_the_total_down_time() {
         let days = [day(0, 2, 90_000), day(1, 0, 0), day(2, 5, 600_000)];
-        let rendered = target_page(&target(), &days, &[], &[], NOW, DEFAULT_PERIOD_DAYS);
+        let rendered = target_page(&target(), &days, &[], &[], NOW, DEFAULT_PERIOD_DAYS, None);
         assert!(
             rendered.contains("<div class=\"stat state up\"><b>up</b>"),
             "the state opens the row of widgets, on a tile of its own colour"
@@ -650,6 +664,7 @@ mod tests {
             &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
+            None,
         );
         assert!(!rendered.contains("<script>alert(1)</script>"));
         assert!(rendered.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
@@ -684,6 +699,7 @@ mod tests {
             &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
+            None,
         );
         assert!(
             rendered.contains("<b>1h15±15m</b>"),
@@ -710,6 +726,7 @@ mod tests {
             &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
+            None,
         );
         assert!(rendered.contains("<b>—</b>"));
         assert!(rendered.contains("no up run in the last 30 days"));
@@ -724,7 +741,15 @@ mod tests {
             to_ms: 51 * 3_600_000,
         }];
         let days = [day(1, 0, 0), day(2, 0, 0)];
-        let rendered = target_page(&target(), &days, &crossing, &[], NOW, DEFAULT_PERIOD_DAYS);
+        let rendered = target_page(
+            &target(),
+            &days,
+            &crossing,
+            &[],
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+            None,
+        );
         assert!(
             rendered.contains(
                 "<td role=\"cell\" class=\"num\" title=\"1 up run that day\">\
@@ -754,6 +779,7 @@ mod tests {
             &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
+            None,
         );
         assert!(
             rendered.contains(
@@ -795,6 +821,7 @@ mod tests {
             &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
+            None,
         );
         assert!(
             rendered.contains("<table class=\"days\" role=\"table\">"),
@@ -825,6 +852,7 @@ mod tests {
             &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
+            None,
         );
         assert!(
             rendered.contains("<span class=\"nowrap\">1h15±15m</span>"),
@@ -856,6 +884,7 @@ mod tests {
             &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
+            None,
         );
         assert!(rendered.contains(
             "<td role=\"cell\" class=\"num current\" title=\"average up run over the last 24 hours: \
@@ -872,7 +901,7 @@ mod tests {
     #[test]
     fn each_bar_states_its_own_count() {
         let days = [day(0, 2, 90_000), day(1, 0, 0), day(2, 5, 600_000)];
-        let rendered = target_page(&target(), &days, &[], &[], NOW, DEFAULT_PERIOD_DAYS);
+        let rendered = target_page(&target(), &days, &[], &[], NOW, DEFAULT_PERIOD_DAYS, None);
         assert!(rendered.contains("fill=\"#c62828\">2</text>"));
         assert!(rendered.contains("fill=\"#c62828\">5</text>"));
         assert!(
@@ -897,6 +926,7 @@ mod tests {
             &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
+            None,
         );
         let stats = rendered
             .find("<div class=\"stats\">")
@@ -957,6 +987,7 @@ mod tests {
             &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
+            None,
         );
         let order: Vec<&str> = [
             "class=\"stat state up\"",
@@ -988,6 +1019,7 @@ mod tests {
             &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
+            None,
         );
         assert!(rendered
             .contains("<div class=\"stat state down\"><b>down</b><span>for 16m</span></div>"));
@@ -1006,6 +1038,7 @@ mod tests {
             &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
+            None,
         );
         assert!(rendered.contains(
             "<div class=\"stat state unknown\"><b>unknown</b><span>current state</span></div>"
@@ -1024,6 +1057,7 @@ mod tests {
             &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
+            None,
         );
         let crumbs = rendered
             .find("<p class=\"crumbs\">")
@@ -1053,6 +1087,48 @@ mod tests {
         );
     }
 
+    /// The configured probe interval is the third part of the toolbar, after the target.
+    #[test]
+    fn the_toolbar_states_the_interval_of_the_target() {
+        let rendered = target_page(
+            &target(),
+            &[day(0, 1, 60_000)],
+            &[],
+            &[],
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+            Some(Duration::from_secs(5)),
+        );
+        let crumbs = rendered
+            .find("<p class=\"crumbs\">")
+            .expect("one line under the masthead");
+        let line = &rendered[crumbs..];
+        let line = &line[..line.find("</p>").expect("the line closes")];
+        assert!(
+            line.contains(
+                "<span class=\"target-identity\"><span class=\"target-label\">cloudflare</span> \
+                 (<span class=\"target-address\">1.1.1.1</span>)</span>\
+                 <span class=\"target-interval\">every 5s</span>"
+            ),
+            "the target, then its interval: {line}"
+        );
+    }
+
+    /// A target the active configuration does not name has no interval to state.
+    #[test]
+    fn a_target_without_a_known_interval_states_only_its_identity() {
+        let rendered = target_page(
+            &target(),
+            &[day(0, 1, 60_000)],
+            &[],
+            &[],
+            NOW,
+            DEFAULT_PERIOD_DAYS,
+            None,
+        );
+        assert!(!rendered.contains("target-interval"), "no empty third part");
+    }
+
     #[test]
     fn a_target_without_a_label_states_its_address_alone() {
         let mut unnamed = target();
@@ -1064,6 +1140,7 @@ mod tests {
             &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
+            None,
         );
         let crumbs = rendered
             .find("<p class=\"crumbs\">")
@@ -1098,6 +1175,7 @@ mod tests {
             &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
+            None,
         );
         assert!(rendered.contains(
             "<time datetime=\"1970-01-01T00:00:00.000Z\" data-format=\"date\" class=\"nowrap\">1970-01-01</time>"
@@ -1123,6 +1201,7 @@ mod tests {
             &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
+            None,
         );
         let start = rendered
             .find("<header class=\"masthead\">")
@@ -1144,12 +1223,12 @@ mod tests {
 
     #[test]
     fn the_printed_header_states_the_target_and_the_period() {
-        let rendered = target_page(&target(), &[day(0, 1, 60_000)], &[], &[], NOW, 30);
+        let rendered = target_page(&target(), &[day(0, 1, 60_000)], &[], &[], NOW, 30, None);
         assert!(rendered.contains("<header class=\"print-head\">"));
         assert!(rendered.contains("<h1>cloudflare</h1>"));
         assert!(rendered.contains("Last 30 days · Disconnections per day"));
 
-        let longer = target_page(&target(), &[day(0, 1, 60_000)], &[], &[], NOW, 90);
+        let longer = target_page(&target(), &[day(0, 1, 60_000)], &[], &[], NOW, 90, None);
         assert!(longer.contains("Last 90 days · Disconnections per day"));
     }
 
@@ -1164,6 +1243,7 @@ mod tests {
             &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
+            None,
         );
         assert!(rendered.contains("<h1>&lt;script&gt;alert(1)&lt;/script&gt;</h1>"));
         assert!(!rendered.contains("<h1><script>"));
@@ -1178,6 +1258,7 @@ mod tests {
             &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
+            None,
         );
         let section = rendered
             .find("<section class=\"recent\">")
@@ -1202,6 +1283,7 @@ mod tests {
             &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
+            None,
         );
         assert!(rendered.contains("<h2 class=\"chart-title\">Disconnections per day</h2>"));
         assert!(rendered.contains("<h2 class=\"days-title\">Day by day</h2>"));
@@ -1270,6 +1352,7 @@ mod tests {
             &[],
             NOW,
             DEFAULT_PERIOD_DAYS,
+            None,
         );
         assert!(
             rendered.contains("<html lang=\"en\" class=\"target-page\">"),
