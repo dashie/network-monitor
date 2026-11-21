@@ -149,19 +149,13 @@ mark and the favicon without reading the disk.
 
 ### Diagrams
 
-`docs/ARCHITECTURE.md` carries three [PlantUML](https://plantuml.com) diagrams — the C4 context,
-the C4 containers, and the runtime sequence — as `@startuml` blocks inside `plantuml` fences.
-They are the source, not an export: edit the text in the document and render it to check the
-result.
-
-```bash
-plantuml -tsvg docs/ARCHITECTURE.md     # every @startuml block, into the working directory
-```
-
-The two C4 diagrams use the C4-PlantUML standard library, which ships inside the PlantUML jar, so
-rendering needs no network. Without Graphviz on the machine, add `-Playout=smetana` to lay the
-diagram out with the engine inside the jar. GitHub shows the blocks as source: the tables under
-each diagram state the same content for a reader who does not render them.
+`docs/ARCHITECTURE.md` carries three [Mermaid](https://mermaid.js.org) diagrams — the C4 context,
+the C4 containers, and the runtime sequence — inside `mermaid` fences. They are the source, not an
+export: edit the text in the document, and GitHub, VS Code, and any editor with Mermaid support
+render it, so nothing must be installed and no image is generated. The two C4 views are written as
+Mermaid flowcharts, which every Mermaid renderer supports, and the runtime view as a
+`sequenceDiagram`; the tables under each diagram state the same content for a reader whose viewer
+does not render them.
 
 ## Build
 

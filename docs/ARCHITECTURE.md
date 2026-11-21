@@ -1,8 +1,8 @@
 # Architecture — uptime-monitor
 
 This document follows [arc42](https://arc42.org) and uses C4 diagrams, written in
-[PlantUML](https://plantuml.com) (`@startuml` blocks in `plantuml` fences, rendered with
-`plantuml docs/ARCHITECTURE.md`). Product intent lives in [PRODUCT.md](./PRODUCT.md);
+[Mermaid](https://mermaid.js.org) (`mermaid` fences, rendered by GitHub and by any editor
+with Mermaid support). Product intent lives in [PRODUCT.md](./PRODUCT.md);
 decisions and their rationale live in [ADR.md](./ADR.md).
 
 ## 1. Introduction and goals
@@ -31,31 +31,34 @@ Top quality goals, in order:
 
 ## 3. Context and scope
 
-```plantuml
-@startuml
-!include <C4/C4_Context>
+```mermaid
+%% System context — uptime-monitor
+flowchart LR
+    operator["Operator<br/>Writes the TOML configuration, starts the monitor, reads the history"]
+    monitor["uptime-monitor<br/>Probes targets with ICMP echo requests and records state transitions"]
 
-title System context — uptime-monitor
+    hosts["Monitored hosts (external)<br/>IP endpoints that answer, or do not answer, ICMP echo requests"]
+    os["Operating system (external)<br/>Provides raw ICMP sockets, the routing table, and interface binding"]
+    runtime["Container runtime (external)<br/>Runs the image on a NAS or server, granting NET_RAW"]
+    consumer["Query consumer (external)<br/>Reads the event database through the query command or any SQLite client"]
+    telegram["Telegram Bot API (external)<br/>Receives one message per incident when the channel is enabled"]
+    hook["Webhook endpoint (external)<br/>Receives one JSON document per reported event when the channel is enabled"]
 
-Person(operator, "Operator", "Writes the TOML configuration, starts the monitor, reads the history")
-System(monitor, "uptime-monitor", "Probes targets with ICMP echo requests and records state transitions")
+    operator -->|"runs and configures — CLI + TOML"| monitor
+    operator -->|"runs queries — CLI"| consumer
+    runtime -->|"launches — Docker"| monitor
+    monitor -->|"opens raw sockets, binds an interface — syscalls"| os
+    monitor -->|"sends echo requests, receives replies — ICMP"| hosts
+    monitor -->|"posts a state change when the channel is enabled — HTTPS"| telegram
+    monitor -->|"posts a JSON document when the channel is enabled — HTTP/HTTPS"| hook
+    monitor -->|"exposes the event database — SQLite WAL"| consumer
 
-System_Ext(hosts, "Monitored hosts", "IP endpoints that answer, or do not answer, ICMP echo requests")
-System_Ext(os, "Operating system", "Provides raw ICMP sockets, the routing table, and interface binding")
-System_Ext(runtime, "Container runtime", "Runs the image on a NAS or server, granting NET_RAW")
-System_Ext(consumer, "Query consumer", "Reads the event database through the query command or any SQLite client")
-System_Ext(telegram, "Telegram Bot API", "Receives one message per incident when the channel is enabled")
-System_Ext(hook, "Webhook endpoint", "Receives one JSON document per reported event when the channel is enabled")
-
-Rel(operator, monitor, "Runs and configures", "CLI + TOML")
-Rel(operator, consumer, "Runs queries", "CLI")
-Rel(runtime, monitor, "Launches", "Docker")
-Rel(monitor, os, "Opens raw sockets, binds an interface", "syscalls")
-Rel(monitor, hosts, "Sends echo requests, receives replies", "ICMP")
-Rel(monitor, telegram, "Posts a state change when the channel is enabled", "HTTPS")
-Rel(monitor, hook, "Posts a JSON document when the channel is enabled", "HTTP/HTTPS")
-Rel(monitor, consumer, "Exposes the event database", "SQLite WAL")
-@enduml
+    classDef person fill:#08427b,stroke:#052e56,color:#ffffff
+    classDef system fill:#1168bd,stroke:#0b4884,color:#ffffff
+    classDef external fill:#999999,stroke:#6b6b6b,color:#ffffff
+    class operator person
+    class monitor system
+    class hosts,os,runtime,consumer,telegram,hook external
 ```
 
 | External element | Input to the system | Output from the system |
@@ -107,25 +110,30 @@ Fixed principles that constrain every design decision and every change:
 
 ## 5. Building block view
 
-```plantuml
-@startuml
-!include <C4/C4_Container>
+```mermaid
+%% Containers — uptime-monitor
+flowchart LR
+    operator["Operator<br/>Configures and queries the monitor"]
 
-title Containers — uptime-monitor
+    subgraph system["uptime-monitor"]
+        cli["uptime-monitor executable<br/>Rust, static binary<br/>Parses configuration, probes targets, writes transitions, renders queries"]
+        db[("Event database<br/>SQLite, WAL<br/>Append-only transition events and the current state of each target")]
+    end
 
-Person(operator, "Operator", "Configures and queries the monitor")
+    os["Operating system (external)<br/>Raw ICMP sockets and interface binding"]
+    hosts["Monitored hosts (external)<br/>ICMP echo responders"]
 
-Container(cli, "uptime-monitor executable", "Rust, static binary", "Parses configuration, probes targets, writes transitions, renders queries")
-ContainerDb(db, "Event database", "SQLite, WAL", "Append-only transition events and the current state of each target")
+    operator -->|"runs monitor and query — CLI"| cli
+    cli -->|"reads and writes — SQLite file"| db
+    cli -->|"opens a raw socket, binds the interface — syscalls"| os
+    cli -->|"sends echo requests — ICMP"| hosts
 
-System_Ext(os, "Operating system", "Raw ICMP sockets and interface binding")
-System_Ext(hosts, "Monitored hosts", "ICMP echo responders")
-
-Rel(operator, cli, "Runs monitor and query", "CLI")
-Rel(cli, db, "Reads and writes", "SQLite file")
-Rel(cli, os, "Opens a raw socket, binds the interface", "syscalls")
-Rel(cli, hosts, "Sends echo requests", "ICMP")
-@enduml
+    classDef person fill:#08427b,stroke:#052e56,color:#ffffff
+    classDef container fill:#1168bd,stroke:#0b4884,color:#ffffff
+    classDef external fill:#999999,stroke:#6b6b6b,color:#ffffff
+    class operator person
+    class cli,db container
+    class os,hosts external
 ```
 
 | Component | Responsibility | Published contract |
@@ -382,33 +390,32 @@ CREATE TABLE IF NOT EXISTS monitor_liveness (
 
 The main flow: an operator starts the monitor, a target stops answering, and a second process reads the transition while monitoring continues.
 
-```plantuml
-@startuml
-autonumber
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Op as Operator shell
+    participant Mon as monitor
+    participant Pr as probe (ICMP)
+    participant St as store (SQLite)
+    participant Q as query
 
-participant "Operator shell" as Op
-participant "monitor" as Mon
-participant "probe (ICMP)" as Pr
-participant "store (SQLite)" as St
-participant "query" as Q
-
-Op -> Mon : monitor --config uptime-monitor.toml
-Mon -> St : open database, migrate, load current state
-Mon -> St : begin_run (record a gap, upsert liveness)
-loop every interval_ms, per target, heartbeat when due
-    Mon -> Pr : probe(target, interface)
-    Pr -> Pr : open raw socket, bind interface, send echo, wait timeout_ms
-    Pr --> Mon : Up(rtt) | Down | LocalError
-    alt verdict differs from current state
-        Mon -> St : BEGIN, INSERT event, UPDATE targets, COMMIT
-    else verdict unchanged
-        Mon -> Mon : discard, no write
+    Op->>Mon: monitor --config uptime-monitor.toml
+    Mon->>St: open database, migrate, load current state
+    Mon->>St: begin_run (record a gap, upsert liveness)
+    loop every interval_ms, per target, heartbeat when due
+        Mon->>Pr: probe(target, interface)
+        Pr->>Pr: open raw socket, bind interface, send echo, wait timeout_ms
+        Pr-->>Mon: Up(rtt) | Down | LocalError
+        alt verdict differs from current state
+            Mon->>St: BEGIN, INSERT event, UPDATE targets, COMMIT
+        else verdict unchanged
+            Mon->>Mon: discard, no write
+        end
     end
-end
-Q -> St : SELECT events WHERE target = ? (read-only, WAL)
-St --> Q : rows
-Op -> Mon : SIGTERM
-Mon -> St : stop workers, end_run, close connection
+    Q->>St: SELECT events WHERE target = ? (read-only, WAL)
+    St-->>Q: rows
+    Op->>Mon: SIGTERM
+    Mon->>St: stop workers, end_run, close connection
 ```
 
 Takeaway: the write path is one transaction per transition, and the read path never waits for the probing loop.
